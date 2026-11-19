@@ -24,6 +24,8 @@ impl MailApp {
         });
         let same = self.source == source && self.query.is_none() && self.mail_in_view();
         self.leave_panes(cx);
+        self.drawer_open = false;
+        self.compact_search = false;
         self.context_menu = None;
         self.tag_editor = None;
         self.source = source;
@@ -44,6 +46,7 @@ impl MailApp {
     /// Shows Google Chat: every account's spaces (None) or one account's.
     pub fn select_chat(&mut self, account: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_panes(cx);
+        self.drawer_open = false;
         self.chat_view = Some(account.clone());
         self.context_menu = None;
         self.tag_editor = None;
@@ -58,6 +61,7 @@ impl MailApp {
             chat.close_video_lightbox(window, cx);
         });
         self.chat_view = None;
+        self.drawer_open = false;
         self.calendar_view = true;
         self.context_menu = None;
         self.tag_editor = None;
@@ -146,6 +150,7 @@ impl MailApp {
     /// Esc in the search field clears it, ends the search and gives the keys back to the list.
     pub fn cancel_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |search, cx| search.clean(window, cx));
+        self.compact_search = false;
         self.end_search(cx);
         window.focus(&self.focus, cx);
         cx.notify();
@@ -154,6 +159,7 @@ impl MailApp {
     /// The search's layer goes and the list beneath it is the list on screen again, as it lay.
     fn end_search(&mut self, cx: &mut Context<Self>) {
         if self.query.take().is_some() {
+            self.compact_search = false;
             self.layers.retain(|layer| !matches!(layer, Layer::Search));
             match self.beneath.take() {
                 Some(beneath) => {
@@ -458,6 +464,24 @@ impl MailApp {
         cx.notify();
     }
 
+    pub fn open_drawer(&mut self, cx: &mut Context<Self>) {
+        self.drawer_open = true;
+        cx.notify();
+    }
+
+    pub fn close_drawer(&mut self, cx: &mut Context<Self>) {
+        if self.drawer_open {
+            self.drawer_open = false;
+            cx.notify();
+        }
+    }
+
+    pub fn open_compact_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.compact_search = true;
+        self.search.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
     pub fn open_context_menu(
         &mut self,
         id: String,
@@ -612,6 +636,11 @@ impl MailApp {
         {
             return;
         }
+        if self.drawer_open {
+            self.drawer_open = false;
+            cx.notify();
+            return;
+        }
         if self.clear_selection(cx) {
             return;
         }
@@ -622,6 +651,9 @@ impl MailApp {
         } else if self.query.is_some() {
             self.search.update(cx, |search, cx| search.clean(window, cx));
             self.end_search(cx);
+        } else if self.compact_search {
+            self.compact_search = false;
+            self.search.update(cx, |search, cx| search.clean(window, cx));
         }
         window.focus(&self.focus, cx);
         cx.notify();

@@ -339,8 +339,13 @@ pub fn safe_area_insets() -> (f32, f32, f32, f32) {
             }
         }
     }
-    #[cfg(not(target_os = "ios"))]
-    {}
+    #[cfg(target_os = "android")]
+    {
+        if let Some(win) = android::jni::shared_platform().and_then(|p| p.0.primary_window()) {
+            let insets = win.safe_area_insets_logical();
+            return (insets.top, insets.bottom, insets.left, insets.right);
+        }
+    }
     (0.0, 0.0, 0.0, 0.0)
 }
 

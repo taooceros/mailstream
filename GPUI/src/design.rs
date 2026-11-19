@@ -692,6 +692,10 @@ pub mod layout {
     pub const CAPSULE_PADDING: f32 = 3.0;
     /// From this window width the conversation opens beside the list instead of over it.
     pub const TWO_PANE_WIDTH: f32 = 1000.0;
+    /// Below this window width (phones and very narrow windows), the app switches from the
+    /// desktop sidebar/rail + floating islands to the compact mobile shell (top bar, bottom nav,
+    /// slide-over drawer, full-bleed views).
+    pub const COMPACT_WIDTH: f32 = 600.0;
     /// The narrowest list and page (the list's share is the engine's `gpui.listWidth`).
     pub const MIN_LIST: f32 = 300.0;
     pub const MIN_DETAIL: f32 = 420.0;
@@ -699,6 +703,38 @@ pub mod layout {
     pub const READING_WIDTH: f32 = 720.0;
     pub const MENU_WIDTH: f32 = 236.0;
     pub const MENU_ROW: f32 = 26.0;
+}
+
+/// Small-screen (phone) shell metrics: full-bleed views, thumb-zone bottom bar & FAB,
+/// slide-over navigation drawer, and high-density 3-line touch rows (MS-408).
+pub mod compact {
+    pub const TOP_BAR_HEIGHT: f32 = 52.0;
+    pub const BOTTOM_BAR_HEIGHT: f32 = 60.0;
+    pub const BOTTOM_PILL_WIDTH: f32 = 54.0;
+    pub const BOTTOM_PILL_HEIGHT: f32 = 28.0;
+    pub const DRAWER_WIDTH: f32 = 284.0;
+    pub const DRAWER_ROW: f32 = 42.0;
+    pub const ROW_HEIGHT: f32 = 78.0;
+    pub const BUNDLE_ROW_HEIGHT: f32 = 64.0;
+    pub const AVATAR: f32 = 38.0;
+    pub const TOUCH_BUTTON: f32 = 38.0;
+    pub const FAB_SIZE: f32 = 52.0;
+    pub const FAB_RADIUS: f32 = 16.0;
+    pub const REPLY_BAR_HEIGHT: f32 = 56.0;
+    pub const READER_PADDING: f32 = 12.0;
+    pub const TITLE_SIZE: f32 = 19.0;
+
+    static SAFE_AREA: std::sync::OnceLock<fn() -> (f32, f32, f32, f32)> = std::sync::OnceLock::new();
+
+    /// Registers the platform safe-area inset provider (top, bottom, left, right in logical points).
+    pub fn set_safe_area_provider(provider: fn() -> (f32, f32, f32, f32)) {
+        let _ = SAFE_AREA.set(provider);
+    }
+
+    /// Current platform safe-area insets `(top, bottom, left, right)` in logical points.
+    pub fn safe_area_insets() -> (f32, f32, f32, f32) {
+        SAFE_AREA.get().map_or((0., 0., 0., 0.), |f| f())
+    }
 }
 
 /// Google Chat: the space's log (its rows are `message_log`'s), composer and attachments.

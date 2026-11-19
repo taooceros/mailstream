@@ -7,13 +7,28 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 POC="$ROOT/AndroidPoc"
 PROFILE="${1:-release}"
 
+sdk_roots() {
+  for dir in \
+    "${ANDROID_SDK_ROOT:-}" \
+    "${ANDROID_HOME:-}" \
+    "/opt/homebrew/share/android-commandlinetools" \
+    "$HOME/Library/Android/sdk" \
+    "$HOME/Android/Sdk"; do
+    [[ -n "$dir" && -d "$dir" ]] && echo "$dir"
+  done
+}
+
 find_ndk() {
   if [[ -n "${ANDROID_NDK_HOME:-}" && -d "$ANDROID_NDK_HOME" ]]; then
     echo "$ANDROID_NDK_HOME"; return
   fi
-  local found
+  local found=""
+  while IFS= read -r root; do
+    found="$(ls -d "$root"/ndk/* 2>/dev/null | sort -V | tail -n1 || true)"
+    [[ -n "$found" ]] && { echo "$found"; return; }
+  done < <(sdk_roots)
   found="$(ls -d /nix/store/*-android-sdk-ndk-*/libexec/android-sdk/ndk/* 2>/dev/null | sort -V | tail -n1 || true)"
-  [[ -n "$found" ]] || { echo "error: ANDROID_NDK_HOME not set and no nix NDK found" >&2; exit 1; }
+  [[ -n "$found" ]] || { echo "error: ANDROID_NDK_HOME not set and no Android NDK found" >&2; exit 1; }
   echo "$found"
 }
 
@@ -21,9 +36,13 @@ find_build_tools() {
   if [[ -n "${ANDROID_BUILD_TOOLS:-}" && -d "$ANDROID_BUILD_TOOLS" ]]; then
     echo "$ANDROID_BUILD_TOOLS"; return
   fi
-  local found
+  local found=""
+  while IFS= read -r root; do
+    found="$(ls -d "$root"/build-tools/* 2>/dev/null | sort -V | tail -n1 || true)"
+    [[ -n "$found" ]] && { echo "$found"; return; }
+  done < <(sdk_roots)
   found="$(ls -d /nix/store/*-android-sdk-build-tools-*/libexec/android-sdk/build-tools/* 2>/dev/null | sort -V | tail -n1 || true)"
-  [[ -n "$found" ]] || { echo "error: ANDROID_BUILD_TOOLS not set and no nix build-tools found" >&2; exit 1; }
+  [[ -n "$found" ]] || { echo "error: ANDROID_BUILD_TOOLS not set and no build-tools found" >&2; exit 1; }
   echo "$found"
 }
 
@@ -31,18 +50,26 @@ find_android_jar() {
   if [[ -n "${ANDROID_PLATFORM_JAR:-}" && -f "$ANDROID_PLATFORM_JAR" ]]; then
     echo "$ANDROID_PLATFORM_JAR"; return
   fi
-  local found
+  local found=""
+  while IFS= read -r root; do
+    found="$(ls "$root"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -n1 || true)"
+    [[ -n "$found" ]] && { echo "$found"; return; }
+  done < <(sdk_roots)
   found="$(ls /nix/store/*-android-sdk-platforms-*/libexec/android-sdk/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -n1 || true)"
-  [[ -n "$found" ]] || { echo "error: ANDROID_PLATFORM_JAR not set and no nix android.jar found" >&2; exit 1; }
+  [[ -n "$found" ]] || { echo "error: ANDROID_PLATFORM_JAR not set and no android.jar found" >&2; exit 1; }
   echo "$found"
 }
 
 NDK="$(find_ndk)"
 BUILD_TOOLS="$(find_build_tools)"
 ANDROID_JAR="$(find_android_jar)"
-TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  HOST_TAG="darwin-x86_64"
+else
+  HOST_TAG="linux-x86_64"
+fi
+TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin"
 API_LEVEL=26
-
 export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang"
 export CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-clang++"
 export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
@@ -110,16 +137,19 @@ PY
 echo "==> Aligning APK with zipalign"
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT_DIR/unaligned.apk" "$OUT_DIR/aligned.apk"
 
-KEYSTORE="$OUT_DIR/debug.keystore"
-keytool -genkeypair -v \
-  -keystore "$KEYSTORE" \
-  -storepass android \
-  -keypass android \
-  -alias androiddebugkey \
-  -keyalg RSA \
-  -keysize 2048 \
-  -validity 10000 \
-  -dname "CN=Mailstream PoC,O=Mailstream,C=US" >/dev/null 2>&1
+KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
+if [[ ! -f "$KEYSTORE" ]]; then
+  mkdir -p "$(dirname "$KEYSTORE")"
+  keytool -genkeypair -v \
+    -keystore "$KEYSTORE" \
+    -storepass android \
+    -keypass android \
+    -alias androiddebugkey \
+    -keyalg RSA \
+    -keysize 2048 \
+    -validity 10000 \
+    -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+fi
 
 FINAL_APK="$OUT_DIR/mailstream-android-poc-arm64-$PROFILE.apk"
 echo "==> Signing APK with apksigner"

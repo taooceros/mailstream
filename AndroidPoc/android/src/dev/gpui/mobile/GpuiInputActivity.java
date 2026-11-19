@@ -4,11 +4,17 @@ import android.app.NativeActivity;
 import android.content.Context;
 import android.os.Bundle;
 import android.text.InputType;
+import android.content.res.Configuration;
+import android.graphics.Insets;
+import android.os.Build;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -28,7 +34,12 @@ public class GpuiInputActivity extends NativeActivity {
     private int inputKind = 0;
     private ImeProxyView imeProxy;
 
+    static {
+        System.loadLibrary("mailstream_android_poc");
+    }
+
     private static native void nativeIme(long session, int kind, String text, int start, int end);
+    private static native void nativeInsets(int top, int bottom, int left, int right, float density);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -41,6 +52,40 @@ public class GpuiInputActivity extends NativeActivity {
         if (content != null) {
             content.addView(imeProxy, new FrameLayout.LayoutParams(1, 1));
         }
+        final View decor = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            boolean night = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                    == Configuration.UI_MODE_NIGHT_YES;
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                int lightFlags = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(night ? 0 : lightFlags, lightFlags);
+            }
+        }
+        decor.setOnApplyWindowInsetsListener((v, insets) -> {
+            int top, bottom, left, right;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                top = bars.top;
+                bottom = bars.bottom;
+                left = bars.left;
+                right = bars.right;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+                left = insets.getSystemWindowInsetLeft();
+                right = insets.getSystemWindowInsetRight();
+            }
+            float density = getResources().getDisplayMetrics().density;
+            if (density <= 0f) density = 1f;
+            try {
+                nativeInsets(top, bottom, left, right, density);
+            } catch (UnsatisfiedLinkError ignored) {
+            }
+            return v.onApplyWindowInsets(insets);
+        });
+        decor.requestApplyInsets();
     }
 
     public void gpuiShowKeyboard(final int kind, final long session) {

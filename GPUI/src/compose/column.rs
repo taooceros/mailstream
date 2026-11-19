@@ -433,23 +433,26 @@ impl ComposeColumn {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title),
             )
-            .child(
+            .child({
+                let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
                 capsule(p)
-                    .when(self.tabs.len() == 1, |d| d.child(new_draft_button("compose-new", p, cx)))
-                    .when(!self.floating, |d| {
+                    .when(self.tabs.len() == 1 && !compact, |d| d.child(new_draft_button("compose-new", p, cx)))
+                    .when(!self.floating && !compact, |d| {
                         d.child(
                             icon_button("compose-swap", Icon::Swap, swap_tip, true, p.glyph)
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_swapped(cx))),
                         )
                     })
-                    .child(
-                        icon_button("compose-float", float_glyph, float_tip, true, p.glyph)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_floating(cx))),
-                    )
+                    .when(!compact, |d| {
+                        d.child(
+                            icon_button("compose-float", float_glyph, float_tip, true, p.glyph)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_floating(cx))),
+                        )
+                    })
                     .child(icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.glyph).on_click(
                         move |_, window, cx| attach_draft.update(cx, |draft, cx| draft.pick_files(&Attach, window, cx)),
-                    )),
-            )
+                    ))
+            })
             .child(
                 send_button("compose-send", sending, p)
                     .on_click(move |_, window, cx| send_draft.update(cx, |draft, cx| draft.send(window, cx))),
@@ -508,7 +511,13 @@ impl Render for ComposeColumn {
         let cancel_action = draft.clone();
         let close_action = draft.clone();
         let attach_action = draft.clone();
-        island(p.background, p)
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let container = if compact {
+            div().relative().overflow_hidden().bg(p.background)
+        } else {
+            island(p.background, p).when(self.floating, |d| d.shadow(p.popover_shadow.clone()))
+        };
+        container
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(move |action: &Send, window, cx| {
@@ -527,8 +536,6 @@ impl Render for ComposeColumn {
             .size_full()
             .flex()
             .flex_col()
-            // Floating, it is lifted over the islands beneath as a popover is.
-            .when(self.floating, |d| d.shadow(p.popover_shadow.clone()))
             .font_family(design::ui_font())
             .text_size(px(text::BODY))
             .text_color(p.text)
@@ -537,7 +544,7 @@ impl Render for ComposeColumn {
             .when(self.tabs.len() > 1, |d| d.child(self.render_tabs(p, cx)).child(hairline(p)))
             .child(self.render_title_bar(&draft, p, window, cx))
             .child(div().flex_1().min_h_0().child(draft))
-            .when(self.floating, |d| {
+            .when(self.floating && !compact, |d| {
                 d.child(
                     div()
                         .id("compose-size")
