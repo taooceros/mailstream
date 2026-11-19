@@ -735,6 +735,7 @@ fn blitz_html(
     p: &Palette,
     focus: &FocusHandle,
 ) -> AnyElement {
+    blitz_body::keep(&key);
     let height = blitz_body::height(&key).unwrap_or(40.);
     let paper = p.dark && blitz_body::paper(&key);
     let theme = html_theme(p);

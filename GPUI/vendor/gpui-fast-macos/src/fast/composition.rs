@@ -347,20 +347,44 @@ fn send_window_event(this: &AnyObject, event: Id, superclass: &AnyClass) {
         }
         return;
     }
-    let previous = {
+    // Mailstream patch (MS-410): GPUI did not observe `wheel` above when `!forward`; leaving
+    // `native_event` unset lets a non-scrolling native view (such as `MailWebView`) forward
+    // `scrollWheel:` to GPUI's host view, while `forwarding_scroll` stops `complete_event` from
+    // bouncing the same event back to the native view.
+    let (previous_event, previous_forwarding) = {
         let mut state = state.lock();
         if observe && !up {
             state.fast_composition.native_buttons |= button;
             state.fast_composition.native_owner = native;
         }
-        let previous = state.fast_composition.native_event;
-        state.fast_composition.native_event = event as usize;
-        previous
+        let previous_event = if wheel {
+            None
+        } else {
+            Some(std::mem::replace(
+                &mut state.fast_composition.native_event,
+                event as usize,
+            ))
+        };
+        let previous_forwarding = if wheel {
+            Some(std::mem::replace(
+                &mut state.fast_composition.forwarding_scroll,
+                true,
+            ))
+        } else {
+            None
+        };
+        (previous_event, previous_forwarding)
     };
     unsafe {
         let _: () = msg_send![super(this, superclass), sendEvent: event];
     }
-    state.lock().fast_composition.native_event = previous;
+    let mut state = state.lock();
+    if let Some(previous) = previous_event {
+        state.fast_composition.native_event = previous;
+    }
+    if let Some(previous) = previous_forwarding {
+        state.fast_composition.forwarding_scroll = previous;
+    }
 }
 
 /// Whether AppKit hit-tests `event` outside the window's view `root`: to the

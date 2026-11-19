@@ -37,12 +37,20 @@ resolver = "3"
 # hitboxes that had no recorded owner before a native surface existed (`src/fast/composition.rs`,
 # `src/window.rs`, `src/fast/splice.rs`), so retained deferred overlays stay interactive above
 # native Mac web views that appear after them.
+# With MS-410: window composition (`src/fast/composition.rs`) blocks hover/click behind native
+# surfaces without blocking scroll hitboxes or GPUI scroll bubbling for OS-managed native views
+# that forward wheel events back to GPUI (`WKWebView`), and scroll layers (`src/fast/layers/paint.rs`)
+# bypass compositing for scroll containers intersecting a visible native surface.
 # `GPUI/vendor/gpui-fast-macos` is GPUI Fast's Mac platform 0.1.14 spreading each mouse-wheel step
 # over a short ease-out instead of applying it in one frame (MS-225, `src/wheel_motion.rs` and its
 # use in `window.rs`, marked "Mailstream patch"); touchpads and Magic Mice keep AppKit's own deltas
 # and momentum. (The Mac's text checking is the app's own, on gpui-kit's input: MS-351,
 # `GPUI/src/text_checking.rs`.)
 # With MS-407: macOS `Pasteboard` also reads and writes `public.html` alongside plain text.
+# With MS-410: `src/fast/composition.rs` leaves `native_event` unset (and sets `forwarding_scroll`)
+# for unobserved wheel events so non-scrolling native views (`MailWebView::scroll_wheel`) can
+# forward `scrollWheel:` to the GPUI host view without `native_event_observed` dropping it or
+# `forward_unhandled_scroll` looping it back.
 # `Engine/vendor/h2` is h2 0.4.20 (HTTP/2 under reqwest) with hyperium/h2 PR #972 (MS-297, in
 # `src/proto/streams/counts.rs`, marked "Mailstream patch"): 0.4.20 accepts 100 empty DATA frames
 # over a connection's life and then closes it with `too_many_data_frames`, and Google's front end

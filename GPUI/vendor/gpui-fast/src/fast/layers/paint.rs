@@ -161,6 +161,13 @@ fn begin_scrolling_children(
     if !scrolls(style) || inside_layer(window) || !active(window, cx) {
         return bypass;
     }
+    // Mailstream patch (MS-410): a scroll container hosting a native composition surface (such as
+    // macOS `WKWebView`) must paint every frame against the real viewport rather than compositing
+    // cached tiles or expanding the content mask to overscan.
+    if crate::fast::composition::intersects_native_surface(window, bounds) {
+        window.fast_layers.layers.remove(id);
+        return bypass;
+    }
     let viewport = window.content_mask().bounds;
     let decision = policy::decide(window, cx, id, bounds, content_size, scroll_offset);
     let mut decision = crate::fast::layers::input::decide(window, id, decision);

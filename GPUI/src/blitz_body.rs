@@ -18,7 +18,7 @@
 //! page on paper ([`paper`]) is opaque white.
 //!
 //! Each frame starts with [`begin_frame`] (painted first, at the window root), which closes the
-//! pages no placeholder painted in the frame before and frees their tiles; [`paint`] draws one.
+//! pages no placeholder rendered this frame ([`keep`]) and frees their tiles; [`paint`] draws one.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -89,7 +89,9 @@ struct Entry {
     tiles: HashMap<usize, Tile>,
     /// The generation each tile being drawn was asked for in.
     drawing: HashMap<usize, u64>,
-    painted: bool,
+    /// Marked by [`keep`] during render so [`begin_frame`] retains the page even when a composited
+    /// `gpui-fast` scroll layer skips calling [`paint`].
+    live: bool,
     /// The pointer, in page points, while over the body; and whether a link lies under it.
     hovered: Option<Point<f32>>,
     asking_link: bool,
@@ -153,13 +155,23 @@ pub fn blocked(id: &str) -> bool {
 /// What a message's id takes for the key of its quoted history's page.
 pub const QUOTED: &str = "#quoted";
 
-/// Starts a frame of the window: closes the pages not painted last frame and frees the tiles no
-/// longer shown.
+/// Marks the page under `key` as still rendered this frame, so [`begin_frame`] keeps it and its
+/// tiles alive even if a composited `gpui-fast` scroll layer skips [`paint`].
+pub fn keep(key: &SharedString) {
+    PAGES.with_borrow_mut(|pages| {
+        if let Some(entry) = pages.entries.get_mut(key) {
+            entry.live = true;
+        }
+    });
+}
+
+/// Starts a frame of the window: closes the pages not kept by this frame's render and frees the
+/// tiles no longer shown.
 pub fn begin_frame(window: &mut Window) {
     let retired = PAGES.with_borrow_mut(|pages| {
         let mut retired = std::mem::take(&mut pages.retired);
         pages.entries.retain(|_, entry| {
-            let keep = std::mem::take(&mut entry.painted);
+            let keep = std::mem::take(&mut entry.live);
             if !keep {
                 retired.extend(entry.tiles.drain().map(|(_, tile)| tile.image));
             }
@@ -219,7 +231,6 @@ pub fn paint(
                 page.load_remote();
             }
         }
-        entry.painted = true;
         let Some(page) = entry.page.clone() else { return false };
         if entry.asked != Some((width, scale)) {
             entry.asked = Some((width, scale));
@@ -664,7 +675,7 @@ mod tests {
         let mut entry = super::Entry::default();
         entry.page = Some(page);
         entry.selected = true;
-        entry.painted = true;
+        entry.live = true;
         super::PAGES.with_borrow_mut(|pages| {
             pages.entries.insert(key.clone(), entry);
         });
@@ -687,5 +698,154 @@ mod tests {
         super::PAGES.with_borrow_mut(|pages| {
             pages.entries.remove(&key);
         });
+    }
+
+    /// Continuous scrolling promotes the reader to a `gpui-fast` scroll layer whose composited
+    /// frames skip painting children; `keep` during render must retain the Blitz page and its
+    /// tiles across composited frames, while stopping render must still close the page (MS-410).
+    #[gpui::test]
+    fn continuous_scroll_keeps_blitz_page_alive_and_advances(cx: &mut TestAppContext) {
+        use gpui::{
+            ScrollDelta, ScrollEvent, ScrollHandle, SharedString, StatefulInteractiveElement as _, TouchPhase, canvas,
+            point, px,
+        };
+
+        struct ScrollHost {
+            key: SharedString,
+            html: SharedString,
+            scroll: ScrollHandle,
+            focus: gpui::FocusHandle,
+            show: bool,
+        }
+
+        impl Render for ScrollHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let root = div()
+                    .relative()
+                    .size_full()
+                    .bg(gpui::white())
+                    .child(canvas(|_, _, _| {}, |_, _, window, _| super::begin_frame(window)).absolute().size_0());
+                if !self.show {
+                    return root;
+                }
+                let key = self.key.clone();
+                let html = self.html.clone();
+                let focus = self.focus.clone();
+                super::keep(&key);
+                let height = super::height(&key).unwrap_or(40.);
+                let theme = super::HtmlTheme { dark: false, surface: 0xffffff, text: 0x111111, link: 0x0066cc };
+                root.child(
+                    div()
+                        .id("reader")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .child(
+                            canvas(
+                                |bounds, window, _| super::prepaint(bounds, window),
+                                move |bounds, hitbox, window, cx| {
+                                    super::paint(
+                                        &key,
+                                        &html,
+                                        super::HtmlPart::Main,
+                                        theme,
+                                        false,
+                                        bounds,
+                                        hitbox,
+                                        &focus,
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            )
+                            .w_full()
+                            .h(px(height)),
+                        ),
+                )
+            }
+        }
+
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui::init(cx);
+            crate::design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+        });
+        let mut html = String::new();
+        for i in 0..80 {
+            html.push_str(&format!("<p style=\"margin:0 0 24px 0\">Line {i}: scrolling test content</p>"));
+        }
+        let key: SharedString = "test-continuous-scroll".into();
+        let scroll = ScrollHandle::new();
+        let (host, cx) = cx.add_window_view({
+            let key = key.clone();
+            let html = SharedString::from(html);
+            let scroll = scroll.clone();
+            move |_, cx| ScrollHost { key, html, scroll, focus: cx.focus_handle(), show: true }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let laid_out_height = loop {
+            cx.run_until_parked();
+            if let Some(h) = super::height(&key)
+                && h > 1500.
+            {
+                break h;
+            }
+            assert!(std::time::Instant::now() < deadline, "blitz layout completed");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        host.update_in(cx, |_, _, cx| cx.notify());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            let ready = super::PAGES.with_borrow(|pages| {
+                pages.entries.get(&key).is_some_and(|e| !e.tiles.is_empty() && e.drawing.is_empty())
+            });
+            if ready {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "initial blitz tiles drawn");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let initial_page = super::PAGES.with_borrow(|pages| pages.entries.get(&key).and_then(|e| e.page.clone())).unwrap();
+
+        // Simulate 40 consecutive scroll frames (1600px, spanning composited frames and overscan repaints).
+        for step in 1..=40 {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::Scroll(ScrollEvent {
+                        position: point(px(200.), px(200.)),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+                        touch_phase: TouchPhase::Moved,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+            let current_height = super::height(&key);
+            let current_offset = f32::from(scroll.offset().y);
+            assert_eq!(
+                current_height,
+                Some(laid_out_height),
+                "step {step}: blitz page height lost during scroll, offset={current_offset}"
+            );
+            assert!(
+                current_offset <= -40. * step as f32 + 1.,
+                "step {step}: scroll offset did not advance: {current_offset}"
+            );
+        }
+        let composited = cx.update(|window, _| window.layout_stats().layer_frames_composited);
+        assert!(composited > 0, "reader should exercise gpui-fast scroll layer compositing");
+        let final_page = super::PAGES.with_borrow(|pages| pages.entries.get(&key).and_then(|e| e.page.clone())).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&initial_page, &final_page), "blitz page was closed and reopened during scroll");
+
+        // Closing the reader (no longer calling `keep`) frees the page on the next frame.
+        host.update_in(cx, |host, _, cx| {
+            host.show = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(super::height(&key), None, "closing the placeholder must free the blitz page");
     }
 }

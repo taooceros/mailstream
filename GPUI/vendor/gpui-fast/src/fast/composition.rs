@@ -705,7 +705,12 @@ pub(crate) fn hit_test(
     'surfaces: for (surface, native) in input.order.iter().rev() {
         if let Some(bounds) = native {
             if bounds.contains(&point) {
-                break;
+                // Mailstream patch (MS-410): block hover and clicks behind the native view (like
+                // `BlockMouseExceptScroll`), while leaving scroll hitboxes behind it reachable
+                // when the native view forwards wheel events back to GPUI (e.g. WKWebView).
+                if hover.is_none() {
+                    hover = Some(result.ids.len());
+                }
             }
             continue;
         }
@@ -1575,6 +1580,21 @@ fn native_mouse(window: &Window, event: &dyn Any) -> bool {
             .pointer_capture
             .is_some_and(|id| visible_surface(&state, id));
     }
+    // Mailstream patch (MS-410): OS-managed native views without `on_input` forwarding handle
+    // their own scroll events natively; a `ScrollEvent` reaching GPUI over them was handed back
+    // by the native view (e.g. WKWebView forwarding `scrollWheel:` to the reader) or sent through
+    // a GPUI overlay above it, so let GPUI scroll containers bubble it.
+    if event.is::<crate::ScrollEvent>() {
+        return native_target(window, true).is_some_and(|surface| {
+            window
+                .fast_composition
+                .0
+                .borrow()
+                .platform_surfaces
+                .get(&surface)
+                .is_some_and(|native| native.input_forwarding())
+        });
+    }
     if event
         .downcast_ref::<MouseMoveEvent>()
         .is_some_and(|event| event.pressed_button.is_some())
@@ -1583,6 +1603,22 @@ fn native_mouse(window: &Window, event: &dyn Any) -> bool {
         return false;
     }
     native_target(window, false).is_some()
+}
+
+/// Mailstream patch (MS-410): whether any visible native composition surface overlaps `bounds` in
+/// logical window coordinates. Scroll containers hosting native views must paint every frame so
+/// the native view stays synced and clipped to the real viewport (not overscan).
+pub(crate) fn intersects_native_surface(window: &Window, bounds: Bounds<Pixels>) -> bool {
+    let state = window.fast_composition.0.borrow();
+    if !state.enabled || state.platform_surfaces.is_empty() {
+        return false;
+    }
+    let scale = window.scale_factor();
+    state.platform_surfaces.iter().any(|(&id, native)| {
+        visible_surface(&state, id)
+            && input_bounds(&state, id, native.bounds().to_pixels(scale), scale)
+                .is_some_and(|native_bounds| native_bounds.intersects(&bounds))
+    })
 }
 
 pub(crate) fn bubble_mouse(window: &Window, event: &dyn Any, cx: &crate::App) -> bool {
@@ -2495,6 +2531,186 @@ mod tests {
                 .iter()
                 .any(|hitbox| hitbox.bounds.contains(&point(px(100.), px(100.)))),
             "reused deferred overlay hitboxes must belong to the overlay surface"
+        );
+    }
+
+    /// Mailstream patch (MS-410): an OS-managed native surface (without `input_forwarding`, like
+    /// macOS `WKWebView`) blocks hover and clicks behind it, lets a forwarded `ScrollEvent` reach
+    /// the GPUI scroll container underneath, keeps that container off scroll layers so the native
+    /// view's paint runs every frame, and still blocks GPUI scroll bubbling when `input_forwarding`
+    /// is enabled.
+    #[crate::test]
+    fn scroll_over_native_surface_reaches_scroll_container_and_bypasses_layer(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::{
+            InteractiveElement as _, MouseButton, MouseDownEvent, PlatformInput, ScrollDelta,
+            ScrollEvent, ScrollHandle, StatefulInteractiveElement as _, TouchPhase, point,
+        };
+
+        struct ScrollBehindNative {
+            scroll: ScrollHandle,
+            surface: Rc<ManagedPlatformSurface>,
+            paints: Rc<Cell<usize>>,
+            clicks: Rc<Cell<usize>>,
+        }
+
+        impl Render for ScrollBehindNative {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let surface = self.surface.clone();
+                let paints = self.paints.clone();
+                let clicks = self.clicks.clone();
+                div()
+                    .size_full()
+                    .bg(crate::white())
+                    .child(
+                        div()
+                            .id("reader")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(2000.))
+                                    .on_mouse_down(MouseButton::Left, move |_, _, _| {
+                                        clicks.set(clicks.get() + 1);
+                                    })
+                                    .child(
+                                        canvas(
+                                            |_, _, _| {},
+                                            move |bounds, _, window, _| {
+                                                paints.set(paints.get() + 1);
+                                                let clip =
+                                                    bounds.intersect(&window.content_mask().bounds);
+                                                surface
+                                                    .set_bounds(
+                                                        clip.to_device_pixels(
+                                                            window.scale_factor(),
+                                                        ),
+                                                    )
+                                                    .unwrap();
+                                                surface.set_visible(true).unwrap();
+                                            },
+                                        )
+                                        .w_full()
+                                        .h(px(2000.)),
+                                    ),
+                            ),
+                    )
+            }
+        }
+
+        let scroll = ScrollHandle::new();
+        let paints = Rc::new(Cell::new(0));
+        let clicks = Rc::new(Cell::new(0));
+        let captured_surface = Rc::new(std::cell::RefCell::new(None));
+        let window = cx.add_window({
+            let scroll = scroll.clone();
+            let paints = paints.clone();
+            let clicks = clicks.clone();
+            let captured_surface = captured_surface.clone();
+            move |window, _| {
+                let mut state = window.fast_composition.0.borrow_mut();
+                state.enabled = true;
+                let overlay = state.overlay_surface;
+                let id = state
+                    .tree
+                    .insert(CompositionSurfaceKind::Native, None)
+                    .unwrap();
+                state.tree.place_below(id, overlay).unwrap();
+                let surface =
+                    Rc::new(ManagedPlatformSurface::new(test_platform_surface(), &state));
+                state.platform_surfaces.insert(id, surface.clone());
+                state.input_order = vec![state.base_surface, id, overlay];
+                *captured_surface.borrow_mut() = Some(surface.clone());
+                ScrollBehindNative {
+                    scroll,
+                    surface,
+                    paints,
+                    clicks,
+                }
+            }
+        });
+        let surface = captured_surface.borrow_mut().take().unwrap();
+
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        // Click over the native surface must NOT reach the GPUI element behind it.
+        cx.update_window(window.into(), |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: point(px(100.), px(100.)),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(clicks.get(), 0, "native surface must block clicks behind it");
+
+        // Scroll events forwarded from an OS-managed native surface (input_forwarding == false)
+        // must scroll the GPUI container behind it and paint every frame (no layer compositing).
+        let paints_before = paints.get();
+        for step in 1..=6 {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Scroll(ScrollEvent {
+                        position: point(px(100.), px(100.)),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+                        touch_phase: TouchPhase::Moved,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            assert!(
+                f32::from(scroll.offset().y) <= -40. * step as f32 + 1.,
+                "step {step}: scroll offset did not advance over native surface"
+            );
+        }
+        assert_eq!(
+            paints.get() - paints_before,
+            6,
+            "native surface host must paint every scroll frame"
+        );
+        let composited = cx
+            .update_window(window.into(), |_, window, _| {
+                window.layout_stats().layer_frames_composited
+            })
+            .unwrap();
+        assert_eq!(
+            composited, 0,
+            "scroll container intersecting native surface must bypass scroll layers"
+        );
+
+        // When input_forwarding is enabled (windowless producer), GPUI scroll bubbling stays off.
+        surface.input_forwarding.set(true);
+        let offset_before = scroll.offset().y;
+        cx.update_window(window.into(), |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::Scroll(ScrollEvent {
+                    position: point(px(100.), px(100.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+                    touch_phase: TouchPhase::Moved,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            scroll.offset().y,
+            offset_before,
+            "input_forwarding native surface must suppress GPUI scroll bubbling"
         );
     }
 }
