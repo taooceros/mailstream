@@ -50,7 +50,7 @@ tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 # Linux: GLib's default main context, which listeners are called through.
-[target.'cfg(all(unix, not(target_vendor = "apple")))'.dependencies]
+[target.'cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))'.dependencies]
 glib-sys = "0.21"
 
 [features]

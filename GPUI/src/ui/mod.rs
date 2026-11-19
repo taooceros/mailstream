@@ -85,7 +85,7 @@ impl Render for MailApp {
         let sidebar = self.sidebar_shown();
         let navigation = if sidebar { layout::SIDEBAR_WIDTH } else { layout::RAIL_WIDTH };
         // The room beside the navigation, inside the gaps around the islands.
-        let room = (width - navigation - layout::GAP).max(layout::MIN_LIST);
+        let room = (width - navigation - layout::GAP).max(if width < layout::TWO_PANE_WIDTH { 0. } else { layout::MIN_LIST });
         // The docked column's width, and the room it leaves the list and the conversation, which
         // stay side by side while they have `TWO_PANE_MAIL`.
         let column_width = docked.then(|| self.compose.read(cx).width(room));

@@ -716,10 +716,21 @@ pub fn setting_defaults() -> Vec<SettingEntry> {
     mailstream_engine::settings::Setting::defaults()
 }
 
-/// The process's engine, started on first use.
-static ENGINE: LazyLock<mailstream_engine::Engine> =
-    LazyLock::new(|| mailstream_engine::Engine::start(mailstream_engine::Config::for_this_app()));
+/// Optional configuration supplied by embedded/mobile hosts before [`ENGINE`] starts.
+static CUSTOM_CONFIG: std::sync::OnceLock<mailstream_engine::Config> = std::sync::OnceLock::new();
 
+/// Sets the [`mailstream_engine::Config`] used when the shared engine starts. Must be called
+/// before [`Mailstream::new`].
+pub fn configure_engine(config: mailstream_engine::Config) -> Result<(), mailstream_engine::Config> {
+    CUSTOM_CONFIG.set(config)
+}
+
+/// The process's engine, started on first use.
+static ENGINE: LazyLock<mailstream_engine::Engine> = LazyLock::new(|| {
+    mailstream_engine::Engine::start(
+        CUSTOM_CONFIG.get().cloned().unwrap_or_else(mailstream_engine::Config::for_this_app),
+    )
+});
 impl From<mailstream_engine::EngineError> for MailError {
     fn from(error: mailstream_engine::EngineError) -> Self {
         Self::Failed { code: error.code, message: error.message }

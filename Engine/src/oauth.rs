@@ -312,11 +312,15 @@ fn open_in_browser(url: &str) {
 }
 
 /// The default browser, as the desktop's `xdg-open` picks it.
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 fn open_in_browser(url: &str) {
     let url = url.to_owned();
     std::thread::spawn(move || std::process::Command::new("xdg-open").arg(url).status());
 }
+
+/// Android hosts supply `OAuthConfig.open_url` via JNI `Intent.ACTION_VIEW` / Custom Tabs.
+#[cfg(target_os = "android")]
+fn open_in_browser(_url: &str) {}
 
 /// The default browser, as the shell's "open" verb picks it.
 #[cfg(windows)]

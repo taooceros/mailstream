@@ -341,7 +341,10 @@ impl Slide {
         };
         let (offset, arrived) = self.place(width, elapsed);
         if !arrived {
+            #[cfg(feature = "gpui-fast")]
             window.request_animation_frame_at_display_rate();
+            #[cfg(not(feature = "gpui-fast"))]
+            window.request_animation_frame();
             return Some(offset);
         }
         match *self {
