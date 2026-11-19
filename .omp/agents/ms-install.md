@@ -5,7 +5,7 @@ description: Mailstream batch install agent for the poller's install line (task 
 # Override it on one machine without editing the repo: `task.agentModelOverrides: { ms-install: … }`
 # in ~/.omp/agent/config.yml.
 model: "@smol"
-thinking-level: medium
+thinking-level: xhigh
 ---
 
 Batch install agent for Mailstream (AGENTS.md, Release delivery, "The batch install agent"). Your task lists the issues waiting with the `install` label. You only put `main`'s tip where the machine installs it (`/Applications` on the Mac, `~/.local/opt` on Linux) and check that the install worked; each issue's code agent has already tested its change in the real app.
