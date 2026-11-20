@@ -233,9 +233,9 @@ enum Outgoing {
 }
 
 /// The accent Send button with its shortcut; dimmed and inert while sending.
-fn send_button(id: &'static str, sending: bool, p: &Palette) -> Button {
+fn send_button(id: &'static str, sending: bool, show_shortcut: bool, p: &Palette) -> Button {
     button(id, if sending { "Sending…" } else { "Send" }, ButtonKind::Primary, ControlSize::Regular, !sending, p).when(
-        !sending,
+        !sending && show_shortcut,
         |b| {
             b.child(
                 div()
@@ -1592,10 +1592,12 @@ impl Render for ReplyBox {
                                 b.on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ReplyEvent::Discarded)))
                             }),
                     )
-                    .child(
-                        send_button("reply-send", sending, p)
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx))),
-                    ),
+                    .child({
+                        let show_shortcut =
+                            !cfg!(target_os = "android") && f32::from(window.viewport_size().width) >= crate::design::layout::COMPACT_WIDTH;
+                        send_button("reply-send", sending, show_shortcut, p)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx)))
+                    }),
             )
             .child(attachments::drop_target(REPLY_DROP, radius::CARD, p))
     }

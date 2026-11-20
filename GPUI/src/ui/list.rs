@@ -34,17 +34,13 @@ impl MailApp {
                     this.row_drawn(ix, cx);
                 }
                 let row = this.render_item(ix, beneath, compact, p, cx);
-                if compact {
-                    row
-                } else {
-                    // The list's own padding stops at its top and bottom; rows step in by hand.
-                    div().px(px(metrics::INSET)).child(row).into_any_element()
-                }
+                // Both desktop and compact step rows in slightly so lifted cards and hairlines breathe.
+                div().px(px(metrics::INSET)).child(row).into_any_element()
             }),
         )
         .size_full()
-        .pt(px(if compact { space::S2 } else { space::S6 }))
-        .pb(px(if compact { 80. } else { space::S6 }))
+        .pt(px(if compact { space::S4 } else { space::S6 }))
+        .pb(px(if compact { design::compact::DOCK_CLEARANCE } else { space::S6 }))
         .into_any_element()
     }
 
@@ -140,12 +136,8 @@ impl MailApp {
         };
         let rule = Self::next_row(items, list, ix).is_some_and(|next| !self.line_selected(&next, beneath));
         match item {
-            Item::Section(title) => section_header(title.clone(), None, p)
-                .when(compact, |d| d.px(px(space::S16)))
-                .into_any_element(),
-            Item::Waiting(count) => section_header("Waiting on you", Some(*count), p)
-                .when(compact, |d| d.px(px(space::S16)))
-                .into_any_element(),
+            Item::Section(title) => section_header(title.clone(), None, p).into_any_element(),
+            Item::Waiting(count) => section_header("Waiting on you", Some(*count), p).into_any_element(),
             Item::Row(index) => {
                 let Some(conversation) = list.conversations.get(*index) else { return div().into_any_element() };
                 let selected = self.line_selected(&conversation.id, beneath);
@@ -181,20 +173,22 @@ impl MailApp {
                         .flex_shrink_0()
                         .h(px(design::compact::BUNDLE_ROW_HEIGHT))
                         .w_full()
-                        .px(px(space::S12))
+                        .pr(px(metrics::TRAILING_INSET))
                         .flex()
                         .items_center()
-                        .gap(px(space::S12))
+                        .rounded(px(radius::CARD))
                         .cursor_pointer()
                         .active(|s| s.bg(p.pressed))
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.click_row(&id, event.modifiers(), window, cx)
                         }))
+                        .child(unread_dot(unread, p))
                         .child(icon_avatar(Icon::for_category(bundle.category), color, design::compact::AVATAR))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
+                                .ml(px(metrics::AVATAR_GAP))
                                 .flex()
                                 .flex_col()
                                 .gap(px(space::S2))
@@ -212,8 +206,8 @@ impl MailApp {
                             d.child(
                                 div()
                                     .absolute()
-                                    .left(px(space::S12 + design::compact::AVATAR + space::S12))
-                                    .right(px(space::S12))
+                                    .left(px(metrics::SEPARATOR_X))
+                                    .right(px(space::S8))
                                     .bottom_0()
                                     .h(px(stroke::HAIRLINE))
                                     .bg(p.line),
@@ -243,9 +237,9 @@ impl MailApp {
         }
     }
 
-    /// Compact 3-line high-density touch row (MS-408): full-width Sender+Date, full-width Subject
-    /// + tappable Star, and 1-line Snippet + topic tag; tapping the avatar toggles multi-select;
-    /// desktop hover action capsule is suppressed so touch taps never mis-fire.
+    /// Compact 3-line touch row aligned with desktop Mailstream's visual grammar (MS-408, MS-417):
+    /// clean leading `unread_dot` column, 36px avatar (tap toggles multi-select), calm muted dates,
+    /// gold star only when starred, lifted card highlight when selected, and desktop hairline inset.
     fn render_compact_row(
         &self,
         conversation: &Conversation,
@@ -274,7 +268,6 @@ impl MailApp {
         };
         let avatar_hit = div()
             .id(ElementId::Name(format!("avatar:{id}").into()))
-            .relative()
             .flex_shrink_0()
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -282,20 +275,7 @@ impl MailApp {
                 cx.stop_propagation();
                 this.toggle_row_selection(&select_id, window, cx);
             }))
-            .child(photo)
-            .when(conversation.unread && !picked, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top(px(-1.))
-                        .left(px(-3.))
-                        .size(px(9.))
-                        .rounded_full()
-                        .bg(p.accent)
-                        .border(px(1.5))
-                        .border_color(p.tray),
-                )
-            });
+            .child(photo);
 
         let account_dot = (self.accounts.len() > 1)
             .then(|| self.accounts.iter().position(|a| a.id == conversation.account))
@@ -342,67 +322,30 @@ impl MailApp {
                     .items_center()
                     .gap(px(space::S4))
                     .when(conversation.has_attachment, |d| d.child(icon(Icon::Attachment, 13., p.muted)))
-                    .children(account_dot)
-                    .child(
-                        div()
-                            .text_size(px(text::CAPTION))
-                            .font_weight(if conversation.unread { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                            .text_color(if conversation.unread { p.accent } else { p.muted })
-                            .child(conversation.when.clone()),
-                    ),
+                    .children(account_dot.map(|dot| dot.mr(px(2.))))
+                    .child(date(conversation.when.clone().into(), p)),
             );
 
         let subject: SharedString =
             if conversation.title.is_empty() { "(no subject)".into() } else { conversation.title.clone().into() };
-        let star_id = id.clone();
-        let starred = conversation.starred;
         let line2 = div()
             .flex()
             .items_center()
             .gap(px(space::S6))
+            .when(!conversation.tag.is_empty(), |d| {
+                d.child(div().flex_shrink_0().text_size(px(text::BODY)).child(conversation.tag.clone()))
+            })
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .when(!conversation.tag.is_empty(), |d| {
-                        d.child(div().flex_shrink_0().mr(px(space::S4)).text_size(px(text::BODY)).child(conversation.tag.clone()))
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(text::BODY))
-                            .font_weight(if conversation.unread { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
-                            .text_color(if conversation.unread { p.text } else { p.glyph })
-                            .child(subject),
-                    ),
+                    .truncate()
+                    .text_size(px(text::BODY))
+                    .font_weight(if conversation.unread { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                    .text_color(if conversation.unread { p.text } else { p.glyph })
+                    .child(subject),
             )
-            .child(
-                div()
-                    .id(ElementId::Name(format!("star:{id}").into()))
-                    .flex_shrink_0()
-                    .size(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        if let Some(c) = this.conversation(&star_id) {
-                            this.set_starred(&[c], !starred, cx);
-                        }
-                    }))
-                    .child(icon(
-                        if starred { Icon::Starred } else { Icon::Star },
-                        15.,
-                        if starred { p.star } else { p.faint },
-                    )),
-            );
+            .when(conversation.starred, |d| d.child(icon(Icon::Starred, 13., p.star)));
 
         let snippet_text: SharedString = conversation.snippet.as_deref().unwrap_or("").to_owned().into();
         let topic = conversation.labels.first().map(|label| {
@@ -424,21 +367,16 @@ impl MailApp {
             .children(topic);
 
         let click_id = id.clone();
-        let picked_bg = design::tint(p.accent, if p.dark { 0.16 } else { 0.10 });
+        let lifted = picked || selected;
         div()
             .id(ElementId::Name(id.into()))
             .relative()
             .flex_shrink_0()
             .h(px(design::compact::ROW_HEIGHT))
             .w_full()
-            .px(px(space::S12))
-            .flex()
-            .items_center()
-            .gap(px(space::S12))
             .cursor_pointer()
-            .when(picked, |d| d.bg(picked_bg))
-            .when(!picked && selected, |d| d.bg(p.hover))
-            .active(|s| s.bg(p.pressed))
+            .when(lifted, |d| d.child(lifted_card(true, p)))
+            .when(!lifted, |d| d.rounded(px(radius::CARD)).active(|s| s.bg(p.pressed)))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if this.selection().is_some() {
                     this.toggle_row_selection(&click_id, window, cx);
@@ -446,14 +384,34 @@ impl MailApp {
                     this.click_row(&click_id, event.modifiers(), window, cx);
                 }
             }))
-            .child(avatar_hit)
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(line1).child(line2).child(line3))
-            .when(rule && !picked, |d| {
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .pr(px(metrics::TRAILING_INSET))
+                    .flex()
+                    .items_center()
+                    .child(unread_dot(conversation.unread && !picked, p))
+                    .child(avatar_hit)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .ml(px(metrics::AVATAR_GAP))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(line1)
+                            .child(line2)
+                            .child(line3),
+                    ),
+            )
+            .when(rule && !lifted, |d| {
                 d.child(
                     div()
                         .absolute()
-                        .left(px(space::S12 + design::compact::AVATAR + space::S12))
-                        .right(px(space::S12))
+                        .left(px(metrics::SEPARATOR_X))
+                        .right(px(space::S8))
                         .bottom_0()
                         .h(px(stroke::HAIRLINE))
                         .bg(p.line),
@@ -676,15 +634,17 @@ impl MailApp {
                 let next = bundle.members.get(row + 1).and_then(|&ix| list.conversations.get(ix)).map(|c| &c.id);
                 let rule = next.is_some_and(|next| !this.row_selected(next, true));
                 let selected = this.row_selected(&conversation.id, true);
-                if compact {
+                let row = if compact {
                     this.render_compact_row(conversation, selected, rule, true, p, cx)
                 } else {
-                    div().px(px(metrics::INSET)).child(this.render_row(conversation, selected, rule, true, p, cx)).into_any_element()
-                }
+                    this.render_row(conversation, selected, rule, true, p, cx)
+                };
+                div().px(px(metrics::INSET)).child(row).into_any_element()
             }),
         )
         .size_full()
-        .py(px(if compact { space::S2 } else { space::S6 }))
+        .pt(px(if compact { space::S4 } else { space::S6 }))
+        .pb(px(if compact { design::compact::DOCK_CLEARANCE } else { space::S6 }))
         .into_any_element()
     }
 
@@ -721,20 +681,22 @@ impl MailApp {
                 .flex_shrink_0()
                 .h(px(design::compact::BUNDLE_ROW_HEIGHT))
                 .w_full()
-                .px(px(space::S12))
+                .pr(px(metrics::TRAILING_INSET))
                 .flex()
                 .items_center()
-                .gap(px(space::S12))
+                .rounded(px(radius::CARD))
                 .cursor_pointer()
                 .active(|s| s.bg(p.pressed))
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     this.click_row(&id, event.modifiers(), window, cx)
                 }))
+                .child(unread_dot(true, p))
                 .child(icon_avatar(Icon::Chat, color, design::compact::AVATAR))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .ml(px(metrics::AVATAR_GAP))
                         .flex()
                         .flex_col()
                         .gap(px(space::S2))
@@ -752,8 +714,8 @@ impl MailApp {
                     d.child(
                         div()
                             .absolute()
-                            .left(px(space::S12 + design::compact::AVATAR + space::S12))
-                            .right(px(space::S12))
+                            .left(px(metrics::SEPARATOR_X))
+                            .right(px(space::S8))
                             .bottom_0()
                             .h(px(stroke::HAIRLINE))
                             .bg(p.line),

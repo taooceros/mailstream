@@ -407,6 +407,8 @@ impl ComposeColumn {
         );
         let send_draft = draft.clone();
         let attach_draft = draft.clone();
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let show_shortcut = !compact && !cfg!(target_os = "android");
         bar.flex_shrink_0()
             .h(px(layout::HEADER_HEIGHT))
             .px(px(space::S10))
@@ -418,22 +420,23 @@ impl ComposeColumn {
                     .child(icon_button("compose-close", Icon::Close, "Close Draft (⌘W)", !sending, p.glyph).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.close_tab(this.active, window, cx)),
                     ))
-                    .child(
-                        icon_button("compose-minimize", Icon::Minimize, "Minimize", true, p.glyph)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.minimize(cx))),
-                    ),
+                    .when(!compact, |d| {
+                        d.child(
+                            icon_button("compose-minimize", Icon::Minimize, "Minimize", true, p.glyph)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.minimize(cx))),
+                        )
+                    }),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text::PANE_TITLE))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(if compact { design::compact::HEADER_TITLE } else { text::PANE_TITLE }))
+                    .font_weight(if compact { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
                     .child(title),
             )
-            .child({
-                let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+            .child(
                 capsule(p)
                     .when(self.tabs.len() == 1 && !compact, |d| d.child(new_draft_button("compose-new", p, cx)))
                     .when(!self.floating && !compact, |d| {
@@ -450,10 +453,10 @@ impl ComposeColumn {
                     })
                     .child(icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.glyph).on_click(
                         move |_, window, cx| attach_draft.update(cx, |draft, cx| draft.pick_files(&Attach, window, cx)),
-                    ))
-            })
+                    )),
+            )
             .child(
-                send_button("compose-send", sending, p)
+                send_button("compose-send", sending, show_shortcut, p)
                     .on_click(move |_, window, cx| send_draft.update(cx, |draft, cx| draft.send(window, cx))),
             )
     }

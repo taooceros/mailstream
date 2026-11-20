@@ -2117,15 +2117,10 @@ impl ChatPane {
             (unread > 0).then(|| format!("{unread} unread").into())
         };
         let actions = if compact {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(space::S2))
-                .child(
-                    icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
-                        .size(px(design::compact::TOUCH_BUTTON))
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
-                )
+            capsule(p).child(
+                icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
+            )
         } else {
             capsule(p)
                 .child(
@@ -2138,9 +2133,10 @@ impl ChatPane {
                 )
         };
         let leading = compact.then(|| {
-            icon_button("chat-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
-                .size(px(design::compact::TOUCH_BUTTON))
-                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ChatOpenDrawer)))
+            capsule(p).child(
+                icon_button("chat-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ChatOpenDrawer))),
+            )
         });
         let search_focused = self.search.focus_handle(cx).is_focused(window);
         let surface = if compact { div().relative().overflow_hidden().bg(p.tray) } else { island(p.tray, p) };
@@ -2148,21 +2144,26 @@ impl ChatPane {
             div()
                 .flex_shrink_0()
                 .h(px(design::compact::TOP_BAR_HEIGHT))
-                .px(px(space::S8))
+                .px(px(space::S10))
                 .flex()
                 .items_center()
-                .gap(px(space::S8))
+                .gap(px(space::S10))
                 .children(leading)
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
-                        .items_baseline()
-                        .gap(px(space::S8))
-                        .child(div().truncate().text_size(px(18.)).font_weight(FontWeight::BOLD).child(title))
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(design::compact::HEADER_TITLE))
+                                .font_weight(FontWeight::BOLD)
+                                .child(title),
+                        )
                         .when_some(subtitle, |d, subtitle| {
-                            d.child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
+                            d.child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
                         }),
                 )
                 .child(actions)
@@ -2178,12 +2179,12 @@ impl ChatPane {
                 .child(header)
                 .child(search_field("chat-search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
                 .child(hairline(p))
-                .child(div().flex_1().min_h_0().child(self.render_spaces(p, cx))),
+                .child(div().flex_1().min_h_0().child(self.render_spaces(compact, p, cx))),
         )
     }
 
     /// The rows, or what stands in for them.
-    fn render_spaces(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_spaces(&self, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         if let Some(failure) = &self.failure {
             centered_note(failure.clone(), p).into_any_element()
         } else if !self.loaded {
@@ -2228,7 +2229,8 @@ impl ChatPane {
             .track_scroll(&self.scroll)
             .size_full()
             .px(px(rows::INSET))
-            .py(px(6.))
+            .pt(px(space::S6))
+            .pb(px(if compact { design::compact::DOCK_CLEARANCE } else { space::S6 }))
             .into_any_element()
         }
     }
@@ -2339,7 +2341,7 @@ impl ChatPane {
                         },
                     )),
             )
-            .child(self.render_composer(Surface::Log, format!("Send to {title}").into(), p, cx));
+            .child(self.render_composer(Surface::Log, compact, format!("Send to {title}").into(), p, cx));
         let Some(view) = self.logs.get(key).and_then(|log| log.thread.as_ref()) else { return space.into_any_element() };
         let beside = self.thread_beside();
         let thread = self.render_thread(key, view, beside, p, window, cx);
@@ -2372,7 +2374,8 @@ impl ChatPane {
         let (glyph, tip) = if beside { (Icon::Close, "Close thread (Esc)") } else { (Icon::Back, "Back to the conversation (Esc)") };
         let close = icon_button("chat-thread-close", glyph, tip, true, p.glyph)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_thread(window, cx)));
-        island(p.background, p)
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        (if compact { div().relative().overflow_hidden().bg(p.background) } else { island(p.background, p) })
             .occlude()
             .size_full()
             .flex()
@@ -2387,7 +2390,7 @@ impl ChatPane {
                     .child(page_scrim(p))
                     .child(page_toolbar("chat-thread-toolbar", close, Some("Thread".into()), p, window, cx)),
             )
-            .child(self.render_composer(Surface::Thread, "Reply in thread".into(), p, cx))
+            .child(self.render_composer(Surface::Thread, compact, "Reply in thread".into(), p, cx))
             .into_any_element()
     }
 
@@ -2410,9 +2413,11 @@ impl ChatPane {
         }
     }
 
-    /// A column as wide as the reader's text, centered; narrower margins in the thread's island.
-    fn column(surface: Surface, child: impl IntoElement) -> Div {
+    /// A column as wide as the reader's text, centered; narrower margins on compact viewports and
+    /// inside the thread's island.
+    fn column(surface: Surface, compact: bool, child: impl IntoElement) -> Div {
         let margin = match surface {
+            Surface::Log if compact => design::compact::READER_PADDING,
             Surface::Log => 32.,
             Surface::Thread => space::S12,
         };
@@ -2428,7 +2433,7 @@ impl ChatPane {
     fn render_entry(&self, key: &Key, ix: usize, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(log) = self.logs.get(key) else { return div().into_any_element() };
         if ix == 0 {
-            return self.render_top(key, log, p, cx);
+            return self.render_top(key, log, window, p, cx);
         }
         let (Some(message), Some(run)) = (self.item(key, Surface::Log, ix), log.runs.get(ix - 1)) else {
             return div().into_any_element();
@@ -2448,7 +2453,9 @@ impl ChatPane {
             let note = (!view.starter).then(|| {
                 div().pb(px(space::S8)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child("The message that started this thread is older than the messages loaded.")
             });
-            return Self::column(Surface::Thread, div().pt(px(layout::HEADER_HEIGHT + space::S8)).children(note)).into_any_element();
+            let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+            return Self::column(Surface::Thread, compact, div().pt(px(layout::HEADER_HEIGHT + space::S8)).children(note))
+                .into_any_element();
         }
         let (Some(message), Some(run)) = (self.item(key, Surface::Thread, ix), view.runs.get(ix - 1)) else {
             return div().into_any_element();
@@ -2604,8 +2611,10 @@ impl ChatPane {
                 cx.notify();
             }));
 
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         Self::column(
             surface,
+            compact,
             div()
                 .w_full()
                 .min_w_0()
@@ -2657,7 +2666,7 @@ impl ChatPane {
     /// messages' column, MS-328), then what keeps the log empty (loading, a failure, no messages)
     /// or the button for earlier messages. Over messages already shown (from the cache) neither
     /// loading nor a failed refresh takes a line here; the heading tells of the failure (MS-326).
-    fn render_top(&self, key: &Key, log: &Log, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_top(&self, key: &Key, log: &Log, window: &mut Window, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let empty = log.len() == 0;
         let content: AnyElement = if let Some(failure) = log.failure.as_ref().filter(|_| empty) {
             div().py(px(24.)).text_color(p.danger).child(format!("Could not load messages: {failure}")).into_any_element()
@@ -2679,8 +2688,13 @@ impl ChatPane {
         } else {
             div().pt(px(24.)).into_any_element()
         };
-        Self::column(Surface::Log, div().pt(px(layout::HEADER_HEIGHT + space::S16)).child(self.render_heading(key, log, p)).child(content))
-            .into_any_element()
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        Self::column(
+            Surface::Log,
+            compact,
+            div().pt(px(layout::HEADER_HEIGHT + space::S16)).child(self.render_heading(key, log, p)).child(content),
+        )
+        .into_any_element()
     }
 
     /// The space's title, large, over its pills: its kind, its account (with several), how many
@@ -2829,7 +2843,14 @@ impl ChatPane {
 
     /// `surface`'s composer: the space's, or the open thread's (MS-329); `send_tip` names where its
     /// send button sends.
-    fn render_composer(&self, surface: Surface, send_tip: SharedString, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_composer(
+        &self,
+        surface: Surface,
+        compact: bool,
+        send_tip: SharedString,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let composer = self.composer(surface).clone();
         let can_send = !composer.read(cx).value().trim().is_empty();
         let (id, send_id) = match surface {
@@ -2839,6 +2860,7 @@ impl ChatPane {
         let field = composer.clone();
         Self::column(
             surface,
+            compact,
             div().pt(px(8.)).pb(px(16.)).child(
                 div()
                     .id(id)

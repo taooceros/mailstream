@@ -62,10 +62,13 @@ impl CalendarPane {
                 .children(self.render_up_next(now, p, cx))
                 .child(
                     div().flex_1().min_h_0().child(
-                        list(self.agenda.clone(), cx.processor(move |this, ix: usize, _, cx| this.render_entry(ix, now, p, cx)))
-                            .size_full()
-                            .pt(px(space::S4))
-                            .pb(px(space::S24)),
+                        list(
+                            self.agenda.clone(),
+                            cx.processor(move |this, ix: usize, _, cx| this.render_entry(ix, now, compact, p, cx)),
+                        )
+                        .size_full()
+                        .pt(px(space::S4))
+                        .pb(px(if compact { design::compact::DOCK_CLEARANCE } else { space::S24 })),
                     ),
                 ),
             View::Day | View::Week => {
@@ -102,7 +105,7 @@ impl CalendarPane {
         };
         title_bar("calendar-header", window, cx)
             .flex_shrink_0()
-            .px(px(if compact { space::S8 } else { space::S10 }))
+            .px(px(space::S10))
             .pb(px(space::S8))
             .flex()
             .flex_col()
@@ -111,12 +114,13 @@ impl CalendarPane {
                     .h(px(if compact { design::compact::TOP_BAR_HEIGHT } else { layout::HEADER_HEIGHT }))
                     .flex()
                     .items_center()
-                    .gap(px(if compact { space::S8 } else { space::S10 }))
+                    .gap(px(space::S10))
                     .when(compact, |d| {
                         d.child(
-                            icon_button("calendar-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
-                                .size(px(design::compact::TOUCH_BUTTON))
-                                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CalendarOpenDrawer))),
+                            capsule(p).child(
+                                icon_button("calendar-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
+                                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CalendarOpenDrawer))),
+                            ),
                         )
                     })
                     .child(
@@ -133,7 +137,7 @@ impl CalendarPane {
                                     .gap(px(space::S8))
                                     .child(
                                         div()
-                                            .text_size(px(if compact { 18. } else { text::PANE_TITLE }))
+                                            .text_size(px(if compact { design::compact::HEADER_TITLE } else { text::PANE_TITLE }))
                                             .font_weight(FontWeight::BOLD)
                                             .child("Calendar"),
                                     )
@@ -783,7 +787,7 @@ impl CalendarPane {
         )
     }
 
-    fn render_entry(&self, ix: usize, now: DateTime<Local>, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_entry(&self, ix: usize, now: DateTime<Local>, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let line = match &self.entries[ix] {
             Entry::Notice(account) => self.render_notice(*account, p, cx).into_any_element(),
             Entry::Day { title, summary, .. } => div()
@@ -806,7 +810,7 @@ impl CalendarPane {
                 )
                 .child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(summary.clone()))
                 .into_any_element(),
-            Entry::Event { index, day } => self.render_row(*index, *day, now, p, cx),
+            Entry::Event { index, day } => self.render_row(*index, *day, now, compact, p, cx),
             Entry::Note(note) => div()
                 .h(px(metrics::NOTE_HEIGHT))
                 .px(px(space::S24))
@@ -867,6 +871,7 @@ impl CalendarPane {
         index: usize,
         day: NaiveDate,
         now: DateTime<Local>,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -901,12 +906,17 @@ impl CalendarPane {
         .filter(|_| item.own);
         let reply = self.reply(event);
         let selected = self.opened.as_ref() == Some(&event.key);
-        let trailing: Option<AnyElement> = if reply.invited {
+        let stack_reply = compact && reply.invited;
+        let trailing: Option<AnyElement> = if reply.invited && !stack_reply {
             Some(self.reply_switch(index, reply, "row", p, cx).into_any_element())
-        } else {
+        } else if !reply.invited {
             let guests = model::others(item);
             (!guests.is_empty()).then(|| guest_avatars(&guests, 3, p.card, p, cx).into_any_element())
+        } else {
+            None
         };
+        let stacked_reply: Option<AnyElement> =
+            stack_reply.then(|| self.reply_switch(index, reply, "row", p, cx).into_any_element());
         let glyph = if item.location.is_some() {
             Some(Icon::Location)
         } else if item.meeting_url.is_some() {
@@ -915,14 +925,10 @@ impl CalendarPane {
             None
         };
         let key = event.key.clone();
-        let content = div()
-            .relative()
-            .size_full()
-            .pl(px(space::S4))
-            .pr(px(space::S12))
+        let top_row = div()
             .flex()
             .items_center()
-            .when(past || declined, |d| d.opacity(if declined { metrics::DECLINED_OPACITY } else { metrics::PAST_OPACITY }))
+            .w_full()
             .child(
                 div()
                     .flex_shrink_0()
@@ -966,8 +972,29 @@ impl CalendarPane {
                     }),
             )
             .when_some(trailing, |d, trailing| d.child(div().flex_shrink_0().w(px(space::S8))).child(trailing));
+        let content = div()
+            .relative()
+            .size_full()
+            .pl(px(space::S4))
+            .pr(px(space::S12))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(space::S6))
+            .when(past || declined, |d| d.opacity(if declined { metrics::DECLINED_OPACITY } else { metrics::PAST_OPACITY }))
+            .child(top_row)
+            .when_some(stacked_reply, |d, reply_el| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .pl(px(metrics::TIME_WIDTH + space::S12 + design::marks::DOT + space::S8))
+                        .child(reply_el),
+                )
+            });
+        let row_height = if stack_reply { 84. } else { metrics::ROW_HEIGHT };
         list_row(ElementId::Name(format!("event:{}:{}:{}:{day}", key.account, key.calendar, key.id).into()), selected, false, p)
-            .h(px(metrics::ROW_HEIGHT))
+            .h(px(row_height))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_clicked(key.clone(), event, cx)))
             .child(content)
             .into_any_element()

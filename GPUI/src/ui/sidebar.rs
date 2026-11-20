@@ -166,10 +166,10 @@ impl MailApp {
             .into_any_element()
     }
 
-    /// Slide-over navigation drawer for compact (small-screen) viewports (MS-408): dim scrim
-    /// behind a warm full-height sheet holding the mailbox/account tree and Settings.
+    /// Slide-over navigation drawer for compact viewports (MS-408, MS-417): matches desktop's
+    /// warm `p.window` sidebar surface, `p.accent` icons, and warm `p.selection` row highlight.
     pub(super) fn render_drawer(&self, viewport_width: f32, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let drawer_width = design::compact::DRAWER_WIDTH.min((viewport_width * 0.84).max(240.));
+        let drawer_width = design::compact::DRAWER_WIDTH.min((viewport_width * 0.84).max(248.));
         let mut rows: Vec<AnyElement> = Vec::new();
         for node in self.sidebar_nodes(cx) {
             let is_calendar = node.key.as_ref() == "calendar";
@@ -178,7 +178,12 @@ impl MailApp {
                 rows.extend(self.calendar.update(cx, |pane, cx| pane.render_sidebar_section(p, window, cx)));
             }
         }
-        let scrim_alpha = if p.dark { 0.52 } else { 0.36 };
+        let account_summary: Option<SharedString> = match self.accounts.len() {
+            0 => None,
+            1 => Some("1 account".into()),
+            n => Some(format!("{n} accounts").into()),
+        };
+        let scrim_alpha = if p.dark { 0.54 } else { 0.32 };
         div()
             .id("compact-drawer-backdrop")
             .absolute()
@@ -195,11 +200,13 @@ impl MailApp {
                     .flex_shrink_0()
                     .flex()
                     .flex_col()
-                    .bg(p.background)
+                    .bg(p.window)
+                    .rounded_r(px(radius::PANE + 4.))
+                    .overflow_hidden()
                     .pt(px(design::compact::safe_area_insets().0))
                     .pb(px(design::compact::safe_area_insets().1))
                     .border_r(px(stroke::HAIRLINE))
-                    .border_color(p.line)
+                    .border_color(p.island_rim)
                     .shadow(p.popover_shadow.clone())
                     .on_click(|_, _, cx| cx.stop_propagation())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -207,24 +214,38 @@ impl MailApp {
                         div()
                             .flex_shrink_0()
                             .h(px(design::compact::TOP_BAR_HEIGHT))
-                            .px(px(space::S16))
+                            .pl(px(space::S16))
+                            .pr(px(space::S10))
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap(px(space::S8))
                             .child(
                                 div()
-                                    .text_size(px(18.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(p.text)
-                                    .child("Mailstream"),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(design::compact::HEADER_TITLE))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(p.text)
+                                            .child("Mailstream"),
+                                    )
+                                    .when_some(account_summary, |d, summary| {
+                                        d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(summary))
+                                    }),
                             )
                             .child(
-                                icon_button("drawer-close", Icon::Close, "Close Menu", true, p.glyph)
-                                    .size(px(design::compact::TOUCH_BUTTON))
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_drawer(cx))),
+                                capsule(p).child(
+                                    icon_button("drawer-close", Icon::Close, "Close Menu", true, p.glyph)
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_drawer(cx))),
+                                ),
                             ),
                     )
-                    .child(hairline(p))
+                    .child(group_title("Mailboxes", p).pt(px(space::S6)).pl(px(space::S16)))
                     .child(
                         div()
                             .id("drawer-scroll")
@@ -232,47 +253,55 @@ impl MailApp {
                             .min_h_0()
                             .overflow_y_scroll()
                             .px(px(space::S10))
-                            .py(px(space::S8))
+                            .py(px(space::S4))
                             .children(rows),
                     )
-                    .child(hairline(p))
                     .child(
                         div()
                             .flex_shrink_0()
-                            .p(px(space::S10))
+                            .px(px(space::S10))
+                            .pt(px(space::S8))
+                            .pb(px(space::S12))
                             .child(
                                 div()
                                     .id("drawer-add-account")
-                                    .h(px(design::compact::DRAWER_ROW))
+                                    .h(px(design::compact::DRAWER_ROW + 2.))
                                     .px(px(space::S12))
                                     .flex()
                                     .items_center()
-                                    .gap(px(space::S12))
+                                    .gap(px(space::S10))
                                     .rounded(px(radius::CARD))
+                                    .bg(p.card)
+                                    .border(px(stroke::HAIRLINE))
+                                    .border_color(p.card_border)
+                                    .shadow(p.card_shadow.clone())
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(p.hover))
+                                    .hover(|s| s.bg(p.half_lifted))
                                     .active(|s| s.bg(p.pressed))
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.close_drawer(cx);
                                         this.show_settings(&ShowSettings, window, cx);
                                     }))
-                                    .child(icon(Icon::Add, 19., p.accent))
+                                    .child(icon(Icon::Add, icon_size::TOOLBAR, p.accent))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(text::READING))
+                                            .text_size(px(text::BODY))
                                             .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.text)
                                             .child("Settings & Accounts"),
-                                    ),
+                                    )
+                                    .child(icon(Icon::Disclosure, 12., p.muted)),
                             ),
                     ),
             )
             .into_any_element()
     }
 
-    /// Touch-friendly drawer row (42dp tall) reusing `sidebar_nodes`.
+    /// Touch-friendly drawer row matching desktop `sidebar_row` styling (accent icons, warm
+    /// `p.selection` rounded rect, muted count).
     fn drawer_row(&self, node: Node, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let selected = node.source.as_ref().is_some_and(|pick| match pick {
             Pick::Mail(source) => self.mail_in_view() && self.source == *source && self.query.is_none(),
@@ -297,10 +326,10 @@ impl MailApp {
         }
 
         let leading: AnyElement = match node.leading {
-            Leading::Icon(glyph) => icon(glyph, 19., if selected { p.accent } else { p.glyph }).into_any_element(),
+            Leading::Icon(glyph) => icon(glyph, icon_size::TOOLBAR, p.accent).into_any_element(),
             Leading::Dot(color) => div()
                 .flex_shrink_0()
-                .w(px(19.))
+                .w(px(icon_size::TOOLBAR))
                 .flex()
                 .justify_center()
                 .child(mark_dot(color))
@@ -310,7 +339,7 @@ impl MailApp {
             div()
                 .id(ElementId::Name(format!("drawer-disclose:{}", node.key).into()))
                 .flex_shrink_0()
-                .size(px(32.))
+                .size(px(30.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -327,15 +356,15 @@ impl MailApp {
             .id(ElementId::Name(format!("drawer:{}", node.key).into()))
             .h(px(design::compact::DRAWER_ROW))
             .mb(px(2.))
-            .ml(px(node.depth as f32 * space::S16))
-            .pl(px(space::S12))
-            .pr(px(space::S10))
+            .ml(px(node.depth as f32 * layout::SIDEBAR_INDENT))
+            .pl(px(space::S10))
+            .pr(px(space::S8))
             .flex()
             .items_center()
-            .gap(px(space::S12))
-            .rounded_full()
+            .gap(px(space::S10))
+            .rounded(px(radius::CONTROL))
             .cursor_pointer()
-            .when(selected, |d| d.bg(design::tint(p.accent, if p.dark { 0.22 } else { 0.13 })))
+            .when(selected, |d| d.bg(p.selection))
             .when(!selected, |d| d.hover(|s| s.bg(p.hover)).active(|s| s.bg(p.pressed)))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| match &source {
                 Some(Pick::Mail(source)) => this.select(source.clone(), window, cx),
@@ -350,7 +379,7 @@ impl MailApp {
                     .min_w_0()
                     .truncate()
                     .text_size(px(text::READING))
-                    .text_color(if selected { p.accent } else { p.text })
+                    .text_color(p.text)
                     .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                     .child(node.title),
             )
@@ -359,8 +388,8 @@ impl MailApp {
                     div()
                         .flex_shrink_0()
                         .text_size(px(text::FOOTNOTE))
-                        .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-                        .text_color(if selected { p.accent } else { p.muted })
+                        .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                        .text_color(p.muted)
                         .child(count(node.badge)),
                 )
             })
@@ -369,9 +398,16 @@ impl MailApp {
             .into_any_element()
     }
 
-    /// Material 3 warm bottom navigation bar for compact screens (MS-408): switches between
-    /// Mail, Chat, and Calendar with pill indicators and unread badges.
-    pub(super) fn render_bottom_bar(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// Floating glass bottom dock for compact viewports (MS-417): Mailstream's signature glass
+    /// capsule holding Mail / Chat / Calendar tabs beside an integrated circular Compose button,
+    /// over a soft bottom fade scrim so list rows glide smoothly underneath without obstruction.
+    pub(super) fn render_compact_dock(
+        &self,
+        show_fab: bool,
+        safe_bottom: f32,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mail_unread: u32 = self
             .accounts
             .iter()
@@ -386,23 +422,28 @@ impl MailApp {
         let chat_selected = self.chat_view.is_some();
         let cal_selected = self.calendar_view;
 
-        let safe_bottom = design::compact::safe_area_insets().1;
-        let mut bar = div()
+        let mut nav = div()
             .id("compact-bottom-bar")
-            .flex_shrink_0()
-            .h(px(design::compact::BOTTOM_BAR_HEIGHT + safe_bottom))
-            .pb(px(safe_bottom))
-            .w_full()
-            .bg(p.background)
-            .border_t(px(stroke::HAIRLINE))
-            .border_color(p.line)
-            .px(px(space::S8))
+            .flex_1()
+            .min_w_0()
+            .h(px(design::compact::DOCK_HEIGHT))
+            .p(px(design::compact::DOCK_PADDING))
+            .rounded_full()
+            .bg(gpui::linear_gradient(
+                180.,
+                gpui::linear_color_stop(p.capsule_glass[0], 0.),
+                gpui::linear_color_stop(p.capsule_glass[1], 1.),
+            ))
+            .border(px(stroke::HAIRLINE))
+            .border_color(p.capsule_rim)
+            .shadow(p.capsule_shadow.clone())
+            .occlude()
             .flex()
             .items_center()
-            .justify_around()
+            .gap(px(space::S2))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 
-        bar = bar.child(
+        nav = nav.child(
             bottom_nav_item("nav-mail", Icon::Inbox, "Mail", mail_unread, mail_selected, p).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| {
                     if !this.mail_in_view() {
@@ -414,18 +455,80 @@ impl MailApp {
             )),
         );
         if show_chat {
-            bar = bar.child(
+            nav = nav.child(
                 bottom_nav_item("nav-chat", Icon::Chat, "Chat", chat_unread, chat_selected, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.select_chat(None, window, cx))),
             );
         }
         if !self.accounts.is_empty() {
-            bar = bar.child(
+            nav = nav.child(
                 bottom_nav_item("nav-calendar", Icon::Calendar, "Calendar", 0, cal_selected, p)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.select_calendar(window, cx))),
             );
         }
-        bar.into_any_element()
+
+        let fab = show_fab.then(|| {
+            let (id, glyph) = if self.chat_view.is_some() {
+                ("fab-new-chat", Icon::Compose)
+            } else if self.calendar_view {
+                ("fab-new-event", Icon::AddDraft)
+            } else {
+                ("fab-compose", Icon::Compose)
+            };
+            let in_chat = self.chat_view.is_some();
+            let in_calendar = self.calendar_view;
+            let top_accent = p.accent.blend(gpui::hsla(0., 0., 1., 0.14));
+            div()
+                .id(id)
+                .flex_shrink_0()
+                .size(px(design::compact::FAB_SIZE))
+                .rounded_full()
+                .bg(gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(top_accent, 0.),
+                    gpui::linear_color_stop(p.accent, 1.),
+                ))
+                .border(px(stroke::HAIRLINE))
+                .border_color(gpui::hsla(0., 0., 1., if p.dark { 0.22 } else { 0.28 }))
+                .shadow(p.lifted_shadow.clone())
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .active(|s| s.opacity(0.86))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    if in_chat {
+                        this.chat.update(cx, |chat, cx| chat.start_new_chat(window, cx));
+                    } else if in_calendar {
+                        this.calendar.update(cx, |calendar, cx| calendar.start_new_event(window, cx));
+                    } else {
+                        this.new_message(&NewMessage, window, cx);
+                    }
+                }))
+                .child(icon(glyph, 20., p.on_accent))
+        });
+
+        div()
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .child(bottom_scrim(p.tray, design::compact::DOCK_CLEARANCE + safe_bottom))
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .px(px(design::compact::DOCK_MARGIN_X))
+                    .pb(px(safe_bottom + design::compact::DOCK_MARGIN_B))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S10))
+                    .child(nav)
+                    .children(fab),
+            )
+            .into_any_element()
     }
 
     /// The visible rows: the tree flattened through expanded nodes.
@@ -758,7 +861,8 @@ fn rail_item(id: &'static str, glyph: Icon, label: &'static str, count: u32, sel
         .child(div().text_size(px(text::CAPTION)).text_color(if selected { p.text } else { p.muted }).child(label))
 }
 
-/// One destination in the compact bottom navigation bar (Material 3 active pill + badge).
+/// One destination inside the floating glass bottom dock (MS-417): active tab raises on a warm
+/// pill echoing desktop's `segmented` and `rail_item` highlights, with refined unread capsule badge.
 fn bottom_nav_item(
     id: &'static str,
     glyph: Icon,
@@ -767,54 +871,60 @@ fn bottom_nav_item(
     selected: bool,
     p: &'static Palette,
 ) -> Stateful<Div> {
-    let pill_bg = design::tint(p.accent, if p.dark { 0.24 } else { 0.14 });
     div()
         .id(id)
         .flex_1()
         .h_full()
+        .rounded_full()
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(3.))
+        .gap(px(1.))
         .cursor_pointer()
+        .when(selected, |d| {
+            d.bg(if p.dark { p.selection } else { p.raised_card })
+                .border(px(stroke::HAIRLINE))
+                .border_color(p.card_border)
+                .shadow(p.card_shadow.clone())
+        })
+        .when(!selected, |d| d.hover(|s| s.bg(p.hover)).active(|s| s.bg(p.pressed)))
         .child(
             div()
                 .relative()
-                .w(px(design::compact::BOTTOM_PILL_WIDTH))
-                .h(px(design::compact::BOTTOM_PILL_HEIGHT))
+                .w(px(36.))
+                .h(px(22.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
-                .when(selected, |d| d.bg(pill_bg))
-                .child(icon(glyph, 20., if selected { p.accent } else { p.muted }))
+                .child(icon(glyph, 18., if selected { p.accent } else { p.glyph }))
                 .when(badge > 0, |d| {
                     d.child(
                         div()
                             .absolute()
-                            .top(px(-2.))
-                            .right(px(4.))
-                            .h(px(15.))
-                            .min_w(px(15.))
+                            .top(px(-3.))
+                            .right(px(-5.))
+                            .h(px(14.))
+                            .min_w(px(14.))
                             .px(px(4.))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(p.accent)
-                            .text_size(px(text::TAG))
+                            .bg(if selected { p.accent } else { p.capsule })
+                            .when(!selected, |d| d.border(px(stroke::HAIRLINE)).border_color(p.capsule_rim))
+                            .text_size(px(9.5))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(p.on_accent)
+                            .text_color(if selected { p.on_accent } else { p.glyph })
                             .child(count_label(badge)),
                     )
                 }),
         )
         .child(
             div()
-                .text_size(px(text::CAPTION))
+                .text_size(px(10.5))
                 .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-                .text_color(if selected { p.accent } else { p.muted })
+                .text_color(if selected { p.text } else { p.muted })
                 .child(label),
         )
 }

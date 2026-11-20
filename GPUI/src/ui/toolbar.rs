@@ -50,48 +50,45 @@ impl MailApp {
         if compact {
             let leading = if bundle.is_some() || self.query.is_some() {
                 icon_button("back", Icon::Back, "Back (Esc)", true, p.glyph)
-                    .size(px(design::compact::TOUCH_BUTTON))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.list_back(window, cx)))
             } else {
                 icon_button("compact-menu", Icon::Menu, "Mailboxes", true, p.glyph)
-                    .size(px(design::compact::TOUCH_BUTTON))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_drawer(cx)))
             };
             return div()
                 .id("list-header")
                 .flex_shrink_0()
                 .h(px(design::compact::TOP_BAR_HEIGHT))
-                .px(px(space::S8))
+                .px(px(space::S10))
                 .flex()
                 .items_center()
-                .gap(px(space::S8))
-                .child(leading)
+                .gap(px(space::S10))
+                .child(capsule(p).child(leading))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
-                        .items_baseline()
-                        .gap(px(space::S8))
-                        .child(div().truncate().text_size(px(18.)).font_weight(FontWeight::BOLD).child(title))
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(design::compact::HEADER_TITLE))
+                                .font_weight(FontWeight::BOLD)
+                                .child(title),
+                        )
                         .when_some(subtitle, |d, subtitle| {
-                            d.child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
+                            d.child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
                         }),
                 )
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S2))
+                    capsule(p)
                         .child(
                             icon_button("compact-search-open", Icon::Search, "Search", true, p.glyph)
-                                .size(px(design::compact::TOUCH_BUTTON))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_compact_search(window, cx))),
                         )
                         .child(
                             icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.glyph)
-                                .size(px(design::compact::TOUCH_BUTTON))
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
                         ),
                 )
@@ -120,25 +117,33 @@ impl MailApp {
             .id("compact-search-header")
             .flex_shrink_0()
             .h(px(design::compact::TOP_BAR_HEIGHT))
-            .px(px(space::S8))
+            .px(px(space::S10))
             .flex()
             .items_center()
-            .gap(px(space::S6))
+            .gap(px(space::S8))
             .child(
-                icon_button("compact-search-back", Icon::Back, "Close Search", true, p.glyph)
-                    .size(px(design::compact::TOUCH_BUTTON))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.cancel_search(&gpui::component::input::Escape, window, cx);
-                    })),
+                capsule(p).child(
+                    icon_button("compact-search-back", Icon::Back, "Close Search", true, p.glyph).on_click(cx.listener(
+                        |this, _: &ClickEvent, window, cx| {
+                            this.cancel_search(&gpui::component::input::Escape, window, cx);
+                        },
+                    )),
+                ),
             )
             .child(
-                div().flex_1().min_w_0().pt(px(space::S10)).child(search_field(
-                    "search",
-                    focused,
-                    input::field(&self.search),
-                    cx.listener(Self::cancel_search),
-                    p,
-                )),
+                crate::controls::field_frame(focused, true, p)
+                    .id("search")
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(layout::CAPSULE_HEIGHT))
+                    .pl(px(space::S12))
+                    .pr(px(space::S10))
+                    .gap(px(space::S8))
+                    .line_height(px(20.))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_action(cx.listener(Self::cancel_search))
+                    .child(icon(Icon::Search, 15., p.muted))
+                    .child(div().flex_1().min_w_0().child(input::field(&self.search))),
             )
             .into_any_element()
     }
@@ -234,19 +239,11 @@ impl MailApp {
                 .overflow_hidden()
                 .bg(p.background)
                 .size_full()
-                .flex()
-                .flex_col()
                 .occlude()
                 .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.clone(), cx))
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .child(self.render_reader(conversation, true, p, window, cx))
-                        .when(self.reader_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
-                        .child(self.render_compact_detail_toolbar(conversation, layer, p, cx)),
-                )
+                .child(self.render_reader(conversation, true, p, window, cx))
+                .when(self.reader_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
+                .child(self.render_compact_detail_toolbar(conversation, layer, p, cx))
                 .when(!reply_open, |d| d.child(self.render_compact_reply_bar(p, cx)))
                 .into_any_element();
         }
@@ -284,48 +281,38 @@ impl MailApp {
             .left_0()
             .right_0()
             .h(px(design::compact::TOP_BAR_HEIGHT))
-            .px(px(space::S8))
-            .bg(p.background)
-            .when(self.reader_top != ReaderTop::Top, |d| d.border_b(px(stroke::HAIRLINE)).border_color(p.line))
+            .px(px(space::S10))
             .flex()
             .items_center()
-            .gap(px(space::S4))
+            .gap(px(space::S8))
             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
             .child(
-                icon_button("close", Icon::Back, "Back (Esc)", true, p.glyph)
-                    .size(px(design::compact::TOUCH_BUTTON))
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx))),
+                capsule(p).child(
+                    icon_button("close", Icon::Back, "Back (Esc)", true, p.glyph)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx))),
+                ),
             )
-            .child(div().flex_1().min_w_0().px(px(space::S4)).when_some(title, |d, title| {
-                d.child(div().truncate().text_size(px(text::READING)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().flex_1().min_w_0().flex().justify_center().when_some(title, |d, title| {
+                d.child(div().min_w_0().truncate().text_size(px(text::BODY)).font_weight(FontWeight::SEMIBOLD).child(title))
             }))
             .child(
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S2))
+                capsule(p)
                     .when(conversation.waiting, |d| {
                         d.child(
-                            icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting)
-                                .size(px(design::compact::TOUCH_BUTTON))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.toggle_waiting(&ToggleWaiting, window, cx)
-                                })),
+                            icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting).on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| this.toggle_waiting(&ToggleWaiting, window, cx),
+                            )),
                         )
                     })
                     .child(if restoring {
                         icon_button("restore", Icon::Restore, "Move to Inbox", true, p.glyph)
-                            .size(px(design::compact::TOUCH_BUTTON))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.restore(&Restore, window, cx)))
                     } else {
                         icon_button("archive", Icon::Archive, "Archive (E)", can_archive, p.glyph)
-                            .size(px(design::compact::TOUCH_BUTTON))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.archive(&Archive, window, cx)))
                     })
                     .child(
                         icon_button("trash", Icon::Delete, "Move to Trash", true, p.glyph)
-                            .size(px(design::compact::TOUCH_BUTTON))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx))),
                     )
                     .child(
@@ -336,7 +323,6 @@ impl MailApp {
                             true,
                             p.glyph,
                         )
-                        .size(px(design::compact::TOUCH_BUTTON))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_read(&ToggleRead, window, cx))),
                     )
                     .child(
@@ -347,65 +333,84 @@ impl MailApp {
                             true,
                             if starred { p.star } else { p.glyph },
                         )
-                        .size(px(design::compact::TOUCH_BUTTON))
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.star(&Star, window, cx))),
                     ),
             )
     }
 
-    /// Sticky thumb-zone reply bar at the bottom of the compact reader (MS-408).
+    /// Floating glass reply capsule at the bottom of the compact reader (MS-408, MS-417): echoes
+    /// desktop's floating glass capsules over a soft bottom fade scrim.
     fn render_compact_reply_bar(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let reply_btn = |id: &'static str, glyph: Icon, label: &'static str, primary: bool| {
-            let bg = if primary { design::tint(p.accent, if p.dark { 0.22 } else { 0.12 }) } else { p.fill };
-            let fg = if primary { p.accent } else { p.text };
+        let action_btn = |id: &'static str, glyph: Icon, label: &'static str, primary: bool| {
+            let fg = if primary { p.on_accent } else { p.text };
+            let glyph_color = if primary { p.on_accent } else { p.glyph };
             div()
                 .id(id)
                 .flex_1()
-                .h(px(38.))
+                .h_full()
                 .px(px(space::S10))
                 .flex()
                 .items_center()
                 .justify_center()
                 .gap(px(space::S6))
                 .rounded_full()
-                .bg(bg)
-                .border(px(stroke::HAIRLINE))
-                .border_color(if primary { design::tint(p.accent, 0.3) } else { p.line })
                 .cursor_pointer()
-                .hover(|s| s.bg(p.hover))
-                .active(|s| s.bg(p.pressed))
+                .when(primary, |d| d.bg(p.accent).active(|s| s.opacity(0.86)))
+                .when(!primary, |d| d.hover(|s| s.bg(p.hover)).active(|s| s.bg(p.pressed)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(icon(glyph, 16., fg))
+                .child(icon(glyph, 15., glyph_color))
                 .child(
                     div()
                         .text_size(px(text::BODY))
-                        .font_weight(FontWeight::MEDIUM)
+                        .font_weight(if primary { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                         .text_color(fg)
                         .child(label),
                 )
         };
         div()
             .id("compact-reply-bar")
-            .flex_shrink_0()
-            .h(px(design::compact::REPLY_BAR_HEIGHT))
-            .px(px(space::S12))
-            .bg(p.background)
-            .border_t(px(stroke::HAIRLINE))
-            .border_color(p.line)
-            .flex()
-            .items_center()
-            .gap(px(space::S8))
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .right_0()
+            .child(bottom_scrim(p.background, design::compact::REPLY_BAR_HEIGHT + space::S32))
             .child(
-                reply_btn("reply", Icon::Reply, "Reply", true)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx))),
-            )
-            .child(
-                reply_btn("reply-all", Icon::ReplyAll, "Reply All", false)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx))),
-            )
-            .child(
-                reply_btn("forward", Icon::Forward, "Forward", false)
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.forward(&Forward, window, cx))),
+                div()
+                    .relative()
+                    .w_full()
+                    .px(px(design::compact::DOCK_MARGIN_X))
+                    .pb(px(design::compact::DOCK_MARGIN_B))
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(design::compact::REPLY_BAR_HEIGHT))
+                            .p(px(design::compact::DOCK_PADDING))
+                            .rounded_full()
+                            .bg(gpui::linear_gradient(
+                                180.,
+                                gpui::linear_color_stop(p.capsule_glass[0], 0.),
+                                gpui::linear_color_stop(p.capsule_glass[1], 1.),
+                            ))
+                            .border(px(stroke::HAIRLINE))
+                            .border_color(p.capsule_rim)
+                            .shadow(p.capsule_shadow.clone())
+                            .occlude()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S4))
+                            .child(
+                                action_btn("reply", Icon::Reply, "Reply", true)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply(&Reply, window, cx))),
+                            )
+                            .child(
+                                action_btn("reply-all", Icon::ReplyAll, "Reply All", false)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.reply_all(&ReplyAll, window, cx))),
+                            )
+                            .child(
+                                action_btn("forward", Icon::Forward, "Forward", false)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.forward(&Forward, window, cx))),
+                            ),
+                    ),
             )
     }
 

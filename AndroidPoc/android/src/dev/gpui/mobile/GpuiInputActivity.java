@@ -5,16 +5,19 @@ import android.content.Context;
 import android.os.Bundle;
 import android.text.InputType;
 import android.content.res.Configuration;
+import android.graphics.Color;
 import android.graphics.Insets;
 import android.os.Build;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
+import android.view.Window;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
@@ -56,16 +59,7 @@ public class GpuiInputActivity extends NativeActivity {
             content.addView(imeProxy, new FrameLayout.LayoutParams(1, 1));
         }
         final View decor = getWindow().getDecorView();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            boolean night = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
-                    == Configuration.UI_MODE_NIGHT_YES;
-            WindowInsetsController controller = getWindow().getInsetsController();
-            if (controller != null) {
-                int lightFlags = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-                controller.setSystemBarsAppearance(night ? 0 : lightFlags, lightFlags);
-            }
-        }
+        configureEdgeToEdge(getResources().getConfiguration());
         decor.setOnApplyWindowInsetsListener((v, insets) -> {
             int top, bottom, left, right;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -105,6 +99,38 @@ public class GpuiInputActivity extends NativeActivity {
         }
     }
 
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        configureEdgeToEdge(newConfig);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void configureEdgeToEdge(Configuration config) {
+        Window window = getWindow();
+        if (window == null) {
+            return;
+        }
+        boolean night = (config.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        // Warm linen (light) / warm cocoa (dark) matching GPUI Palette::tray so launch and bars never flash.
+        window.getDecorView().setBackgroundColor(night ? 0xFF1C1815 : 0xFFF8F3EC);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.setStatusBarContrastEnforced(false);
+            window.setNavigationBarContrastEnforced(false);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                int lightFlags = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(night ? 0 : lightFlags, lightFlags);
+            }
+        }
+    }
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
