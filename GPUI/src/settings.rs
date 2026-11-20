@@ -18,29 +18,35 @@ use gpui::component::Disableable;
 use gpui::component::input::{Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClipboardItem, Context, Div, ElementId, Entity, Focusable,
-    FontWeight, Global, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, TitlebarOptions, Window, WeakEntity, WindowBounds,
-    WindowOptions, actions, div, px, size,
+    AnyElement, AnyWindowHandle, App, AppContext, Bounds, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity,
+    FocusHandle, Focusable, FontWeight, Global, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Task, TitlebarOptions, WeakEntity, Window,
+    WindowBounds, WindowOptions, actions, div, px, size,
 };
 use mailstream::{
     Account, AutoReadLog, AutoReadReason, Category, Change, DeviceSyncStatus, Event, EventListener, OAuthClientInfo,
     Provider, SettingEntry, SettingValue, SyncDevice, SyncTicket,
 };
 
-use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, icon_button, notice, pill, switch, tag};
-use crate::design::{self, Palette, radius, settings as metrics, stroke, text};
+use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, hairline, icon_button, notice, pill, switch, tag};
+use crate::design::{self, Palette, layout, radius, settings as metrics, space, stroke, text};
 use crate::engine::{MailError, engine};
 use crate::icons::{Icon, icon};
 use crate::input;
 use crate::model::{AccountExt, ProviderExt};
 
-actions!(settings, [ShowSettings]);
+actions!(settings, [ShowSettings, CloseSettings]);
+
+pub const CONTEXT: &str = "Settings";
 
 /// Binds cmd-, to `ShowSettings`, which opens the window with `on_changed` (see `open_settings`),
 /// and hands the engine's change events to the window while it is open.
 pub fn init(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(secondary!(","), ShowSettings, None)]);
+    cx.bind_keys([
+        KeyBinding::new(secondary!(","), ShowSettings, None),
+        KeyBinding::new("escape", CloseSettings, Some("Settings && !Input")),
+        KeyBinding::new(secondary!("w"), CloseSettings, Some(CONTEXT)),
+    ]);
     let on_changed = Rc::new(on_changed);
     cx.on_action(move |_: &ShowSettings, cx| {
         let on_changed = on_changed.clone();
@@ -53,8 +59,8 @@ pub fn init(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
 /// is renamed, removed or added, a setting changes or auto-read is undone, so the main window can
 /// reload.
 pub fn open_settings(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
-    if let Some(open) = cx.try_global::<OpenSettings>() {
-        let handle = open.0;
+    if let Some(OpenSettings::Window(handle, _)) = cx.try_global::<OpenSettings>() {
+        let handle = *handle;
         if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
             return;
         }
@@ -68,19 +74,41 @@ pub fn open_settings(on_changed: impl Fn(&mut App) + 'static, cx: &mut App) {
         ..Default::default()
     };
     let Ok((window, settings)) =
-        gpui::open_window(options, cx, |window, cx| cx.new(|cx| Settings::new(on_changed, window, cx)))
+        gpui::open_window(options, cx, |window, cx| cx.new(|cx| Settings::new(on_changed, None, window, cx)))
     else {
         return;
     };
-    cx.set_global(OpenSettings(window, settings.downgrade()));
+    cx.set_global(OpenSettings::Window(window, settings.downgrade()));
     window.update(cx, |_, window, _| window.activate_window()).ok();
 }
 
-/// The open Settings window (in gpui-kit's root) and its view.
-struct OpenSettings(AnyWindowHandle, WeakEntity<Settings>);
+/// Registers an inline `Settings` view (compact / Android single-window) so engine events reach it.
+pub(crate) fn register_inline(settings: &Entity<Settings>, cx: &mut App) {
+    cx.set_global(OpenSettings::Inline(settings.downgrade()));
+}
+
+/// Clears the inline `Settings` registration once the overlay closes.
+pub(crate) fn unregister_inline(cx: &mut App) {
+    if matches!(cx.try_global::<OpenSettings>(), Some(OpenSettings::Inline(_))) {
+        cx.remove_global::<OpenSettings>();
+    }
+}
+
+/// The open Settings view — either a standalone OS window or an inline overlay inside `MailApp`.
+enum OpenSettings {
+    Window(AnyWindowHandle, WeakEntity<Settings>),
+    Inline(WeakEntity<Settings>),
+}
+
+impl OpenSettings {
+    fn view(&self) -> WeakEntity<Settings> {
+        match self {
+            Self::Window(_, view) | Self::Inline(view) => view.clone(),
+        }
+    }
+}
 
 impl Global for OpenSettings {}
-
 /// One listener for the process (the engine keeps every listener for good): it passes the events
 /// to the open window, if any.
 fn follow_engine(cx: &mut App) {
@@ -93,7 +121,7 @@ fn follow_engine(cx: &mut App) {
             while let Ok(event) = events.try_recv() {
                 batch.push(event);
             }
-            let open = cx.update(|cx| cx.try_global::<OpenSettings>().map(|open| open.1.clone()));
+            let open = cx.update(|cx| cx.try_global::<OpenSettings>().map(OpenSettings::view));
             if let Some(settings) = open {
                 settings.update(cx, |settings, cx| settings.follow_engine(&batch, cx)).ok();
             }
@@ -294,8 +322,10 @@ impl PairCode {
     }
 }
 
-struct Settings {
+pub(crate) struct Settings {
+    pub(crate) focus: FocusHandle,
     on_changed: Rc<dyn Fn(&mut App)>,
+    on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     accounts: Option<Result<Vec<Account>, MailError>>,
     status: Option<Status>,
     device_sync: Option<DeviceSyncStatus>,
@@ -331,9 +361,25 @@ struct Settings {
 }
 
 impl Settings {
-    fn new(on_changed: Rc<dyn Fn(&mut App)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new_inline(
+        on_changed: impl Fn(&mut App) + 'static,
+        on_close: impl Fn(&mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(Rc::new(on_changed), Some(Rc::new(on_close)), window, cx)
+    }
+
+    fn new(
+        on_changed: Rc<dyn Fn(&mut App)>,
+        on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let this = Self {
+            focus: cx.focus_handle(),
             on_changed,
+            on_close,
             accounts: None,
             status: None,
             device_sync: None,
@@ -370,6 +416,12 @@ impl Settings {
         this.load_settings(cx);
         this.load_auto_read(cx);
         this
+    }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(on_close) = self.on_close.clone() {
+            on_close(window, cx);
+        }
     }
 
     /// Runs `work` on the background executor and hands its result to `done` on the main thread.
@@ -1097,22 +1149,73 @@ impl Render for Settings {
         self.ensure_join_input(window, cx);
         self.ensure_cloud_input(window, cx);
         let p = design::palette(window.appearance());
-        div()
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let inline = self.on_close.is_some();
+        let body = div()
             .id("settings")
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .overflow_y_scroll()
-            .font_family(design::ui_font())
-            .text_size(px(text::BODY))
-            .text_color(p.text)
-            .bg(p.background)
-            .p(px(metrics::PADDING))
+            .p(px(if compact { space::S12 } else { metrics::PADDING }))
             .flex()
             .flex_col()
             .gap(px(16.))
             .child(self.render_accounts(p, window, cx))
             .child(self.render_device_sync(p, window, cx))
             .children(self.render_settings(p, window, cx))
-            .child(self.render_status(p))
+            .child(self.render_status(p));
+
+        div()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &CloseSettings, window, cx| this.close(window, cx)))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                if this.on_close.is_some() {
+                    window.focus(&this.focus, cx);
+                }
+            }))
+            .size_full()
+            .flex()
+            .flex_col()
+            .font_family(design::ui_font())
+            .text_size(px(text::BODY))
+            .text_color(p.text)
+            .bg(p.background)
+            .when(inline, |d| {
+                d.child(
+                    div()
+                        .id("settings-header")
+                        .flex_shrink_0()
+                        .h(px(design::compact::TOP_BAR_HEIGHT))
+                        .px(px(space::S8))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S8))
+                        .child(
+                            icon_button("settings-back", Icon::Back, "Back (Esc)", true, p.glyph)
+                                .size(px(design::compact::TOUCH_BUTTON))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(18.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(p.text)
+                                .child("Settings"),
+                        )
+                        .child(
+                            icon_button("settings-close", Icon::Close, "Close Settings", true, p.glyph)
+                                .size(px(design::compact::TOUCH_BUTTON))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                        ),
+                )
+                .child(hairline(p))
+            })
+            .child(body)
     }
 }
 
@@ -1202,23 +1305,32 @@ impl Settings {
 
     fn render_client_form(&self, form: &ClientForm, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let google = form.provider == Provider::Google;
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let field = |label: &'static str, input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>| {
             let focused = input.focus_handle(cx).is_focused(window);
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(div().w(px(104.)).flex_shrink_0().flex().justify_end().child(format!("{label}:")))
-                .child(
-                    field_frame(focused, false, p)
-                        .overflow_hidden()
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(26.))
-                        .px(px(8.))
-                        .on_action(cx.listener(|this, _: &Escape, _, cx| this.cancel_client(cx)))
-                        .child(div().flex_1().min_w_0().child(input::field(input))),
-                )
+            let box_el = field_frame(focused, false, p)
+                .overflow_hidden()
+                .when(!compact, |d| d.flex_1().min_w_0())
+                .when(compact, |d| d.w_full())
+                .h(px(28.))
+                .px(px(8.))
+                .on_action(cx.listener(|this, _: &Escape, _, cx| this.cancel_client(cx)))
+                .child(div().flex_1().min_w_0().child(input::field(input)));
+            if compact {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(label))
+                    .child(box_el)
+            } else {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().w(px(104.)).flex_shrink_0().flex().justify_end().child(format!("{label}:")))
+                    .child(box_el)
+            }
         };
         card(p)
             .p(px(16.))
@@ -1490,7 +1602,9 @@ impl Settings {
             return self.render_sync_accounts(entry, p, cx);
         }
         let key = entry.key.clone();
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let range = entry.minimum.zip(entry.maximum).map(|(low, high)| format!("{low}–{high}"));
+        let inline_control = matches!(entry.value, SettingValue::Flag { .. });
         let control: Option<AnyElement> = match &entry.value {
             SettingValue::Flag { enabled } => {
                 let (on, key) = (*enabled, key.clone());
@@ -1505,6 +1619,7 @@ impl Settings {
             SettingValue::Text { text } if !entry.choices.is_empty() => Some(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap(px(4.))
                     .children(entry.choices.iter().map(|word| {
                         let selected = word == text;
@@ -1528,30 +1643,45 @@ impl Settings {
             SettingValue::Number { .. } => {
                 self.render_field(&key, 120., key.ends_with("Seconds").then_some("s"), p, window, cx)
             }
-            SettingValue::Text { .. } => self.render_field(&key, 220., None, p, window, cx),
+            SettingValue::Text { .. } => {
+                self.render_field(&key, if compact { 200. } else { 220. }, None, p, window, cx)
+            }
             SettingValue::Addresses { .. } => None,
         };
         let reset_key = key.clone();
-        let reset = div().w(px(52.)).flex_shrink_0().flex().justify_end().when(entry.changed, |d| {
-            d.child(
-                button(ElementId::Name(format!("reset-{key}").into()), "Reset", ButtonKind::Plain(p.accent), ControlSize::Small, true, p)
-                    .on_click(cx.listener(move |this, _, _, cx| this.write(reset_key.clone(), None, cx))),
-            )
+        let reset_btn = entry.changed.then(|| {
+            button(ElementId::Name(format!("reset-{key}").into()), "Reset", ButtonKind::Plain(p.accent), ControlSize::Small, true, p)
+                .on_click(cx.listener(move |this, _, _, cx| this.write(reset_key.clone(), None, cx)))
         });
+        let header_row = if compact && !inline_control {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(setting_label(entry, range, p))
+                .when(control.is_some() || reset_btn.is_some(), |d| {
+                    d.child(div().flex().items_center().gap(px(8.)).children(control).children(reset_btn))
+                })
+        } else {
+            let reset = if compact {
+                div().flex_shrink_0().children(reset_btn)
+            } else {
+                div().w(px(52.)).flex_shrink_0().flex().justify_end().children(reset_btn)
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(setting_label(entry, range, p))
+                .children(control)
+                .child(reset)
+        };
         div()
             .px(px(14.))
             .py(px(10.))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(setting_label(entry, range, p))
-                    .children(control)
-                    .child(reset),
-            )
+            .child(header_row)
             .when_some(
                 match &entry.value {
                     SettingValue::Addresses { addresses } => Some(addresses),
@@ -1586,7 +1716,11 @@ impl Settings {
                     let key = key.to_owned();
                     move |this, _: &Escape, window, cx| {
                         this.revert_field(&key, window, cx);
-                        window.blur(cx);
+                        if this.on_close.is_some() {
+                            window.focus(&this.focus, cx);
+                        } else {
+                            window.blur(cx);
+                        }
                     }
                 }))
                 .child(div().flex_1().min_w_0().child(input::field(&field.input)))

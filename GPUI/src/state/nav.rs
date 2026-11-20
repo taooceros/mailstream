@@ -476,6 +476,63 @@ impl MailApp {
         }
     }
 
+    pub fn show_settings(
+        &mut self,
+        _: &crate::settings::ShowSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let use_inline =
+            cfg!(target_os = "android") || f32::from(window.viewport_size().width) < crate::design::layout::COMPACT_WIDTH;
+        if !use_inline {
+            cx.propagate();
+            return;
+        }
+        self.drawer_open = false;
+        self.context_menu = None;
+        self.tag_editor = None;
+        let view = match self.settings.clone() {
+            Some(existing) => existing,
+            None => {
+                let app = cx.entity().downgrade();
+                let reload = app.clone();
+                let close = app;
+                let view = cx.new(|cx| {
+                    crate::settings::Settings::new_inline(
+                        move |cx| {
+                            reload.update(cx, |app, cx| app.retry(cx)).ok();
+                        },
+                        move |window, cx| {
+                            close.update(cx, |app, cx| {
+                                app.close_settings(window, cx);
+                            })
+                            .ok();
+                        },
+                        window,
+                        cx,
+                    )
+                });
+                crate::settings::register_inline(&view, cx);
+                self.settings = Some(view.clone());
+                view
+            }
+        };
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.settings.take().is_some() {
+            crate::settings::unregister_inline(cx);
+            window.focus(&self.focus, cx);
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn open_compact_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.compact_search = true;
         self.search.focus_handle(cx).focus(window, cx);
@@ -631,6 +688,9 @@ impl MailApp {
 
     /// Esc: ends a selection (MS-305), else the top layer goes, else the search.
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_settings(window, cx) {
+            return;
+        }
         if self.chat_view.is_some()
             && self.chat.update(cx, |chat, cx| chat.close_video_lightbox(window, cx))
         {

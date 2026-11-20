@@ -97,9 +97,9 @@ pub fn in_text_or_reply_context(window: &Window) -> bool {
 
 pub fn bind_keys(cx: &mut App) {
     // Mail list and reader shortcuts require `MailBrowse` and stay out of any text field, inline
-    // reply, search field, or focused sidebar expander.
-    let browse = Some("MailBrowse && !Input && !ReplyBox && !SearchField && !Expander");
-    let search = Some("MailBrowse && !ReplyBox");
+    // reply, search field, focused sidebar expander, or compact inline Settings overlay.
+    let browse = Some("MailBrowse && !Input && !ReplyBox && !SearchField && !Expander && !Settings");
+    let search = Some("MailBrowse && !ReplyBox && !Settings");
     let close_chat = Some("Chat && !Input && !ChatComposer && !VideoLightbox");
     let close_calendar = Some("Calendar && !Input && !EventEditor");
     let window = Some(CONTEXT);
@@ -635,6 +635,8 @@ pub struct MailApp {
     pub drawer_open: bool,
     /// Whether the inline search bar is expanded in compact (small-screen) mode.
     pub compact_search: bool,
+    /// Inline Settings overlay shown on compact viewports and single-window mobile hosts (Android).
+    pub(crate) settings: Option<Entity<crate::settings::Settings>>,
     pub swipe: BackSwipe,
     /// A mouse drag on a layer (MS-266).
     pub drag: MouseDrag,
@@ -781,6 +783,7 @@ impl MailApp {
             sidebar_beside_compose: false,
             drawer_open: false,
             compact_search: false,
+            settings: None,
             swipe: BackSwipe::default(),
             drag: MouseDrag::default(),
             slide: Slide::Rest,

@@ -1403,6 +1403,19 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeIme(
     });
 }
 
+/// Receive Android system back (`OnBackInvokedCallback` / `onBackPressed`) without touching GPUI
+/// on the UI thread.
+///
+/// # Safety
+/// Called by JNI from `GpuiInputActivity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeBack(
+    _env: *mut c_void,
+    _class: *mut c_void,
+) {
+    super::text_input::enqueue_back();
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 // ── JNI export for GpuiActivity splash screen ────────────────────────────────
