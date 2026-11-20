@@ -154,10 +154,15 @@ echo "==> Dexing classes with d8"
 "$BUILD_TOOLS/d8" --min-api "$API_LEVEL" --lib "$ANDROID_JAR" --output "$OUT_DIR/stage" \
   $(find "$OUT_DIR/classes" -name '*.class')
 
-echo "==> Linking AndroidManifest.xml with aapt2"
+echo "==> Compiling Android resources with aapt2"
+mkdir -p "$OUT_DIR/res"
+"$BUILD_TOOLS/aapt2" compile --dir "$POC/android/res" -o "$OUT_DIR/res/resources.zip"
+
+echo "==> Linking AndroidManifest.xml and resources with aapt2"
 "$BUILD_TOOLS/aapt2" link \
   -I "$ANDROID_JAR" \
   --manifest "$POC/android/AndroidManifest.xml" \
+  -R "$OUT_DIR/res/resources.zip" \
   --min-sdk-version "$API_LEVEL" \
   --target-sdk-version 35 \
   -o "$OUT_DIR/unaligned.apk"
@@ -208,5 +213,5 @@ MAILSTREAM_KS_PASS="$KEYSTORE_PASS" MAILSTREAM_KEY_PASS="$KEY_PASS" \
 echo "==> Verifying APK"
 "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$FINAL_APK"
 "$BUILD_TOOLS/zipalign" -c -v 4 "$FINAL_APK" | tail -n 5
-"$BUILD_TOOLS/aapt2" dump badging "$FINAL_APK" | head -n 12
+"$BUILD_TOOLS/aapt2" dump badging "$FINAL_APK" | awk 'NR<=16'
 ls -lh "$SO" "$FINAL_APK"

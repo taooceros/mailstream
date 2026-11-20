@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Monochrome envelope glyph for Android 13+ Material You themed icons -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M34.0,36.0 L74.0,36.0 C75.2,36.0 76.2,36.4 77.0,37.0 L56.8,54.8 C55.2,56.2 52.8,56.2 51.2,54.8 L31.0,37.0 C31.8,36.4 32.8,36.0 34.0,36.0 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M29.4,39.2 L46.2,54.0 L29.4,68.8 C29.1,68.1 29.0,67.3 29.0,66.5 L29.0,41.5 C29.0,40.7 29.1,39.9 29.4,39.2 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M78.6,39.2 C78.9,39.9 79.0,40.7 79.0,41.5 L79.0,66.5 C79.0,67.3 78.9,68.1 78.6,68.8 L61.8,54.0 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M48.4,55.9 L50.1,57.4 C52.3,59.3 55.7,59.3 57.9,57.4 L59.6,55.9 L76.9,71.1 C76.1,71.7 75.1,72.0 74.0,72.0 L34.0,72.0 C32.9,72.0 31.9,71.7 31.1,71.1 Z" />
+</vector>

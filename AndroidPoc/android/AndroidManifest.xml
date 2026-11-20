@@ -12,6 +12,8 @@
 
     <application
         android:label="Mailstream GPUI PoC"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:hasCode="true"
         android:extractNativeLibs="true">
         <activity

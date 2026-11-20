@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Mailstream diagonal blue-to-violet gradient (matches scripts/make-icon.swift) -->
+    <path android:pathData="M0,0 H108 V108 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="13.1"
+                android:startY="0"
+                android:endX="94.9"
+                android:endY="108">
+                <item android:offset="0.0" android:color="#FF5C8CFF" />
+                <item android:offset="0.6" android:color="#FF453DDB" />
+                <item android:offset="1.0" android:color="#FF8C38D9" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Flowing "stream" ribbons -->
+    <path
+        android:fillColor="#29FFFFFF"
+        android:pathData="M-5.2,77.9 C34.1,54.3 70.8,96.2 113.2,72.6 L113.2,113.2 L-5.2,113.2 Z" />
+    <path
+        android:fillColor="#1CFFFFFF"
+        android:pathData="M-5.2,87.0 C34.1,63.5 70.8,105.4 113.2,81.8 L113.2,113.2 L-5.2,113.2 Z" />
+    <path
+        android:fillColor="#12FFFFFF"
+        android:pathData="M-5.2,96.2 C34.1,72.6 70.8,114.6 113.2,91.0 L113.2,113.2 L-5.2,113.2 Z" />
+
+    <!-- Top sheen -->
+    <path android:pathData="M0,0 H108 V48 H0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="0"
+                android:endX="54"
+                android:endY="47.7">
+                <item android:offset="0.0" android:color="#38FFFFFF" />
+                <item android:offset="1.0" android:color="#00FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
