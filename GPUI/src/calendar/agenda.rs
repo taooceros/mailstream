@@ -932,6 +932,7 @@ impl CalendarPane {
             None
         };
         let key = event.key.clone();
+        let time_width = if compact { 82. } else { metrics::TIME_WIDTH };
         let top_row = div()
             .flex()
             .items_center()
@@ -939,11 +940,11 @@ impl CalendarPane {
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(metrics::TIME_WIDTH))
+                    .w(px(time_width))
                     .flex()
                     .flex_col()
                     .items_end()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(time))
+                    .child(div().whitespace_nowrap().font_weight(FontWeight::SEMIBOLD).child(time))
                     .when_some(under, |d, under| {
                         d.child(div().max_w_full().truncate().text_size(px(design::type_scale(compact).footnote)).text_color(p.muted).child(under))
                     }),
@@ -995,11 +996,11 @@ impl CalendarPane {
                     div()
                         .flex()
                         .items_start()
-                        .pl(px(metrics::TIME_WIDTH + space::S12 + design::marks::DOT + space::S8))
+                        .pl(px(time_width + space::S12 + design::marks::DOT + space::S8))
                         .child(reply_el),
                 )
             });
-        let row_height = if stack_reply { 84. } else { metrics::ROW_HEIGHT };
+        let row_height = if stack_reply { if compact { 92. } else { 84. } } else if compact { 60. } else { metrics::ROW_HEIGHT };
         list_row(ElementId::Name(format!("event:{}:{}:{}:{day}", key.account, key.calendar, key.id).into()), selected, false, p)
             .h(px(row_height))
             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.open_clicked(key.clone(), event, cx)))

@@ -248,6 +248,8 @@ impl MailApp {
                             ),
                     )
                     .child(group_title("Mailboxes", p).text_size(px(design::type_scale(true).footnote)).pt(px(space::S8)).pl(px(space::S16)))
+                    .child(
+                        div()
                             .id("drawer-scroll")
                             .flex_1()
                             .min_h_0()
@@ -294,6 +296,7 @@ impl MailApp {
                                             .child("Settings & Accounts"),
                                     )
                                     .child(icon(Icon::Disclosure, 14., p.muted)),
+                            ),
                     ),
             )
             .into_any_element()
