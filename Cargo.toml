@@ -3,11 +3,12 @@
 # warm build (scripts/warm-build.py) covers every member without naming it. New crates go in
 # `members`.
 [workspace]
-members = ["Engine", "FFI", "FFI/bindgen", "GPUI"]
+members = ["Engine", "FFI", "FFI/bindgen", "GPUI", "AndroidPoc"]
+default-members = ["Engine", "FFI", "FFI/bindgen", "GPUI"]
 # Not members: the patched copies of crates.io crates ([patch.crates-io] below) in GPUI/vendor and
-# Engine/vendor, and Flutter's Linux runner, which only Flutter's CMake build compiles, with a
-# target folder of its own in Flutter/build (Flutter/linux/runner/CMakeLists.txt).
-exclude = ["GPUI/vendor", "Engine/vendor", "Flutter/linux/runner", "AndroidPoc"]
+# Engine/vendor, AndroidPoc's vendored gpui-mobile, and Flutter's Linux runner, which only Flutter's
+# CMake build compiles, with a target folder of its own in Flutter/build (Flutter/linux/runner/CMakeLists.txt).
+exclude = ["GPUI/vendor", "Engine/vendor", "Flutter/linux/runner", "AndroidPoc/vendor"]
 resolver = "3"
 
 # Stylo (Blitz's CSS engine) 0.22's derives leave an error type to inference that GPUI's build
@@ -100,3 +101,13 @@ taffy = { path = "GPUI/vendor/taffy" }
 # member, so a debug build of GPUI and the engine's tests share their dependencies.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Size-optimized Android release profile for `AndroidPoc/build-apk.sh` (leaves desktop `release`
+# with full speed and unwinding).
+[profile.android-release]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

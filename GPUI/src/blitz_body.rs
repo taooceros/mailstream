@@ -606,13 +606,7 @@ fn copy_selection(cx: &mut App) {
             page.selected_content().await
         };
         if let Some(selected) = selected {
-            cx.update(|cx| {
-                #[cfg(feature = "gpui-fast")]
-                let item = ClipboardItem::new_string_with_html(selected.text, selected.html);
-                #[cfg(not(feature = "gpui-fast"))]
-                let item = ClipboardItem::new_string(selected.text);
-                cx.write_to_clipboard(item);
-            });
+            cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string_with_html(selected.text, selected.html)));
         }
     })
     .detach();

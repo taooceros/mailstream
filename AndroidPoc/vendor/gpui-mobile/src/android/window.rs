@@ -1417,6 +1417,7 @@ impl PlatformWindow for AndroidPlatformWindow {
             cb(RequestFrameOptions {
                 require_presentation: false,
                 force_render: text_dirty || surface_new,
+                signal_at: super::frame_source::take_signal_at(),
                 ..Default::default()
             });
         });
