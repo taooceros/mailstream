@@ -834,8 +834,8 @@ impl CalendarPane {
     }
 
     /// An account whose calendar cannot show: its calendar is not connected (Connect asks the
-    /// provider in the browser, MS-306), or its last fetch failed. Its × closes it until that
-    /// changes (MS-322).
+    /// provider in the browser, MS-306), or its last fetch failed. Its × closes it permanently
+    /// for that unconnected account (MS-433), or until the fetch error changes (MS-322).
     fn render_notice(&self, index: usize, p: &'static Palette, cx: &mut Context<Self>) -> Div {
         let account = &self.accounts[index];
         let failed = account.problem.clone().filter(|_| account.granted);
@@ -844,28 +844,36 @@ impl CalendarPane {
             Some(problem) => (Tone::Error, format!("Could not update: {problem}")),
             None => (Tone::Action, "Connect this account's calendar to show its events here.".to_owned()),
         };
+        let notice_id = account.id.clone();
+        let close_selector = account.id.clone();
+        let close_account = account.id.clone();
         // As tall as its message wraps to: the list measures each line.
         div().py(px(space::S4)).px(px(space::S12 - rows::INSET)).child(
-            notice(tone, Some(title.into()), message, false, p).when(failed.is_none(), |d| {
-                let waiting = self.connecting.as_ref() == Some(&account.id);
-                let idle = self.connecting.is_none();
-                let id = account.id.clone();
-                d.child(
-                    button(
-                        ElementId::Name(format!("connect-calendar:{}", account.id).into()),
-                        if waiting { "Waiting for Browser…" } else { "Connect Calendar…" },
-                        ButtonKind::Secondary,
-                        ControlSize::Small,
-                        idle,
-                        p,
+            notice(tone, Some(title.into()), message, false, p)
+                .debug_selector(move || format!("calendar-notice:{notice_id}"))
+                .when(failed.is_none(), |d| {
+                    let waiting = self.connecting.as_ref() == Some(&account.id);
+                    let idle = self.connecting.is_none();
+                    let id = account.id.clone();
+                    d.child(
+                        button(
+                            ElementId::Name(format!("connect-calendar:{}", account.id).into()),
+                            if waiting { "Waiting for Browser…" } else { "Connect Calendar…" },
+                            ButtonKind::Secondary,
+                            ControlSize::Small,
+                            idle,
+                            p,
+                        )
+                        .when(idle, |b| b.on_click(cx.listener(move |this, _, _, cx| this.connect_calendar(id.clone(), cx)))),
                     )
-                    .when(idle, |b| b.on_click(cx.listener(move |this, _, _, cx| this.connect_calendar(id.clone(), cx)))),
-                )
-            })
-            .child(
-                notice_close(ElementId::Name(format!("calendar-notice-close:{}", account.id).into()), p)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.dismiss_account_notice(index, cx))),
-            ),
+                })
+                .child(
+                    notice_close(ElementId::Name(format!("calendar-notice-close:{}", account.id).into()), p)
+                        .debug_selector(move || format!("calendar-notice-close:{close_selector}"))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.dismiss_account_notice(&close_account, cx);
+                        })),
+                ),
         )
     }
 

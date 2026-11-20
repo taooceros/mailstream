@@ -1137,10 +1137,11 @@ impl CalendarPane {
     }
 
     /// The day and week views' one line for the accounts whose calendar cannot show; a click
-    /// opens the agenda, which has each one's notice; its × hides it until the message changes.
+    /// opens the agenda, which has each one's notice; its × closes unconnected accounts
+    /// permanently (MS-433) and fetch failures until their error changes (MS-322).
     pub(super) fn render_notice_line(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let notices: Vec<&mailstream::CalendarAccount> =
-            self.accounts.iter().filter(|account| !account.granted || account.problem.is_some()).collect();
+            self.accounts.iter().filter(|account| self.account_notice_visible(account)).collect();
         let first = notices.first()?;
         let failed = notices.iter().any(|account| account.granted && account.problem.is_some());
         let message = if notices.len() == 1 {
@@ -1149,14 +1150,11 @@ impl CalendarPane {
         } else {
             format!("{} accounts cannot show their calendars", notices.len())
         };
-        if self.dismissed_notice.as_deref() == Some(message.as_str()) {
-            return None;
-        }
-        let dismissed = message.clone();
         Some(
             div().flex_shrink_0().px(px(space::S12)).pb(px(space::S6)).child(
                 notice(if failed { Tone::Error } else { Tone::Action }, None, message, true, p)
                     .id("calendar-notice")
+                    .debug_selector(|| "calendar-notice".into())
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_view(View::Agenda, cx)))
                     .child(
@@ -1167,13 +1165,14 @@ impl CalendarPane {
                             .text_color(p.accent)
                             .child("Show in Agenda"),
                     )
-                    .child(notice_close("calendar-notice-close", p).on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.dismissed_notice = Some(dismissed.clone());
-                            cx.notify();
-                        },
-                    ))),
+                    .child(
+                        notice_close("calendar-notice-close", p)
+                            .debug_selector(|| "calendar-notice-close".into())
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.dismiss_notice_line(cx);
+                            })),
+                    ),
             )
             .into_any_element(),
         )
@@ -1891,6 +1890,157 @@ mod tests {
         cx.simulate_mouse_up(point(card.center().x, card.center().y + px(120.)), MouseButton::Left, Modifiers::default());
         cx.run_until_parked();
         assert_eq!(sketch(&pane, cx), None);
+    }
+
+    fn unconnected_account(id: &str) -> mailstream::CalendarAccount {
+        mailstream::CalendarAccount {
+            id: id.into(),
+            label: id.into(),
+            provider: mailstream::Provider::Google,
+            granted: false,
+            writable: false,
+            list_editable: false,
+            loading: false,
+            problem: None,
+            fetched: None,
+            calendars: Vec::new(),
+        }
+    }
+
+    fn temp_dismissed_path(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("mailstream-test-{}-{name}.json", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        path
+    }
+
+    #[gpui::test]
+    fn dismissing_an_unconnected_account_persists_across_views_and_restarts(cx: &mut TestAppContext) {
+        let path = temp_dismissed_path("unconnected-persist");
+        let (pane, cx) = week_view(cx);
+        let today = Local::now().date_naive();
+        pane.update(cx, |pane, cx| {
+            pane.dismissed_path = Some(path.clone());
+            pane.accounts = vec![unconnected_account("a@example.com"), unconnected_account("b@example.com")];
+            pane.view = View::Agenda;
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("calendar-notice:a@example.com").is_some());
+        assert!(cx.debug_bounds("calendar-notice:b@example.com").is_some());
+
+        // Closing one account in Agenda hides it there, leaves the other, and persists only that id.
+        click_on(cx, "calendar-notice-close:a@example.com");
+        assert!(cx.debug_bounds("calendar-notice:a@example.com").is_none());
+        assert!(cx.debug_bounds("calendar-notice:b@example.com").is_some());
+        assert_eq!(super::super::load_dismissed_from(&path), ["a@example.com".to_owned()].into_iter().collect());
+
+        // Switching to Week still shows the remaining account; closing the line persists it too
+        // and hides it in Agenda.
+        key(cx, "w");
+        assert!(cx.debug_bounds("calendar-notice").is_some());
+        click_on(cx, "calendar-notice-close");
+        assert!(cx.debug_bounds("calendar-notice").is_none());
+        key(cx, "a");
+        assert!(cx.debug_bounds("calendar-notice:a@example.com").is_none());
+        assert!(cx.debug_bounds("calendar-notice:b@example.com").is_none());
+        assert_eq!(
+            super::super::load_dismissed_from(&path),
+            ["a@example.com".to_owned(), "b@example.com".to_owned()].into_iter().collect()
+        );
+
+        // Simulating a restart: loading from disk keeps a and b hidden across views, while a new
+        // unconnected account c still reminds once.
+        pane.update(cx, |pane, cx| {
+            pane.dismissed_accounts.clear();
+            pane.dismissed_unconnected = super::super::load_dismissed_from(&path);
+            pane.accounts.push(unconnected_account("c@example.com"));
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("calendar-notice:a@example.com").is_none());
+        assert!(cx.debug_bounds("calendar-notice:b@example.com").is_none());
+        assert!(cx.debug_bounds("calendar-notice:c@example.com").is_some());
+        key(cx, "w");
+        assert!(cx.debug_bounds("calendar-notice").is_some());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[gpui::test]
+    fn connecting_a_dismissed_account_prunes_its_saved_dismissal(cx: &mut TestAppContext) {
+        let path = temp_dismissed_path("unconnected-prune");
+        let (pane, cx) = week_view(cx);
+        let today = Local::now().date_naive();
+        pane.update(cx, |pane, cx| {
+            pane.dismissed_path = Some(path.clone());
+            pane.accounts = vec![unconnected_account("a@example.com")];
+            pane.view = View::Agenda;
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        click_on(cx, "calendar-notice-close:a@example.com");
+        assert!(super::super::load_dismissed_from(&path).contains("a@example.com"));
+
+        // Once the account connects its calendar, its saved dismissal is cleared on disk.
+        pane.update(cx, |pane, cx| {
+            pane.accounts[0].granted = true;
+            pane.prune_connected_dismissals(cx);
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(super::super::load_dismissed_from(&path).is_empty());
+
+        // If disconnected again later, it reminds once again.
+        pane.update(cx, |pane, cx| {
+            pane.accounts[0].granted = false;
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("calendar-notice:a@example.com").is_some());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[gpui::test]
+    fn fetch_error_dismissal_stays_session_only_and_reappears_when_error_changes(cx: &mut TestAppContext) {
+        let path = temp_dismissed_path("fetch-error-session");
+        let (pane, cx) = week_view(cx);
+        let today = Local::now().date_naive();
+        let mut failing = editable_account();
+        failing.problem = Some("503 Service Unavailable".into());
+        pane.update(cx, |pane, cx| {
+            pane.dismissed_path = Some(path.clone());
+            pane.accounts = vec![failing];
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("calendar-notice").is_some());
+
+        // Closing the error line hides it in Week and Agenda without writing to the unconnected file.
+        click_on(cx, "calendar-notice-close");
+        assert!(cx.debug_bounds("calendar-notice").is_none());
+        assert!(!path.exists(), "fetch errors must not persist to the unconnected dismissal file");
+        key(cx, "a");
+        assert!(cx.debug_bounds("calendar-notice:sam@example.com").is_none());
+
+        // A different error reappears in both views.
+        pane.update(cx, |pane, cx| {
+            pane.accounts[0].problem = Some("401 Unauthorized".into());
+            pane.rebuild(today);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("calendar-notice:sam@example.com").is_some());
+        key(cx, "w");
+        assert!(cx.debug_bounds("calendar-notice").is_some());
+
+        std::fs::remove_file(&path).ok();
     }
 }
 

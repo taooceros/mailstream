@@ -24,7 +24,9 @@ pub mod model;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::{Days, Local, NaiveDate, NaiveDateTime};
@@ -61,8 +63,8 @@ const PAST_DAYS: i64 = 7;
 /// How often the calendar follows the clock (the Up Next card, the time line, a new day).
 const CLOCK: Duration = Duration::from_secs(15);
 
-/// What an account's agenda notice says (not connected, or why its fetch failed), so a closed one
-/// comes back once that changes (MS-322).
+/// What a connected account's error notice says, so a closed fetch failure comes back once its
+/// error changes (MS-322).
 fn notice_key(account: &CalendarAccount) -> String {
     format!("{}\n{}\n{}", account.id, account.granted, account.problem.as_deref().unwrap_or_default())
 }
@@ -143,11 +145,15 @@ pub struct CalendarPane {
     accounts: Vec<CalendarAccount>,
     /// The account whose calendar is being connected in the browser (MS-306).
     connecting: Option<String>,
-    /// The day and week views' notice line when the user closed it (MS-322): it stays hidden
-    /// until its message changes.
-    dismissed_notice: Option<String>,
-    /// The agenda's account notices the user closed, by `notice_key`: each stays hidden until
-    /// what it says changes.
+    /// Accounts whose "calendar not connected" reminder the user dismissed, kept across launches
+    /// in `gpui-calendar-dismissed.json` (MS-433).
+    dismissed_unconnected: HashSet<String>,
+    /// Override path for `gpui-calendar-dismissed.json` in tests.
+    dismissed_path: Option<PathBuf>,
+    /// Whether on-disk calendar UI preferences (`collapsed`, `dismissed_unconnected`) were loaded.
+    prefs_loaded: bool,
+    /// Connected accounts' fetch-failure notices closed this session, by `notice_key`: each stays
+    /// hidden until its error changes (MS-322).
     dismissed_accounts: HashSet<String>,
     /// This computer's time zone, as the engine names it, which the editor's times are in.
     time_zone: String,
@@ -272,7 +278,9 @@ impl CalendarPane {
             active: false,
             accounts: Vec::new(),
             connecting: None,
-            dismissed_notice: None,
+            dismissed_unconnected: HashSet::new(),
+            dismissed_path: None,
+            prefs_loaded: false,
             dismissed_accounts: HashSet::new(),
             time_zone: String::new(),
             open_after: None,
@@ -375,8 +383,10 @@ impl CalendarPane {
 
     /// The calendar comes into view, from what the engine holds (it fetches what got old itself).
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.active {
+        if !self.prefs_loaded {
             self.collapsed = load_collapsed();
+            self.dismissed_unconnected = load_dismissed_unconnected();
+            self.prefs_loaded = true;
         }
         self.active = true;
         window.focus(&self.focus, cx);
@@ -417,6 +427,7 @@ impl CalendarPane {
             match result {
                 Ok(agenda) => {
                     this.accounts = agenda.accounts;
+                    this.prune_connected_dismissals(cx);
                     this.time_zone = agenda.time_zone;
                     this.events = agenda.events.into_iter().filter_map(Event::new).collect();
                     this.loading = agenda.loading;
@@ -446,7 +457,7 @@ impl CalendarPane {
         let days = model::agenda_days(&self.events, today);
         let mut entries = Vec::with_capacity(self.accounts.len() + days.len() * 4);
         for (index, account) in self.accounts.iter().enumerate() {
-            if (!account.granted || account.problem.is_some()) && !self.dismissed_accounts.contains(&notice_key(account)) {
+            if self.account_notice_visible(account) {
                 entries.push(Entry::Notice(index));
             }
         }
@@ -479,12 +490,93 @@ impl CalendarPane {
         self.built_for = Some(today);
     }
 
-    /// Closes an account's agenda notice until what it says changes (MS-322).
-    fn dismiss_account_notice(&mut self, account: usize, cx: &mut Context<Self>) {
-        let key = notice_key(&self.accounts[account]);
-        self.dismissed_accounts.insert(key);
+    /// Whether `account`'s calendar notice should show: its calendar is not connected (unless the
+    /// user dismissed that reminder for this account, MS-433), or its last fetch failed (unless
+    /// closed for the same error this session, MS-322).
+    pub(super) fn account_notice_visible(&self, account: &CalendarAccount) -> bool {
+        if !account.granted {
+            !self.dismissed_unconnected.contains(&account.id)
+        } else if account.problem.is_some() {
+            !self.dismissed_accounts.contains(&notice_key(account))
+        } else {
+            false
+        }
+    }
+
+    /// Closes an account's agenda notice: kept on disk per account when its calendar is not
+    /// connected (MS-433), or until its error changes when a connected calendar failed (MS-322).
+    pub(super) fn dismiss_account_notice(&mut self, account_id: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.accounts.iter().find(|account| account.id == account_id) else { return };
+        if !account.granted {
+            if self.dismissed_unconnected.insert(account.id.clone()) {
+                self.save_dismissed_unconnected(cx);
+            }
+        } else if account.problem.is_some() {
+            self.dismissed_accounts.insert(notice_key(account));
+        }
         self.rebuild(Local::now().date_naive());
         cx.notify();
+    }
+
+    /// Closes every currently visible account notice from the day/week notice line: unconnected
+    /// accounts are kept on disk (MS-433), while fetch failures stay hidden until their error
+    /// changes (MS-322).
+    pub(super) fn dismiss_notice_line(&mut self, cx: &mut Context<Self>) {
+        let mut persist = false;
+        let mut changed = false;
+        for account in &self.accounts {
+            if !self.account_notice_visible(account) {
+                continue;
+            }
+            if !account.granted {
+                if self.dismissed_unconnected.insert(account.id.clone()) {
+                    persist = true;
+                    changed = true;
+                }
+            } else if account.problem.is_some() && self.dismissed_accounts.insert(notice_key(account)) {
+                changed = true;
+            }
+        }
+        if persist {
+            self.save_dismissed_unconnected(cx);
+        }
+        if changed {
+            self.rebuild(Local::now().date_naive());
+            cx.notify();
+        }
+    }
+
+    /// Forgets a saved "not connected" dismissal once an account connects its calendar, so a
+    /// later disconnection can remind once again.
+    fn prune_connected_dismissals(&mut self, cx: &mut Context<Self>) {
+        let mut pruned = false;
+        for account in &self.accounts {
+            if account.granted && self.dismissed_unconnected.remove(&account.id) {
+                pruned = true;
+            }
+        }
+        if pruned {
+            self.save_dismissed_unconnected(cx);
+        }
+    }
+
+    fn save_dismissed_unconnected(&self, cx: &mut Context<Self>) {
+        if !self.active && self.dismissed_path.is_none() {
+            return;
+        }
+        let path = self.dismissed_path.clone().unwrap_or_else(dismissed_path);
+        let mut saved: Vec<String> = self.dismissed_unconnected.iter().cloned().collect();
+        saved.sort();
+        DISMISSED_PENDING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(path, saved);
+        cx.background_executor()
+            .spawn(async {
+                flush_dismissed_pending();
+            })
+            .detach();
     }
 
     /// Accounts whose sign-in grants calendar access.
@@ -1183,4 +1275,56 @@ fn load_collapsed() -> HashSet<SharedString> {
         .into_iter()
         .map(SharedString::from)
         .collect()
+}
+
+static DISMISSED_PENDING: Mutex<Option<HashMap<PathBuf, Vec<String>>>> = Mutex::new(None);
+static DISMISSED_WRITE: Mutex<()> = Mutex::new(());
+
+fn dismissed_path() -> PathBuf {
+    mailstream::support_directory().join("gpui-calendar-dismissed.json")
+}
+
+fn load_dismissed_unconnected() -> HashSet<String> {
+    load_dismissed_from(&dismissed_path())
+}
+
+fn load_dismissed_from(path: &Path) -> HashSet<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn write_dismissed(path: &Path, saved: &[String]) {
+    let Ok(json) = serde_json::to_vec(saved) else { return };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        if std::fs::rename(&tmp, path).is_err() {
+            std::fs::write(path, &json).ok();
+            std::fs::remove_file(&tmp).ok();
+        }
+    } else {
+        std::fs::write(path, &json).ok();
+    }
+}
+
+fn flush_dismissed_pending() {
+    let _io = DISMISSED_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let batch = {
+            let mut pending = DISMISSED_PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            pending.as_mut().map(std::mem::take).unwrap_or_default()
+        };
+        if batch.is_empty() {
+            break;
+        }
+        for (path, saved) in batch {
+            write_dismissed(&path, &saved);
+        }
+    }
 }
