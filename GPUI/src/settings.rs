@@ -28,7 +28,7 @@ use mailstream::{
     Provider, SettingEntry, SettingValue, SyncDevice, SyncTicket,
 };
 
-use crate::controls::{ButtonKind, ControlSize, Tone, button, field_frame, hairline, icon_button, notice, pill, switch, tag};
+use crate::controls::{ButtonKind, ControlSize, Tone, button, capsule, field_frame, hairline, icon_button, notice, pill, switch, tag};
 use crate::design::{self, Palette, layout, radius, settings as metrics, space, stroke, text};
 use crate::engine::{MailError, engine};
 use crate::icons::{Icon, icon};
@@ -1188,29 +1188,36 @@ impl Render for Settings {
                         .id("settings-header")
                         .flex_shrink_0()
                         .h(px(design::compact::TOP_BAR_HEIGHT))
-                        .px(px(space::S8))
+                        .px(px(space::S10))
                         .flex()
                         .items_center()
                         .gap(px(space::S8))
                         .child(
-                            icon_button("settings-back", Icon::Back, "Back (Esc)", true, p.glyph)
-                                .size(px(design::compact::TOUCH_BUTTON))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                            capsule(p).child(
+                                icon_button("settings-back", Icon::Back, "Back (Esc)", true, p.glyph)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                            ),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
-                                .text_size(px(18.))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(p.text)
-                                .child("Settings"),
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(design::compact::HEADER_TITLE))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(p.text)
+                                        .child("Settings"),
+                                ),
                         )
                         .child(
-                            icon_button("settings-close", Icon::Close, "Close Settings", true, p.glyph)
-                                .size(px(design::compact::TOUCH_BUTTON))
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                            capsule(p).child(
+                                icon_button("settings-close", Icon::Close, "Close Settings", true, p.glyph)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                            ),
                         ),
                 )
                 .child(hairline(p))
@@ -1237,9 +1244,10 @@ impl Settings {
                 )
                 .into_any_element(),
             Some(Ok(rows)) => {
+                let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
                 let last = rows.len() - 1;
                 card(p)
-                    .children(rows.iter().enumerate().map(|(index, row)| self.render_row(index, row, index == last, p, cx)))
+                    .children(rows.iter().enumerate().map(|(index, row)| self.render_row(index, row, index == last, compact, p, cx)))
                     .into_any_element()
             }
         };
@@ -1378,6 +1386,7 @@ impl Settings {
         index: usize,
         row: &Account,
         last: bool,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1444,56 +1453,75 @@ impl Settings {
                 .into_any_element()
         };
 
-        let main = div()
-            .min_h(px(metrics::ROW_HEIGHT))
-            .px(px(14.))
-            .py(px(8.))
+        let services = div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(12.))
-            .child(div().flex_shrink_0().size(px(metrics::DOT)).rounded_full().bg(design::account_color(index)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(title)
-                    .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(detail.join(" · ")))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(4.))
-                            .children(row.services.iter().map(|s| tag(service_title(s), None, p).into_any_element()))
-                            .children(row.connectable.iter().map(|service| {
-                                let idle = self.signing_in.is_none();
-                                let partly = row.services.contains(service);
-                                let label = if partly {
-                                    format!("Allow Full {}", service_title(service))
-                                } else {
-                                    format!("Connect {}…", service_title(service))
-                                };
-                                let (account, service) = (row.clone(), service.clone());
-                                button(
-                                    ElementId::Name(format!("connect:{}:{service}", row.id).into()),
-                                    label,
-                                    ButtonKind::Plain(p.accent),
-                                    ControlSize::Small,
-                                    idle,
-                                    p,
-                                )
-                                .when(idle, |b| {
-                                    b.on_click(cx.listener(move |this, _, _, cx| this.connect(&account, service.clone(), cx)))
-                                })
-                                .into_any_element()
-                            })),
-                    ),
-            )
-            .child(actions);
-
+            .gap(px(4.))
+            .children(row.services.iter().map(|s| tag(service_title(s), None, p).into_any_element()))
+            .children(row.connectable.iter().map(|service| {
+                let idle = self.signing_in.is_none();
+                let partly = row.services.contains(service);
+                let label = if partly {
+                    format!("Allow Full {}", service_title(service))
+                } else {
+                    format!("Connect {}…", service_title(service))
+                };
+                let (account, service) = (row.clone(), service.clone());
+                button(
+                    ElementId::Name(format!("connect:{}:{service}", row.id).into()),
+                    label,
+                    ButtonKind::Plain(p.accent),
+                    ControlSize::Small,
+                    idle,
+                    p,
+                )
+                .when(idle, |b| {
+                    b.on_click(cx.listener(move |this, _, _, cx| this.connect(&account, service.clone(), cx)))
+                })
+                .into_any_element()
+            }));
+        let main = if compact {
+            div()
+                .min_h(px(metrics::ROW_HEIGHT))
+                .px(px(14.))
+                .py(px(10.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(div().flex_shrink_0().size(px(metrics::DOT)).rounded_full().bg(design::account_color(index)))
+                        .child(div().flex_1().min_w_0().child(title))
+                        .child(actions),
+                )
+                .child(div().pl(px(18.)).text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(detail.join(" · ")))
+                .child(div().pl(px(18.)).child(services))
+        } else {
+            div()
+                .min_h(px(metrics::ROW_HEIGHT))
+                .px(px(14.))
+                .py(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(div().flex_shrink_0().size(px(metrics::DOT)).rounded_full().bg(design::account_color(index)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(title)
+                        .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(detail.join(" · ")))
+                        .child(services),
+                )
+                .child(actions)
+        };
         div()
             .flex()
             .flex_col()

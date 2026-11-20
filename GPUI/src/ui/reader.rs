@@ -110,7 +110,7 @@ impl MailApp {
                 column().mt(px(space::S24)).child(notice(Tone::Error, None, error.clone(), false, p)).into_any_element(),
             ),
             Some(ThreadState::Loaded(messages)) if conversation.chat_log() => {
-                for (index, (id, row)) in self.render_chat_log(messages, remote, p, cx).into_iter().enumerate() {
+                for (index, (id, row)) in self.render_chat_log(messages, remote, compact, p, cx).into_iter().enumerate() {
                     if pinned.is_some() && id.as_ref() == pinned {
                         target = Some(rows.len());
                     }
@@ -164,8 +164,8 @@ impl MailApp {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(if compact { design::compact::TOP_BAR_HEIGHT + space::S10 } else { layout::HEADER_HEIGHT + space::S16 }))
-            .pb(px(if compact { space::S24 } else { 64. }))
+            .pt(px(if compact { design::compact::TOP_BAR_HEIGHT + space::S12 } else { layout::HEADER_HEIGHT + space::S16 }))
+            .pb(px(if compact { design::compact::DOCK_CLEARANCE + space::S12 } else { 64. }))
             .children(rows)
             .into_any_element()
     }
@@ -618,6 +618,7 @@ impl MailApp {
         &self,
         messages: &[ShownMessage],
         remote: bool,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Vec<(Option<String>, AnyElement)> {
@@ -630,7 +631,7 @@ impl MailApp {
             // A message joining a run names its recipients only when they changed.
             let recipients = !message.continued || previous.is_none_or(|before| before.recipients != message.recipients);
             previous = Some(message);
-            rows.push((Some(message.id.clone()), self.render_log_message(message, recipients, remote, p, cx)));
+            rows.push((Some(message.id.clone()), self.render_log_message(message, recipients, remote, compact, p, cx)));
         }
         rows
     }
@@ -640,11 +641,12 @@ impl MailApp {
         message: &ShownMessage,
         recipients: bool,
         remote: bool,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = message.id.clone();
-        let hovered = self.hovered_message.as_ref() == Some(&id);
+        let hovered = !compact && self.hovered_message.as_ref() == Some(&id);
         let continued = message.continued;
         let sender = message.sender();
         let lead = if continued {

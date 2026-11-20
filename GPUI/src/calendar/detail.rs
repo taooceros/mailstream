@@ -62,7 +62,9 @@ impl CalendarPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let event = &self.events[index];
-        island(p.background, p)
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let surface = if compact { div().relative().overflow_hidden().bg(p.background) } else { island(p.background, p) };
+        surface
             .id(ElementId::Name(format!("calendar-detail:{}:{}", event.key.account, event.key.id).into()))
             .debug_selector(|| "calendar-detail".into())
             .size_full()

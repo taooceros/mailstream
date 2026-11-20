@@ -28,9 +28,9 @@ use crate::avatars;
 use crate::bench::{Bench, Turn};
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, centered_note, hairline, icon_avatar, icon_button, island, list_row,
-    mark_dot, notice, notice_close, own_presses, pill, raised_capsule, row_layout, scrim, search_field, section_header, tag,
-    title_bar,
+    ButtonKind, ControlSize, Tone, bottom_scrim, button, capsule, centered_note, hairline, icon_avatar, icon_button, island,
+    lifted_card, list_row, mark_dot, notice, notice_close, own_presses, pill, raised_capsule, row_layout, scrim, search_field,
+    section_header, tag, title_bar, unread_dot,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};
@@ -224,7 +224,7 @@ impl Render for MailApp {
                     .min_h_0()
                     .w_full()
                     .child(content)
-                    .when(show_fab, |d| d.child(self.render_fab(p, cx)))
+                    .when(show_bottom_bar, |d| d.child(self.render_compact_dock(show_fab, safe_bottom, p, cx)))
             } else {
                 div()
                     .flex_1()
@@ -235,7 +235,6 @@ impl Render for MailApp {
                     .pb(px(layout::GAP))
                     .child(content)
             })
-            .when(show_bottom_bar, |d| d.child(self.render_bottom_bar(p, cx)))
             .children(page)
             // The frosted window's edge (MS-249), over the islands and pages; takes no pointer.
             .when(!compact, |d| {
@@ -263,7 +262,7 @@ impl Render for MailApp {
             })
             .when(minimized, |d| {
                 let bottom = if show_bottom_bar {
-                    design::compact::BOTTOM_BAR_HEIGHT + space::S12
+                    design::compact::DOCK_CLEARANCE + safe_bottom
                 } else {
                     compose_metrics::FLOAT_MARGIN
                 };
@@ -296,21 +295,24 @@ impl Render for MailApp {
             .when_some(self.frame_meter.clone(), |d, meter| {
                 d.child(deferred(div().absolute().left(px(space::S16)).bottom(px(space::S16)).child(meter)).priority(2))
             })
-            .child(
-                deferred(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .when(compact, |d| d.pb(px(design::compact::BOTTOM_BAR_HEIGHT)))
-                        .child(self.notifications.clone()),
-                )
-                .priority(2),
-            )
+            .child({
+                let toast_bottom = if !compact {
+                    0.
+                } else if show_bottom_bar {
+                    design::compact::DOCK_CLEARANCE + safe_bottom
+                } else if self.reader().is_some() {
+                    design::compact::REPLY_BAR_HEIGHT + space::S24
+                } else {
+                    space::S16
+                };
+                deferred(div().absolute().inset_0().when(compact, |d| d.pb(px(toast_bottom))).child(self.notifications.clone()))
+                    .priority(2)
+            })
             .when(cfg!(target_os = "macos"), |d| {
                 d.child(
-                    canvas(|_, _, _| {}, |_, _, window, _| {
+                    canvas(|_, _, _| {}, |_, _, _window, _| {
                         #[cfg(target_os = "macos")]
-                        webview::end_frame(window);
+                        webview::end_frame(_window);
                     })
                     .absolute()
                     .size_0(),
@@ -692,45 +694,6 @@ impl MailApp {
         surface.occlude().child(column)
     }
 
-    /// Thumb-zone Floating Action Button in compact mode (MS-408): New Message in Mail, New Chat
-    /// in Chat, New Event in Calendar.
-    fn render_fab(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let (id, glyph) = if self.chat_view.is_some() {
-            ("fab-new-chat", Icon::Compose)
-        } else if self.calendar_view {
-            ("fab-new-event", Icon::AddDraft)
-        } else {
-            ("fab-compose", Icon::Compose)
-        };
-        let in_chat = self.chat_view.is_some();
-        let in_calendar = self.calendar_view;
-        div()
-            .id(id)
-            .absolute()
-            .right(px(space::S16))
-            .bottom(px(space::S16))
-            .size(px(design::compact::FAB_SIZE))
-            .rounded(px(design::compact::FAB_RADIUS))
-            .bg(p.accent)
-            .shadow(p.popover_shadow.clone())
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .active(|s| s.opacity(0.85))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                if in_chat {
-                    this.chat.update(cx, |chat, cx| chat.start_new_chat(window, cx));
-                } else if in_calendar {
-                    this.calendar.update(cx, |calendar, cx| calendar.start_new_event(window, cx));
-                } else {
-                    this.new_message(&NewMessage, window, cx);
-                }
-            }))
-            .child(icon(glyph, 22., p.on_accent))
-            .into_any_element()
-    }
 }
 
 /// The gap beside the docked compose column (Flutter's `ResizeGap`): dragged, it moves the

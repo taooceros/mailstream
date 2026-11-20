@@ -413,6 +413,17 @@ pub fn page_scrim(p: &Palette) -> Div {
     div().absolute().top_0().left_0().right_0().h(px(design::reader::SCRIM_HEIGHT)).bg(fade)
 }
 
+/// Soft bottom fade matching [`page_scrim`] so scrolling content glides cleanly beneath a floating
+/// bottom glass dock or reply capsule.
+pub fn bottom_scrim(surface: Hsla, height: f32) -> Div {
+    let fade = linear_gradient(
+        180.,
+        linear_color_stop(surface.opacity(0.), 0.),
+        linear_color_stop(surface, 0.62),
+    );
+    div().absolute().bottom_0().left_0().right_0().h(px(height)).bg(fade)
+}
+
 /// Keeps a left press on `element` from what lies under it, for content whose own drag must
 /// stay its own (a mail body's text selection and links, a text field): a drag from there never
 /// moves a page (MS-266, `swipe.rs`) or the window.

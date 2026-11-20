@@ -705,25 +705,27 @@ pub mod layout {
     pub const MENU_ROW: f32 = 26.0;
 }
 
-/// Small-screen (phone) shell metrics: full-bleed views, thumb-zone bottom bar & FAB,
-/// slide-over navigation drawer, and high-density 3-line touch rows (MS-408).
+/// Small-screen (phone) shell metrics: unified warm surfaces, floating glass top capsules and
+/// bottom dock, slide-over drawer, and touch-friendly 3-line rows (MS-408, MS-417).
 pub mod compact {
-    pub const TOP_BAR_HEIGHT: f32 = 52.0;
-    pub const BOTTOM_BAR_HEIGHT: f32 = 60.0;
-    pub const BOTTOM_PILL_WIDTH: f32 = 54.0;
-    pub const BOTTOM_PILL_HEIGHT: f32 = 28.0;
-    pub const DRAWER_WIDTH: f32 = 284.0;
-    pub const DRAWER_ROW: f32 = 42.0;
-    pub const ROW_HEIGHT: f32 = 78.0;
-    pub const BUNDLE_ROW_HEIGHT: f32 = 64.0;
-    pub const AVATAR: f32 = 38.0;
-    pub const TOUCH_BUTTON: f32 = 38.0;
-    pub const FAB_SIZE: f32 = 52.0;
-    pub const FAB_RADIUS: f32 = 16.0;
-    pub const REPLY_BAR_HEIGHT: f32 = 56.0;
-    pub const READER_PADDING: f32 = 12.0;
-    pub const TITLE_SIZE: f32 = 19.0;
-
+    pub const TOP_BAR_HEIGHT: f32 = super::layout::HEADER_HEIGHT;
+    /// Floating glass bottom dock height (shared by the nav capsule and the integrated Compose circle).
+    pub const DOCK_HEIGHT: f32 = 54.0;
+    pub const DOCK_PADDING: f32 = 4.0;
+    pub const DOCK_MARGIN_X: f32 = 14.0;
+    pub const DOCK_MARGIN_B: f32 = 12.0;
+    /// Bottom scroll clearance and toast offset so content clears the floating dock cleanly.
+    pub const DOCK_CLEARANCE: f32 = 88.0;
+    pub const DRAWER_WIDTH: f32 = 292.0;
+    pub const DRAWER_ROW: f32 = 40.0;
+    pub const ROW_HEIGHT: f32 = 76.0;
+    pub const BUNDLE_ROW_HEIGHT: f32 = 62.0;
+    pub const AVATAR: f32 = super::list::AVATAR;
+    pub const FAB_SIZE: f32 = DOCK_HEIGHT;
+    pub const REPLY_BAR_HEIGHT: f32 = 46.0;
+    pub const READER_PADDING: f32 = 14.0;
+    pub const TITLE_SIZE: f32 = 20.0;
+    pub const HEADER_TITLE: f32 = 16.0;
     static SAFE_AREA: std::sync::OnceLock<fn() -> (f32, f32, f32, f32)> = std::sync::OnceLock::new();
 
     /// Registers the platform safe-area inset provider (top, bottom, left, right in logical points).
