@@ -958,6 +958,7 @@ impl Mail {
                 return Err(EngineError::failed(error.message));
             }
         }
+        self.contents.peers().notify_changed(account);
         let (mail, account) = (self.clone(), account.to_string());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(1500)).await;

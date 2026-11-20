@@ -202,13 +202,13 @@ impl ListKey {
     /// One page of this list from the engine, prepared for display; a search's answers come
     /// from `MailApp::search_list`. `cached`: what the engine holds, at once, without asking a
     /// provider.
-    async fn fetch(self, cursor: Option<String>, cached: bool) -> Result<Listing, MailError> {
+    async fn fetch(self, cursor: Option<String>, limit: u32, cached: bool) -> Result<Listing, MailError> {
         let account = self.source.account().cloned();
         let mailbox = match &self.source {
             Source::Unified(role) => role.as_str().to_owned(),
             Source::Mailbox { id, .. } => id.clone(),
         };
-        let query = ListQuery { mailboxes: vec![mailbox], account, limit: PAGE, cursor, cached, ..ListQuery::default() };
+        let query = ListQuery { mailboxes: vec![mailbox], account, limit, cursor, cached, ..ListQuery::default() };
         engine().list(query).await
     }
 
@@ -265,15 +265,21 @@ impl List {
         Some(cursor.clone())
     }
 
-    /// Merges a refreshed first page (`Arrival::Read` / `Arrival::Fetch`), keeping older pages
-    /// already loaded below it and preserving `next` whenever the engine reports more mail.
-    fn apply_first_page(&mut self, conversations: Vec<Conversation>, next: Option<String>, asked: bool) {
-        let oldest = conversations.last().and_then(ConversationExt::time);
-        let fresh: HashSet<String> = conversations.iter().map(|c| c.id.clone()).collect();
-        let tail: Vec<Conversation> = std::mem::take(&mut self.conversations)
-            .into_iter()
-            .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.time().is_none_or(|d| d <= oldest)))
-            .collect();
+    /// Merges a refreshed first page (`Arrival::Read` / `Arrival::Fetch`). Keeps older pages
+    /// already loaded below it only when `keep_tail` is true (a full page with `next.is_some()`),
+    /// so removing the oldest conversation or any conversation from an exhausted list drops it
+    /// immediately instead of keeping it as a ghost row (MS-444).
+    fn apply_first_page(&mut self, conversations: Vec<Conversation>, next: Option<String>, asked: bool, keep_tail: bool) {
+        let tail: Vec<Conversation> = if keep_tail {
+            let oldest = conversations.last().and_then(ConversationExt::time);
+            let fresh: HashSet<String> = conversations.iter().map(|c| c.id.clone()).collect();
+            std::mem::take(&mut self.conversations)
+                .into_iter()
+                .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.time().is_none_or(|d| d <= oldest)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.conversations = conversations;
         self.empty_pages = None;
         self.more_error = None;
@@ -344,10 +350,10 @@ enum SearchStep {
 /// What a list answer was asked as.
 #[derive(Clone, Copy, PartialEq)]
 enum Arrival {
-    /// What the engine holds.
-    Read,
-    /// The providers' newest.
-    Fetch,
+    /// What the engine holds, up to the asked `limit`.
+    Read(u32),
+    /// The providers' newest, up to the asked `limit`.
+    Fetch(u32),
     /// The page after the last, asked by `view` when it showed `shown` lines.
     More(PagedView, usize),
 }
@@ -913,6 +919,12 @@ impl MailApp {
                     let mailboxes = batch.iter().any(|e| matches!(e, Event::Accounts | Event::Mailboxes));
                     if mailboxes {
                         this.load_mailboxes(cx);
+                        let key = this.key();
+                        for (other, list) in &mut this.lists {
+                            if other != &key {
+                                list.fetched = None;
+                            }
+                        }
                     }
                     if batch.iter().any(|e| matches!(e, Event::Accounts | Event::Problems)) {
                         this.load_problems(cx);
@@ -1013,11 +1025,12 @@ impl MailApp {
             list.stale = true;
             return;
         }
+        let limit = list.conversations.len().max(PAGE as usize).min(200) as u32;
         list.loading = true;
         list.stale = false;
         cx.notify();
-        self.background(cx, key.clone().fetch(None, true), move |this, result, cx| {
-            this.list_arrived(key, result, Arrival::Read, cx)
+        self.background(cx, key.clone().fetch(None, limit, true), move |this, result, cx| {
+            this.list_arrived(key, result, Arrival::Read(limit), cx)
         });
     }
 
@@ -1151,8 +1164,8 @@ impl MailApp {
         }
         list.fetching = true;
         cx.notify();
-        self.background(cx, key.clone().fetch(None, false), move |this, result, cx| {
-            this.list_arrived(key, result, Arrival::Fetch, cx)
+        self.background(cx, key.clone().fetch(None, PAGE, false), move |this, result, cx| {
+            this.list_arrived(key, result, Arrival::Fetch(PAGE), cx)
         });
     }
 
@@ -1210,7 +1223,7 @@ impl MailApp {
             list.empty_pages = None;
         }
         cx.notify();
-        self.background(cx, key.clone().fetch(Some(cursor), false), move |this, result, cx| {
+        self.background(cx, key.clone().fetch(Some(cursor), PAGE, false), move |this, result, cx| {
             this.list_arrived(key, result, Arrival::More(view, shown), cx)
         });
     }
@@ -1218,24 +1231,26 @@ impl MailApp {
     fn list_arrived(&mut self, key: ListKey, result: Result<Listing, MailError>, arrival: Arrival, cx: &mut Context<Self>) {
         let list = self.lists.entry(key.clone()).or_default();
         match arrival {
-            Arrival::Read => list.loading = false,
-            Arrival::Fetch => list.fetching = false,
+            Arrival::Read(_) => list.loading = false,
+            Arrival::Fetch(_) => list.fetching = false,
             Arrival::More(_, _) => list.loading_more = false,
         }
-        let again = arrival == Arrival::Read && std::mem::take(&mut list.stale);
+        let again = matches!(arrival, Arrival::Read(_)) && std::mem::take(&mut list.stale);
         // The providers answered.
-        let asked = arrival == Arrival::Fetch;
+        let asked = matches!(arrival, Arrival::Fetch(_));
         let mut more_succeeded = false;
         match result {
             Ok(mut listing) => {
+                let raw_len = listing.conversations.len();
                 listing.conversations.retain(|c| !self.removing.contains(&c.id));
                 match arrival {
                     Arrival::More(_, _) => {
                         list.apply_more_page(listing.conversations, listing.next, &listing.failures);
                         more_succeeded = true;
                     }
-                    Arrival::Read | Arrival::Fetch => {
-                        list.apply_first_page(listing.conversations, listing.next, asked);
+                    Arrival::Read(limit) | Arrival::Fetch(limit) => {
+                        let keep_tail = listing.next.is_some() && raw_len >= limit as usize;
+                        list.apply_first_page(listing.conversations, listing.next, asked, keep_tail);
                     }
                 }
                 list.error = None;
@@ -1246,7 +1261,7 @@ impl MailApp {
             }
             Err(error) => match arrival {
                 Arrival::More(_, _) => list.more_error = Some(error.to_string().into()),
-                Arrival::Read | Arrival::Fetch => list.error = Some(error.to_string().into()),
+                Arrival::Read(_) | Arrival::Fetch(_) => list.error = Some(error.to_string().into()),
             },
         }
         let current = key == self.key();
@@ -1685,10 +1700,17 @@ mod paging_tests {
         // A refreshed first page whose oldest shares the same second as `c2` keeps both `c2` and
         // undated `c3` in the tail.
         list.next = None;
-        list.apply_first_page(vec![conversation("c1", Some("2026-11-19T10:00:00Z"))], Some("cur_fresh".into()), true);
+        list.apply_first_page(vec![conversation("c1", Some("2026-11-19T10:00:00Z"))], Some("cur_fresh".into()), true, true);
         let ids: Vec<&str> = list.conversations.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["c1", "c2", "c3"]);
         assert_eq!(list.next.as_deref(), Some("cur_fresh"));
         assert!(list.more_error.is_none());
+
+        // When the refreshed page is shorter than asked (or has no next page), removed older
+        // conversations are dropped instead of lingering as ghost rows (MS-444).
+        list.apply_first_page(vec![conversation("c1", Some("2026-11-19T10:00:00Z"))], None, false, false);
+        let ids: Vec<&str> = list.conversations.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["c1"]);
+        assert_eq!(list.next, None);
     }
 }

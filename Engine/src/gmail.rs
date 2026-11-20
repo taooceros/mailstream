@@ -335,6 +335,17 @@ impl Gmail {
         Ok(EnvelopePage { envelopes: self.cache.envelopes(&ids, priority).await?, next })
     }
 
+    /// Reconciles cached envelopes older than page 1 against what the history-synchronized
+    /// envelope cache knows right now (zero network). Returns updates only for ids that left
+    /// `mailbox` (`None`) or whose flags/tags/category changed (`Some`).
+    pub async fn reconcile_cached(
+        &self,
+        mailbox: &str,
+        envelopes: &[Arc<Envelope>],
+    ) -> HashMap<String, Option<Arc<Envelope>>> {
+        self.cache.reconcile(mailbox, envelopes).await
+    }
+
     /// No label filter: Gmail then searches everything but spam and trash, as its web search does.
     /// On the REST fallback, `quick` leaves out the attachment check of messages not seen before
     /// (MS-352); over IMAP, `BODYSTRUCTURE` already carries it and `quick` holds the matched UIDs
@@ -564,6 +575,16 @@ impl Entry {
         let mailbox = ["INBOX", "SENT", "DRAFT"].into_iter().find(|label| self.labels.contains(*label));
         SearchHit { mailbox: mailbox.unwrap_or(ALL_MAIL).to_string(), envelope: self.current(names) }
     }
+
+    /// Whether a message with this entry's labels currently belongs to `mailbox` (matching
+    /// [`scope`]'s Gmail query semantics: messages in Trash or Spam only list there).
+    fn in_mailbox(&self, mailbox: &str) -> bool {
+        match mailbox {
+            ALL_MAIL => !self.labels.contains("TRASH") && !self.labels.contains("SPAM"),
+            "TRASH" | "SPAM" => self.labels.contains(mailbox),
+            _ => self.labels.contains(mailbox) && !self.labels.contains("TRASH") && !self.labels.contains("SPAM"),
+        }
+    }
 }
 
 /// The user labels' names by id, any label ids still absent after that read, and when it ran.
@@ -595,6 +616,8 @@ struct CacheState {
     loaded: bool,
     save_scheduled: bool,
     entries: HashMap<String, Entry>,
+    /// Message ids observed as permanently deleted during this run (`messagesDeleted` or `forget`).
+    deleted: HashSet<String>,
     /// Metadata fetches in flight, by the ids they fetch.
     loading: HashMap<String, Fetch>,
     history_id: Option<u64>,
@@ -636,6 +659,7 @@ impl CacheState {
 
     fn reset(&mut self) {
         self.entries.clear();
+        self.deleted.clear();
         self.history_id = None;
         self.advance(None);
     }
@@ -866,6 +890,7 @@ impl EnvelopeCache {
                     }
                     for change in record.messages_deleted.unwrap_or_default() {
                         state.entries.remove(&change.message.id);
+                        state.deleted.insert(change.message.id.clone());
                         ids.insert(change.message.id);
                     }
                 }
@@ -890,6 +915,38 @@ impl EnvelopeCache {
         let entries = self.lookup(ids, priority, true).await?;
         let names = self.names(&entries, priority).await?;
         Ok(entries.iter().map(|entry| entry.current(&names)).collect())
+    }
+
+    /// Reconciles cached envelopes older than page 1 against the history-synchronized entries
+    /// already held in memory (zero network).
+    async fn reconcile(&self, mailbox: &str, envelopes: &[Arc<Envelope>]) -> HashMap<String, Option<Arc<Envelope>>> {
+        if envelopes.is_empty() {
+            return HashMap::new();
+        }
+        let names = self.names.lock().expect("label names").as_ref().map(|known| known.names.clone());
+        let state = self.state.lock().await;
+        if !state.loaded {
+            return HashMap::new();
+        }
+        let mut updates = HashMap::new();
+        for envelope in envelopes {
+            if state.deleted.contains(&envelope.id) {
+                updates.insert(envelope.id.clone(), None);
+                continue;
+            }
+            let Some(entry) = state.entries.get(&envelope.id) else { continue };
+            if !entry.in_mailbox(mailbox) {
+                updates.insert(envelope.id.clone(), None);
+                continue;
+            }
+            if let Some(names) = &names {
+                let current = entry.current(names);
+                if *envelope.as_ref() != current {
+                    updates.insert(envelope.id.clone(), Some(Arc::new(current)));
+                }
+            }
+        }
+        updates
     }
 
     /// The envelopes as search hits (`Entry::hit`). `attachments` as `lookup` takes it.
@@ -1094,6 +1151,7 @@ impl EnvelopeCache {
                     && !stale.contains(&id)
                     && !state.entries.contains_key(&id)
                 {
+                    state.deleted.remove(&id);
                     state.entries.insert(id.clone(), entry.clone());
                 }
                 fetched.insert(id, entry);

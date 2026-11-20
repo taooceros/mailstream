@@ -89,11 +89,14 @@ mod platform {
 
     use serde_json::{Map, Value};
 
-    /// `config.json` beside the executable.
+    /// `config.json` beside the executable, falling back to the support directory's `config.json`.
     static CONFIG: LazyLock<Map<String, Value>> = LazyLock::new(|| {
-        super::config_file(std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("config.json"))))
+        let mut config = super::config_file(Some(crate::support_directory().join("config.json")));
+        let beside =
+            super::config_file(std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("config.json"))));
+        config.extend(beside);
+        config
     });
-
     pub fn value(key: &str) -> Option<String> {
         CONFIG.get(key)?.as_str().map(String::from)
     }

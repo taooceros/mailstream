@@ -1,7 +1,7 @@
 //! One signed-in account's mail server: Gmail or Microsoft Graph, as the Swift engine's
 //! `MailBackend` (`Sources/MailstreamKit/Backend/MailBackend.swift`) reads them. Mailbox and
 //! message ids are the provider's own and are what listings and mail.db store.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -106,6 +106,20 @@ impl Backend {
         match self {
             Self::Gmail(gmail) => gmail.envelopes(mailbox, cursor, page_size, priority).await,
             Self::Graph(graph) => graph.envelopes(mailbox, cursor, page_size, priority).await,
+        }
+    }
+
+    /// Reconciles cached envelopes older than page 1 against what the backend's local history
+    /// cache knows right now (zero network). Returns updates only for ids that left `mailbox`
+    /// (`None`) or whose metadata changed (`Some`).
+    pub async fn reconcile_cached(
+        &self,
+        mailbox: &str,
+        envelopes: &[Arc<Envelope>],
+    ) -> HashMap<String, Option<Arc<Envelope>>> {
+        match self {
+            Self::Gmail(gmail) => gmail.reconcile_cached(mailbox, envelopes).await,
+            Self::Graph(_) => HashMap::new(),
         }
     }
 

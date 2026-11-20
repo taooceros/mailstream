@@ -526,3 +526,154 @@ fn paired_engines_prefer_direct_peer_over_imap_and_imap_before_api() {
     drop(engine_b);
     drop(engine_a);
 }
+
+#[test]
+fn paired_engines_sync_trash_moves_via_peer_nudge_without_push_relay() {
+    use std::collections::HashMap;
+    use crate::mail_tests::{BASE_MS, gmail_batch, header};
+    use crate::testkit::Reply;
+
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let labels_by_id: Arc<Mutex<HashMap<String, Vec<String>>>> = Arc::new(Mutex::new(HashMap::from([
+        ("m1".to_string(), vec!["INBOX".to_string(), "UNREAD".to_string()]),
+        ("m2".to_string(), vec!["INBOX".to_string(), "UNREAD".to_string()]),
+    ])));
+    let history_id = Arc::new(AtomicUsize::new(100));
+    let history_events: Arc<Mutex<Vec<(usize, String, Vec<String>, Vec<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let server = {
+        let (tokens, labels_by_id, history_id, history_events) =
+            (tokens.clone(), labels_by_id.clone(), history_id.clone(), history_events.clone());
+        FakeServer::start(move |request| {
+            let path = request.path.as_str();
+            if path == "/token" {
+                return token_reply(&tokens);
+            }
+            match (request.method.as_str(), path) {
+                ("GET", "/gmail/v1/users/me/profile") => {
+                    Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": history_id.load(Ordering::SeqCst).to_string() }))
+                }
+                ("GET", "/gmail/v1/users/me/settings/sendAs") => {
+                    Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "isPrimary": true }] }))
+                }
+                ("GET", "/gmail/v1/users/me/labels") => Reply::json(json!({ "labels": [
+                    { "id": "INBOX", "name": "INBOX", "type": "system" },
+                    { "id": "SENT", "name": "SENT", "type": "system" },
+                    { "id": "TRASH", "name": "TRASH", "type": "system" },
+                ]})),
+                ("GET", "/gmail/v1/users/me/messages") => {
+                    let wanted = request.param("labelIds").unwrap_or("");
+                    let include_trash = request.param("includeSpamTrash") == Some("true");
+                    let state = labels_by_id.lock().unwrap();
+                    let mut ids: Vec<Value> = Vec::new();
+                    for id in ["m1", "m2"] {
+                        let Some(labels) = state.get(id) else { continue };
+                        let in_trash = labels.iter().any(|l| l == "TRASH");
+                        let matches = if wanted == "TRASH" {
+                            include_trash && in_trash
+                        } else {
+                            labels.iter().any(|l| l == wanted) && (!in_trash || include_trash)
+                        };
+                        if matches {
+                            ids.push(json!({ "id": id }));
+                        }
+                    }
+                    Reply::json(json!({ "messages": ids, "resultSizeEstimate": ids.len() }))
+                }
+                ("GET", "/gmail/v1/users/me/history") => {
+                    let start: usize = request.param("startHistoryId").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let events = history_events.lock().unwrap();
+                    let records: Vec<Value> = events
+                        .iter()
+                        .filter(|(hid, ..)| *hid > start)
+                        .map(|(_, id, added, removed)| {
+                            json!({
+                                "labelsAdded": [{ "message": { "id": id }, "labelIds": added }],
+                                "labelsRemoved": [{ "message": { "id": id }, "labelIds": removed }],
+                            })
+                        })
+                        .collect();
+                    Reply::json(json!({
+                        "history": records,
+                        "historyId": history_id.load(Ordering::SeqCst).to_string(),
+                    }))
+                }
+                ("POST", p) if p.starts_with("/gmail/v1/users/me/messages/") && p.ends_with("/trash") => {
+                    let id = p
+                        .trim_start_matches("/gmail/v1/users/me/messages/")
+                        .trim_end_matches("/trash")
+                        .to_string();
+                    let mut state = labels_by_id.lock().unwrap();
+                    if let Some(labels) = state.get_mut(&id) {
+                        labels.retain(|l| l != "INBOX");
+                        if !labels.iter().any(|l| l == "TRASH") {
+                            labels.push("TRASH".into());
+                        }
+                    }
+                    let hid = history_id.fetch_add(1, Ordering::SeqCst) + 1;
+                    history_events.lock().unwrap().push((hid, id.clone(), vec!["TRASH".into()], vec!["INBOX".into()]));
+                    Reply::json(json!({ "id": id, "labelIds": ["TRASH"] }))
+                }
+                (_, "/batch/gmail/v1") => {
+                    let state = labels_by_id.lock().unwrap();
+                    let mut meta = HashMap::new();
+                    for (idx, (id, mid, subj)) in [("m1", "<m1@x>", "First"), ("m2", "<m2@x>", "Second")].into_iter().enumerate() {
+                        let labels = state.get(id).cloned().unwrap_or_default();
+                        meta.insert(
+                            id.to_string(),
+                            json!({
+                                "id": id, "threadId": format!("t-{id}"), "labelIds": labels,
+                                "internalDate": (BASE_MS - (idx as i64) * 60_000).to_string(),
+                                "payload": { "mimeType": "text/plain", "headers": [
+                                    header("From", "Ann <ann@x.com>"), header("To", "me@gmail.com"),
+                                    header("Subject", subj), header("Message-ID", mid),
+                                ]},
+                            }),
+                        );
+                    }
+                    gmail_batch(request, &meta)
+                }
+                _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+            }
+        })
+    };
+
+    let lookup = MemoryLookup::new();
+    let (engine_a, _cfg_a) = first_device(&server, &lookup, "me@gmail.com", "google");
+    let (engine_b, _cfg_b) = second_device(&server, &lookup, &engine_a, "me@gmail.com");
+    until("B connected to A", || engine_b.direct_peers() == 1);
+
+    // Both devices load Inbox: m1 and m2.
+    until("A inbox loaded", || {
+        listed(&call(&engine_a, "mail.list", json!({ "cached": true })).unwrap()).len() == 2
+    });
+    until("B inbox loaded", || {
+        listed(&call(&engine_b, "mail.list", json!({ "cached": true })).unwrap()).len() == 2
+    });
+
+    // 1. A trashes m1: without any push relay, B receives the PeerMail `Changed` nudge and drops
+    // m1 from its cached Inbox within seconds.
+    call(&engine_a, "mail.trash", json!({ "ids": ["me@gmail.com|m1@x"] })).unwrap();
+    until("B drops trashed m1 from Inbox via peer nudge", || {
+        listed(&call(&engine_b, "mail.list", json!({ "cached": true })).unwrap()) == ["me@gmail.com|m2@x"]
+    });
+
+    // 2. B switches to viewing Trash (now containing m1); A trashes m2: B refreshes its active
+    // Trash view via the peer nudge and emits `conversations` so m2 appears live in Trash.
+    let trash_before = call(&engine_b, "mail.list", json!({ "mailbox": "trash" })).unwrap();
+    assert_eq!(listed(&trash_before), ["me@gmail.com|m1@x"]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    engine_b.subscribe(move |event| {
+        let _ = tx.send(event);
+    });
+    call(&engine_a, "mail.trash", json!({ "ids": ["me@gmail.com|m2@x"] })).unwrap();
+    until("B Trash view picks up m2 via peer nudge", || {
+        let mut ids = listed(&call(&engine_b, "mail.list", json!({ "mailbox": "trash", "cached": true })).unwrap());
+        ids.sort();
+        ids == ["me@gmail.com|m1@x", "me@gmail.com|m2@x"]
+    });
+    until("B emitted conversations event for Trash update", || rx.try_iter().any(|e| e == "conversations"));
+
+    drop(engine_b);
+    drop(engine_a);
+}

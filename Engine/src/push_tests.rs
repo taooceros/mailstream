@@ -416,3 +416,131 @@ async fn the_relay_socket_speaks_tls() {
     let result = tokio_tungstenite::connect_async(format!("wss://127.0.0.1:{port}/socket")).await;
     assert!(result.is_err());
 }
+
+/// On Gmail, trashing or marking read a message older than the first 50 (`PAGE_SIZE`) is applied
+/// on the next push refresh through Gmail's history-synchronized envelope cache, without fetching
+/// page 2 again (MS-444).
+#[test]
+fn gmail_push_reconciles_trashed_and_read_messages_older_than_first_page() {
+    use std::collections::HashMap;
+    use crate::mail_tests::{BASE_MS, gmail_batch, header};
+
+    let count = 55usize;
+    let mut metadata: HashMap<String, Value> = HashMap::new();
+    for idx in 0..count {
+        let id = format!("m{idx:02}");
+        metadata.insert(
+            id.clone(),
+            json!({
+                "id": id,
+                "threadId": format!("t{idx:02}"),
+                "labelIds": ["INBOX", "UNREAD"],
+                "internalDate": (BASE_MS - (idx as i64) * 60_000).to_string(),
+                "payload": { "mimeType": "text/plain", "headers": [
+                    header("From", "Ann <ann@x.com>"),
+                    header("To", "me@gmail.com"),
+                    header("Subject", &format!("Msg {idx:02}")),
+                    header("Message-ID", &format!("<m{idx:02}@x>")),
+                ]},
+            }),
+        );
+    }
+    let trashed_remote = Arc::new(AtomicBool::new(false));
+    let page2_fetches = Arc::new(AtomicUsize::new(0));
+    let tokens = AtomicUsize::new(0);
+    let server = {
+        let (metadata, trashed_remote, page2_fetches) = (metadata.clone(), trashed_remote.clone(), page2_fetches.clone());
+        FakeServer::start(move |request: &FakeRequest| match (request.method.as_str(), request.path.as_str()) {
+            (_, "/token") => {
+                let call = tokens.fetch_add(1, Ordering::SeqCst) + 1;
+                Reply::json(json!({ "access_token": format!("at{call}"), "expires_in": 3600 }))
+            }
+            ("POST", "/gmail/v1/users/me/watch") => Reply::json(json!({ "historyId": "100", "expiration": "1790000000000" })),
+            ("GET", "/gmail/v1/users/me/profile") => {
+                let hid = if trashed_remote.load(Ordering::SeqCst) { "101" } else { "100" };
+                Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": hid }))
+            }
+            ("GET", "/gmail/v1/users/me/settings/sendAs") => {
+                Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "isPrimary": true }] }))
+            }
+            ("GET", "/gmail/v1/users/me/labels") => Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" },
+                { "id": "SENT", "name": "SENT", "type": "system" },
+                { "id": "TRASH", "name": "TRASH", "type": "system" },
+            ]})),
+            ("GET", "/gmail/v1/users/me/messages") => match (request.param("labelIds"), request.param("pageToken")) {
+                (Some("INBOX"), None) => {
+                    let ids: Vec<Value> = (0..50).map(|i| json!({ "id": format!("m{i:02}") })).collect();
+                    Reply::json(json!({ "messages": ids, "nextPageToken": "p2", "resultSizeEstimate": count }))
+                }
+                (Some("INBOX"), Some("p2")) => {
+                    page2_fetches.fetch_add(1, Ordering::SeqCst);
+                    let ids: Vec<Value> = (50..count).map(|i| json!({ "id": format!("m{i:02}") })).collect();
+                    Reply::json(json!({ "messages": ids, "resultSizeEstimate": count }))
+                }
+                _ => Reply::json(json!({ "messages": [], "resultSizeEstimate": 0 })),
+            },
+            ("GET", "/gmail/v1/users/me/history") => {
+                let start = request.param("startHistoryId").unwrap_or("100");
+                if trashed_remote.load(Ordering::SeqCst) && start == "100" {
+                    Reply::json(json!({
+                        "historyId": "101",
+                        "history": [
+                            {
+                                "labelsAdded": [{ "message": { "id": "m52" }, "labelIds": ["TRASH"] }],
+                                "labelsRemoved": [
+                                    { "message": { "id": "m52" }, "labelIds": ["INBOX"] },
+                                    { "message": { "id": "m53" }, "labelIds": ["UNREAD"] },
+                                ],
+                            }
+                        ]
+                    }))
+                } else {
+                    let hid = if trashed_remote.load(Ordering::SeqCst) { "101" } else { "100" };
+                    Reply::json(json!({ "historyId": hid }))
+                }
+            }
+            (_, "/batch/gmail/v1") => gmail_batch(request, &metadata),
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        })
+    };
+
+    let relay = FakeRelay::start();
+    let config = prepare(&server, &relay, &[("me@gmail.com", "google")]);
+    let engine = Engine::start(config.clone());
+    let push = engine.core.push.clone();
+    wait_until("push connected", || push.is_connected());
+    wait_until("mailboxes loaded", || {
+        crate::testkit::call(&engine, "mailboxes", json!({}))
+            .ok()
+            .and_then(|v| v["me@gmail.com"].as_array().map(|a| !a.is_empty()))
+            .unwrap_or(false)
+    });
+
+    // Load 100 conversations (both pages: 50 + 5 = 55), as GPUI does on startup.
+    let initial = crate::testkit::call(&engine, "mail.list", json!({ "limit": 100 })).unwrap();
+    let initial_convs = initial["conversations"].as_array().unwrap();
+    assert_eq!(initial_convs.len(), count);
+    assert!(initial_convs.iter().any(|c| c["id"] == "me@gmail.com|m52@x"));
+    assert!(initial_convs.iter().any(|c| c["id"] == "me@gmail.com|m53@x" && c["unread"] == true));
+    let p2_before = page2_fetches.load(Ordering::SeqCst);
+    assert_eq!(p2_before, 1);
+
+    // Another device trashes m52 and marks m53 read (both older than page 1); push arrives.
+    trashed_remote.store(true, Ordering::SeqCst);
+    relay.send(json!({ "source": "gmail", "email": "me@gmail.com", "historyId": "101" }));
+
+    wait_until("m52 removed and m53 marked read via history reconciliation", || {
+        let Ok(listing) = crate::testkit::call(&engine, "mail.list", json!({ "limit": 100, "cached": true })) else {
+            return false;
+        };
+        let Some(convs) = listing["conversations"].as_array() else { return false };
+        let has_m52 = convs.iter().any(|c| c["id"] == "me@gmail.com|m52@x");
+        let m53_read = convs.iter().any(|c| c["id"] == "me@gmail.com|m53@x" && c["unread"] == false);
+        !has_m52 && m53_read && convs.len() == count - 1
+    });
+    assert_eq!(page2_fetches.load(Ordering::SeqCst), p2_before, "reconciliation costs zero extra page fetches");
+
+    drop(engine);
+    cleanup(&config);
+}

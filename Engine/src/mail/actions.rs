@@ -486,7 +486,10 @@ impl Mail {
         };
         finish(result.is_ok());
         drop(_release);
-        let Err(error) = result else { return Ok(()) };
+        let Err(error) = result else {
+            self.contents.peers().notify_changed(&account);
+            return Ok(());
+        };
         self.report(&error, Some(&account));
         if resync {
             self.clone().refresh();

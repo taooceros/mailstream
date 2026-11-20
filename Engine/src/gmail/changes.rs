@@ -39,7 +39,7 @@ impl Gmail {
         }
         if to == "TRASH" {
             self.each(ids, "trash", 20).await?;
-            self.cache.relabel(ids, &["TRASH"], &[]).await;
+            self.cache.relabel(ids, &["TRASH"], &["INBOX", "SPAM"]).await;
             return Ok(());
         }
         if from == "TRASH" {
@@ -207,6 +207,7 @@ impl EnvelopeCache {
         self.load(&mut state);
         for id in ids {
             state.entries.remove(id);
+            state.deleted.insert(id.clone());
         }
         state.advance(Some(ids.iter().cloned().collect::<HashSet<_>>()));
     }

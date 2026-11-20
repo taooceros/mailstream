@@ -10,6 +10,9 @@
 //!   [`CONTENT_VERSION`]; the answer is a JSON array of booleans in the same order.
 //! - `Get`: one message; the answer is a big-endian `u32` length, a [`GetAnswer`] of that length
 //!   and, when found, the bytes of its files in the order it lists them.
+//! - `Changed`: `{account}`: a lightweight nudge that this device just committed a mail mutation
+//!   on the provider for `account`, so online peers refresh from the provider at once without
+//!   waiting for provider push or polling (MS-444).
 //!
 //! A device answers only from what it stored (mail.db's content and the message's folder in
 //! `messages-v2/`) for accounts signed in here and not removed from the group, at the same
@@ -20,9 +23,9 @@
 //! Asking: [`PeerMail::fetch_direct`] asks connected peers on a direct, low-latency IP path
 //! before IMAP runs, [`PeerMail::fetch_fallback`] asks the rest (relayed peers, or newly dialed
 //! ones in the background) when IMAP does not apply or misses, and gives up for the provider
-//! when none does in time ([`Wait`]). Only messages the provider listed are asked for, and nothing
-//! is pushed: deletions, labels and read state still follow the provider alone. Background
-//! `Have`s within [`BATCH_WINDOW`] travel as one request.
+//! when none does in time ([`Wait`]). Only messages the provider listed are asked for; deletions,
+//! labels and read state still follow the provider alone (`Changed` only nudges peers to refresh
+//! from the provider). Background `Have`s within [`BATCH_WINDOW`] travel as one request.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -58,6 +61,10 @@ const DIAL_WAIT: Duration = Duration::from_secs(5);
 const DIAL_BACKOFF: Duration = Duration::from_secs(60);
 /// How long background `Have`s wait for others to travel with.
 const BATCH_WINDOW: Duration = Duration::from_millis(20);
+/// How long peer mail-change nudges for one account coalesce before sending (MS-444).
+const NOTIFY_COALESCE: Duration = Duration::from_millis(50);
+/// How long a single peer nudge waits for the peer to acknowledge the stream.
+const NOTIFY_WAIT: Duration = Duration::from_secs(3);
 /// Gmail's units for a message in full and for each attachment it would have fetched.
 const GMAIL_MESSAGE_UNITS: u64 = 60;
 const GMAIL_ATTACHMENT_UNITS: u64 = 20;
@@ -108,6 +115,7 @@ impl Wanted {
 enum Request {
     Have { version: u32, messages: Vec<Wanted> },
     Get { version: u32, message: Wanted },
+    Changed { account: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -142,6 +150,8 @@ struct Client {
     dialing: HashMap<EndpointId, Dial>,
     /// When dialing each device last failed.
     failed: HashMap<EndpointId, Instant>,
+    /// Accounts with a coalesced `Changed` nudge scheduled.
+    pending_notifies: HashSet<String>,
 }
 
 pub struct PeerMail {
@@ -154,6 +164,8 @@ pub struct PeerMail {
     removed: Mutex<Option<(u64, Arc<HashSet<String>>)>>,
     /// What came from other devices, kept in mail.db.
     received: OnceCell<Mutex<SyncMail>>,
+    /// Called when an admitted peer reports a provider-side change for an account signed in here.
+    on_change: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
 
 impl PeerMail {
@@ -166,7 +178,56 @@ impl PeerMail {
             serving: Arc::new(Semaphore::new(SERVING)),
             removed: Mutex::new(None),
             received: OnceCell::new(),
+            on_change: Mutex::new(None),
         })
+    }
+
+    /// Registers the handler invoked when an admitted peer sends a `Changed` nudge for a
+    /// signed-in account (MS-444).
+    pub fn on_change(&self, handler: impl Fn(&str) + Send + Sync + 'static) {
+        *self.on_change.lock().expect("peer mail on_change") = Some(Arc::new(handler));
+    }
+
+    /// Nudges online admitted peers to refresh `account` from the provider, coalesced briefly so
+    /// a multi-mailbox mutation sends one nudge per peer (MS-444). No-op when device sync is off.
+    pub fn notify_changed(&self, account: &str) {
+        let account = account.to_lowercase();
+        {
+            let mut client = self.client();
+            if client.link.is_none() || !client.pending_notifies.insert(account.clone()) {
+                return;
+            }
+        }
+        let Some(this) = self.this.upgrade() else { return };
+        tokio::spawn(async move {
+            tokio::time::sleep(NOTIFY_COALESCE).await;
+            let link = {
+                let mut client = this.client();
+                client.pending_notifies.remove(&account);
+                client.link.clone()
+            };
+            let Some(link) = link else { return };
+            let Ok(payload) = serde_json::to_vec(&Request::Changed { account }) else { return };
+            let sends = link.members().into_iter().map(|id| this.send_changed_to(&link, id, &payload));
+            futures::future::join_all(sends).await;
+        });
+    }
+
+    async fn send_changed_to(&self, link: &Link, id: EndpointId, payload: &[u8]) {
+        let Some(peer) = self.peer(link, id, true).await else { return };
+        if send_changed_once(&peer.connection, payload).await {
+            return;
+        }
+        // Drop a stale cached connection and retry once.
+        {
+            let mut client = self.client();
+            if client.peers.get(&id).is_some_and(|cached| cached.connection.stable_id() == peer.connection.stable_id()) {
+                client.peers.remove(&id);
+            }
+        }
+        if let Some(fresh) = self.peer(link, id, true).await {
+            let _ = send_changed_once(&fresh.connection, payload).await;
+        }
     }
 
     fn client(&self) -> std::sync::MutexGuard<'_, Client> {
@@ -440,6 +501,16 @@ impl PeerMail {
                 };
                 let _ = send.finish();
             }
+            Ok(Request::Changed { account }) => {
+                let account = account.to_lowercase();
+                let removed = self.removed(link).await;
+                if self.serves(&account, &removed)
+                    && let Some(handler) = self.on_change.lock().expect("peer mail on_change").clone()
+                {
+                    handler(&account);
+                }
+                let _ = send.finish();
+            }
             Err(_) => {
                 let _ = send.finish();
             }
@@ -550,6 +621,7 @@ impl Service for PeerMail {
             client.link = None;
             client.dialing.clear();
             client.failed.clear();
+            client.pending_notifies.clear();
             for (_, peer) in client.peers.drain() {
                 peer.connection.close(VarInt::from_u32(0), b"");
             }
@@ -566,6 +638,15 @@ impl Service for PeerMail {
             futures::future::join_all(dials).await;
         });
     }
+}
+
+async fn send_changed_once(connection: &Connection, payload: &[u8]) -> bool {
+    let Ok((mut send, mut recv)) = connection.open_bi().await else { return false };
+    if send.write_all(payload).await.is_err() || send.finish().is_err() {
+        return false;
+    }
+    let _ = tokio::time::timeout(NOTIFY_WAIT, recv.read_to_end(16)).await;
+    true
 }
 
 /// Where `wanted` may be stored: under the mailbox asked for first, then the account's others.

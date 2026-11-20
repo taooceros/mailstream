@@ -132,6 +132,9 @@ struct State {
     account_refreshes: HashSet<String>,
     /// Push passes started per account; only an account's latest one looks again (`PUSH_SETTLE`).
     push_passes: HashMap<String, u64>,
+    /// Mailboxes of the latest non-search `mail.list` call, refreshed alongside `default_keys` on
+    /// account push/peer nudges so viewing Trash or another folder stays live (MS-444).
+    active_keys: Vec<MailboxKey>,
     /// The conversations the user started that the inbox lists.
     started: started::Started,
     /// Mail sent from here that Sent doesn't list yet, listed with it.
@@ -269,6 +272,12 @@ impl Mail {
     /// fetches what it held afresh, while every account loads its identity and mailboxes and
     /// fetches its inboxes' first pages on its own (MS-278).
     pub async fn start(self: Arc<Self>) {
+        let peer_wake = Arc::downgrade(&self);
+        self.contents.peers().on_change(move |account| {
+            if let Some(mail) = peer_wake.upgrade() {
+                mail.refresh_account(account);
+            }
+        });
         let weak = Arc::downgrade(&self);
         let pushing = Arc::downgrade(&self);
         self.tagging.start(
@@ -481,6 +490,7 @@ impl Mail {
                 state.listings.retain(|key, _| !removed.contains(&key.account));
                 state.pending.retain(|pending| !removed.contains(&pending.key.account));
                 state.first_page_requests.retain(|key, _| !removed.contains(&key.account));
+                state.active_keys.retain(|key| !removed.contains(&key.account));
                 state.overlay.forget_accounts(&removed);
                 state.known.retain(|_, known| !removed.contains(&known.conversation.account));
                 let known = &state.known;
@@ -876,15 +886,22 @@ impl Mail {
         });
     }
 
-    /// `account`'s mailboxes in the default list and its counts, fetched now; false when the
-    /// account is gone.
+    /// `account`'s mailboxes in the default list (plus any non-default mailbox currently viewed)
+    /// and its counts, fetched now; false when the account is gone.
     async fn refresh_account_now(self: &Arc<Self>, account: &str) -> bool {
         let keys: Vec<MailboxKey> = {
             let state = self.state();
             if !state.accounts.iter().any(|known| known.name == account) {
                 return false;
             }
-            Self::default_keys(&state).into_iter().filter(|key| key.account == account).collect()
+            let mut keys: Vec<MailboxKey> =
+                Self::default_keys(&state).into_iter().filter(|key| key.account == account).collect();
+            for key in &state.active_keys {
+                if key.account == account && !keys.contains(key) {
+                    keys.push(key.clone());
+                }
+            }
+            keys
         };
         self.refresh_account_counts(account.to_string());
         self.fetch_first_pages(&keys).await;
@@ -919,11 +936,42 @@ impl Mail {
             .into_iter()
             .map(|(key, backend)| async move {
                 let result = backend.envelopes(&key.mailbox, None, PAGE_SIZE, Priority::Interactive).await;
-                (key, result)
+                (key, backend, result)
             })
             .collect();
         let mut failures = HashMap::new();
-        while let Some((key, result)) = jobs.next().await {
+        while let Some((key, backend, result)) = jobs.next().await {
+            // Reconcile older cached envelopes against the backend's history cache before locking
+            // `Mail::state` (zero network; drops older Gmail mail moved to Trash/Archive, MS-444).
+            let reconciled = match &result {
+                Ok(page) if page.next.is_some() => {
+                    let candidates: Vec<Arc<Envelope>> = {
+                        let state = self.state();
+                        let latest = state.first_page_requests.get(&key) == tickets.get(&key);
+                        if !latest {
+                            Vec::new()
+                        } else if let Some(before) = state.listings.get(&key) {
+                            let oldest =
+                                page.envelopes.iter().filter_map(|e| e.date).reduce(f64::min).unwrap_or(DISTANT_PAST);
+                            let ids: HashSet<&str> = page.envelopes.iter().map(|e| e.id.as_str()).collect();
+                            before
+                                .envelopes
+                                .iter()
+                                .filter(|e| !ids.contains(e.id.as_str()) && e.date.unwrap_or(DISTANT_PAST) < oldest)
+                                .cloned()
+                                .collect()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    if candidates.is_empty() {
+                        HashMap::new()
+                    } else {
+                        backend.reconcile_cached(&key.mailbox, &candidates).await
+                    }
+                }
+                _ => HashMap::new(),
+            };
             // Only the latest request's page is taken in; any answer says whether the account
             // connects.
             let result = {
@@ -934,10 +982,15 @@ impl Mail {
                 let latest = state.first_page_requests.get(&key) == tickets.get(&key);
                 result.map(|page| {
                     if latest {
-                        let merged = self.merge_first_page(&mut state, page.envelopes, page.next, &key, started_at);
+                        let merged =
+                            self.merge_first_page(&mut state, page.envelopes, page.next, &key, started_at, &reconciled);
                         let settled = self.settle_pending(&mut state, &key);
-                        if (merged || settled) && Self::default_keys(&state).contains(&key) {
-                            self.conversations_changed();
+                        if merged || settled {
+                            if Self::default_keys(&state).contains(&key) {
+                                self.conversations_changed();
+                            } else {
+                                self.events.emit_soon("conversations");
+                            }
                         }
                     }
                 })
@@ -968,6 +1021,7 @@ impl Mail {
         next: Option<String>,
         key: &MailboxKey,
         fetch_started_at: u64,
+        reconciled: &HashMap<String, Option<Arc<Envelope>>>,
     ) -> bool {
         let before = state.listings.get(key);
         let mut listing = Listing { envelopes: envelopes.into_iter().map(Arc::new).collect(), next: next.clone(), restart: next.clone() };
@@ -980,7 +1034,11 @@ impl Mail {
                 .envelopes
                 .iter()
                 .filter(|envelope| !ids.contains(envelope.id.as_str()) && envelope.date.unwrap_or(DISTANT_PAST) < oldest)
-                .cloned()
+                .filter_map(|envelope| match reconciled.get(&envelope.id) {
+                    Some(Some(updated)) => Some(updated.clone()),
+                    Some(None) => None,
+                    None => Some(envelope.clone()),
+                })
                 .collect();
             // Paging resumes after the older mail kept when the first page reaches it. Past a
             // gap (more new mail than a page) it goes on from the first page.
@@ -1527,6 +1585,9 @@ impl Mail {
                     None => None,
                 };
                 let keys = self.mailbox_keys(args)?;
+                if cursor.is_none() {
+                    self.state().active_keys = keys.clone();
+                }
                 self.agent_listing(&keys, cursor.as_ref(), limit, args.bool("cached"), &include).await
             }
         };
