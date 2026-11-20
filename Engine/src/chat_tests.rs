@@ -318,3 +318,132 @@ fn polls_every_chat_poll_seconds_and_refetches_only_what_changed() {
     drop(engine);
     cleanup(&config);
 }
+
+#[test]
+fn open_space_fast_polls_without_waiting_for_space_list() {
+    let offline = Arc::new(AtomicBool::new(false));
+    let extra = Arc::new(AtomicBool::new(false));
+    let (switch, inject) = (offline.clone(), extra.clone());
+    let server = FakeServer::start(move |request| {
+        if request.method == "GET" && request.path == "/chat/v1/spaces/A/messages" && request.param("filter").is_none() {
+            let mut list = vec![
+                message("A", "m5", ann(), "2026-11-07T12:00:00Z", "see <https://x.com/doc|the doc>"),
+                message("A", "m4", me(), "2026-11-07T11:00:00Z", "*sure*"),
+                message("A", "m3", ann(), "2026-11-07T10:00:00Z", "lunch?"),
+            ];
+            if inject.load(Ordering::SeqCst) {
+                list.insert(0, message("A", "m6", ann(), "2026-11-07T12:05:00Z", "fast reply"));
+            }
+            return Reply::json(json!({ "nextPageToken": "next", "messages": list }));
+        }
+        chat_reply(request, &switch)
+    });
+    let config = config_for(&server);
+    // Long space-list interval proves the open space polls directly on its own fast cadence.
+    std::fs::write(config.support_directory.join("settings.json"), "{\n  \"chat.pollSeconds\" : 60\n}\n").unwrap();
+    let engine = Engine::start(config.clone());
+    let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let heard = events.clone();
+    engine.subscribe(move |event| heard.lock().unwrap().push(event));
+
+    wait_until("the spaces", || names(&spaces(&engine)).len() == 3);
+    let open = json!({ "account": ME, "space": "spaces/A" });
+    call(&engine, "chat.open", open.clone()).unwrap();
+    wait_until("the open space to load", || call(&engine, "chat.messages", open.clone()).unwrap()["loaded"] == json!(true));
+    wait_until("the initial read mark", || !requests(&server, "PATCH", "/chat/v1/users/me/spaces/A/spaceReadState").is_empty());
+    // Wait out any 16 ms emit_soon coalescing from the open, then record baselines.
+    std::thread::sleep(Duration::from_millis(80));
+    events.lock().unwrap().clear();
+    let msg_before = requests(&server, "GET", "/chat/v1/spaces/A/messages").len();
+    let read_state_before = requests(&server, "GET", "/chat/v1/users/me/spaces/A/spaceReadState").len();
+
+    // First quiet fast poll (~3 s): single lightweight messages GET, no read_state, no spurious event.
+    let start = Instant::now();
+    while requests(&server, "GET", "/chat/v1/spaces/A/messages").len() <= msg_before {
+        assert!(start.elapsed() < Duration::from_secs(6), "no active-space fast poll within 6 s");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(120));
+    let fast_req = requests(&server, "GET", "/chat/v1/spaces/A/messages").pop().unwrap();
+    assert_eq!(fast_req.param("pageSize"), Some("25"));
+    assert_eq!(requests(&server, "GET", "/chat/v1/users/me/spaces/A/spaceReadState").len(), read_state_before);
+    assert_eq!(requests(&server, "GET", "/chat/v1/spaces").len(), 1);
+    assert!(!events.lock().unwrap().contains(&"chatMessages"), "unchanged fast poll must not emit chatMessages");
+
+    // New message arrives: fast poll picks it up within ~3 s and updates both thread and space preview.
+    extra.store(true, Ordering::SeqCst);
+    let start = Instant::now();
+    while call(&engine, "chat.messages", open.clone()).unwrap()["messages"].as_array().unwrap().len() < 4 {
+        assert!(start.elapsed() < Duration::from_secs(6), "new message did not arrive via fast poll");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    wait_until("the chatMessages event", || events.lock().unwrap().contains(&"chatMessages"));
+    let list = spaces(&engine);
+    assert_eq!(list["spaces"][0]["preview"], json!("Ann: fast reply"));
+    assert_eq!(requests(&server, "GET", "/chat/v1/spaces").len(), 1);
+
+    // Closing the space stops fast polling completely.
+    call(&engine, "chat.close", json!({})).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let after_close = requests(&server, "GET", "/chat/v1/spaces/A/messages").len();
+    std::thread::sleep(Duration::from_millis(3600));
+    assert_eq!(
+        requests(&server, "GET", "/chat/v1/spaces/A/messages").len(),
+        after_close,
+        "fast poll must stop once the space is closed"
+    );
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn summarize_fetches_read_state_messages_and_members_concurrently() {
+    let arrivals = Arc::new(Mutex::new(Vec::<Instant>::new()));
+    let seen = arrivals.clone();
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            return Reply::json(json!({ "access_token": "at", "expires_in": 3600 }));
+        }
+        let Some(path) = request.path.strip_prefix("/chat/v1/") else {
+            return Reply::status(404, json!({ "error": { "message": "Not Found" } }));
+        };
+        match (request.method.as_str(), path) {
+            ("GET", "spaces") => Reply::json(json!({ "spaces": [
+                { "name": "spaces/C", "spaceType": "GROUP_CHAT", "lastActiveTime": "2026-11-01T08:00:00Z" },
+            ]})),
+            ("GET", "users/me/spaces/C/spaceReadState") => {
+                seen.lock().unwrap().push(Instant::now());
+                Reply::json(json!({ "name": "users/111/spaces/C/spaceReadState", "lastReadTime": "2026-11-01T08:00:00Z" }))
+                    .after(Duration::from_millis(300))
+            }
+            ("GET", "spaces/C/messages") => {
+                seen.lock().unwrap().push(Instant::now());
+                Reply::json(json!({ "messages": [message("C", "c1", me(), "2026-11-01T08:00:00Z", "ok")] }))
+                    .after(Duration::from_millis(300))
+            }
+            ("GET", "spaces/C/members") => {
+                seen.lock().unwrap().push(Instant::now());
+                Reply::json(json!({ "memberships": [
+                    json!({ "member": user("222", Some("Ann"), Some("ann@x.com")) }),
+                    json!({ "member": { "name": "users/111" } }),
+                ]}))
+                .after(Duration::from_millis(300))
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
+        }
+    });
+    let config = config_for(&server);
+    let engine = Engine::start(config.clone());
+    wait_until("the group space", || names(&spaces(&engine)) == ["spaces/C"]);
+    let times = arrivals.lock().unwrap().clone();
+    assert_eq!(times.len(), 3);
+    let spread = times.last().unwrap().saturating_duration_since(*times.first().unwrap());
+    // All three 300 ms calls arrive before the first answers when dispatched concurrently.
+    assert!(
+        spread < Duration::from_millis(250),
+        "summarize requests arrived {spread:?} apart; read_state, messages and members should run concurrently"
+    );
+    assert_eq!(spaces(&engine)["spaces"][0]["title"], json!("Ann"));
+    drop(engine);
+    cleanup(&config);
+}

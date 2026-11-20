@@ -483,6 +483,8 @@ impl ChatRemote {
     }
 
     /// The newest `limit` messages created before `before` (default: now), ascending.
+    /// `with_read_state` also fetches `spaceReadState` in parallel; steady-state polls of an open
+    /// space whose user id is already known skip it for a single-request poll.
     pub async fn messages(
         &self,
         api: &Api,
@@ -490,13 +492,17 @@ impl ChatRemote {
         space: &str,
         limit: usize,
         before: Option<Date>,
+        with_read_state: bool,
     ) -> Result<ChatMessagePage, ApiError> {
         check_space(space)?;
         let calls = self.calls(api);
         let before = before.map(format_chat_date);
-        let (state, page) = tokio::join!(calls.read_state(space), calls.messages(space, limit, before.as_deref()));
-        let page = page?;
-        let state = state.ok();
+        let (state, page) = if with_read_state {
+            let (state, page) = tokio::join!(calls.read_state(space), calls.messages(space, limit, before.as_deref()));
+            (state.ok(), page?)
+        } else {
+            (None, calls.messages(space, limit, before.as_deref()).await?)
+        };
         let me = self.learn_me(state.as_ref().and_then(ReadState::user), account);
         Ok(ChatMessagePage {
             more: page.token().is_some(),
@@ -508,6 +514,11 @@ impl ChatRemote {
                 .collect(),
             last_read: state.and_then(|state| state.last_read()),
         })
+    }
+
+    /// Whether the caller's own `users/{id}` is already known for `account`.
+    pub fn has_me(&self, account: &str) -> bool {
+        self.memory().get(account).and_then(|memory| memory.me.as_ref()).is_some()
     }
 
     /// Marks the space read up to now; returns the new read time.
@@ -598,9 +609,27 @@ impl ChatRemote {
     }
 
     async fn summarize(&self, calls: &Calls<'_>, account: &str, space: &Space) -> Result<Summary, ApiError> {
-        let state = calls.read_state(&space.name).await?;
+        let display_name = space.display_name.trim();
+        let named = !display_name.is_empty();
+        let cached_members = if named {
+            Some(Vec::new())
+        } else {
+            self.memory().get(account).and_then(|memory| memory.members.get(&space.name).cloned())
+        };
+        let (state, page, fetched_members) = tokio::join!(
+            calls.read_state(&space.name),
+            calls.messages(&space.name, SUMMARY_MESSAGES, None),
+            async {
+                if cached_members.is_some() {
+                    Ok(None)
+                } else {
+                    calls.members(&space.name).await.map(Some)
+                }
+            }
+        );
+        let state = state?;
         let me = self.learn_me(state.user(), account);
-        let page = calls.messages(&space.name, SUMMARY_MESSAGES, None).await?;
+        let page = page?;
         let messages = page.items();
         let last_read = state.last_read();
         let unread = messages
@@ -619,29 +648,19 @@ impl ChatRemote {
             "GROUP_CHAT" => ChatSpaceKind::Group,
             _ => ChatSpaceKind::Space,
         };
-        let display_name = space.display_name.trim();
-        let named = !display_name.is_empty();
-        let mut members = Vec::new();
-        if !named {
-            let known = self.memory().get(account).and_then(|memory| memory.members.get(&space.name).cloned());
-            members = match known {
-                Some(known) => known,
-                None => {
-                    let fetched: Vec<User> = calls
-                        .members(&space.name)
-                        .await?
-                        .into_iter()
-                        .filter(|member| Some(&member.name) != me.as_ref())
-                        .collect();
-                    self.memory()
-                        .entry(account.to_string())
-                        .or_default()
-                        .members
-                        .insert(space.name.clone(), fetched.clone());
-                    fetched
-                }
-            };
-        }
+        let members = match (cached_members, fetched_members?) {
+            (Some(known), _) => known,
+            (None, Some(raw)) => {
+                let fetched: Vec<User> = raw.into_iter().filter(|member| Some(&member.name) != me.as_ref()).collect();
+                self.memory()
+                    .entry(account.to_string())
+                    .or_default()
+                    .members
+                    .insert(space.name.clone(), fetched.clone());
+                fetched
+            }
+            (None, None) => Vec::new(),
+        };
         // Google withholds names of some members (apps, people without "affinity"), but not of
         // a message's sender: fill them in from the messages at hand.
         let members: Vec<User> = members

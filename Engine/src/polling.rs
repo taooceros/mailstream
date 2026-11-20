@@ -94,7 +94,7 @@ impl Polling {
 /// Calls `tick` every `interval()`, as the Swift engine's `PeriodicTask`: when `changed` is
 /// notified and the interval is another, the wait starts afresh; the same interval keeps the
 /// wait already running.
-async fn periodic(interval: impl Fn() -> Duration, changed: &Notify, mut tick: impl FnMut()) {
+pub(crate) async fn periodic(interval: impl Fn() -> Duration, changed: &Notify, mut tick: impl FnMut()) {
     let mut current = interval();
     let mut deadline = Instant::now() + current;
     loop {

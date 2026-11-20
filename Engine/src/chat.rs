@@ -22,7 +22,7 @@ use crate::answers::{self, ChatPending, ChatPeople, ChatSpaceRef, ChatSpaces, Ch
 use crate::api::{Api, ApiError};
 use crate::avatars::Avatars;
 use crate::cache::{MailCache, hash};
-use crate::chat_api::{ChatRemote, chat_error};
+use crate::chat_api::{ChatRemote, SUMMARY_MESSAGES, chat_error};
 use crate::chat_model::{
     ChatAccount, ChatMessage, ChatMessagePage, ChatSpace, ChatSpaceKey, ChatSpaceKind, ChatSpaceList, ChatUser, DateLabels,
     row, sort_newest_first,
@@ -32,6 +32,7 @@ use crate::mail::Mail;
 use crate::model::{DISTANT_PAST, Date, iso8601, now};
 use crate::oauth::{GOOGLE_CHAT_CREATE, Service, has_scope};
 use crate::settings::{Setting, Settings};
+use crate::signal::{ProcessSignal, next_wake};
 use crate::{EngineError, Events};
 
 const SPACES_PAGE: usize = 60;
@@ -40,6 +41,10 @@ const MESSAGES_PAGE: usize = 100;
 const RECENT_LIMIT: usize = 20;
 /// Messages kept on disk per recent space.
 const CACHED_MESSAGES: usize = 150;
+/// Polling cadence for the space currently open in the reader.
+const OPEN_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// How often to check whether the machine woke from sleep.
+const WAKE_CHECK: Duration = Duration::from_secs(10);
 
 
 struct Listing {
@@ -74,7 +79,7 @@ struct Thread {
     pending: Vec<Pending>,
 }
 
-/// A space's newest-page fetch: one asked for while it runs runs after it.
+/// A space's newest-page fetch: an explicit one asked for while it runs runs after it.
 #[derive(Default)]
 struct Fetch {
     again: bool,
@@ -135,8 +140,10 @@ pub struct Chat {
     state: Mutex<State>,
     /// One account sync at a time.
     syncing: tokio::sync::Mutex<()>,
-    /// Restarts the poll's wait when `chat.pollSeconds` changes.
+    /// Restarts the space-list poll's wait when `chat.pollSeconds` changes.
     interval_changed: tokio::sync::Notify,
+    /// Wakes the open-space fast-poll loop when the open space opens, switches or closes.
+    open_changed: tokio::sync::Notify,
     /// Takes the pictures Google Chat publishes for the people the rows and threads show.
     avatars: Arc<Avatars>,
 }
@@ -184,6 +191,7 @@ impl Chat {
             state: Mutex::new(State::default()),
             syncing: tokio::sync::Mutex::new(()),
             interval_changed: tokio::sync::Notify::new(),
+            open_changed: tokio::sync::Notify::new(),
             avatars,
         }
     }
@@ -200,26 +208,68 @@ impl Chat {
     // MARK: - Startup and polling
 
     /// Paints the last known accounts and spaces from mail.db, follows the signed-in chat
-    /// accounts, fetches their spaces, then polls every `chat.pollSeconds`.
+    /// accounts, fetches their spaces, then polls spaces every `chat.pollSeconds`, the open
+    /// space every `OPEN_POLL_INTERVAL`, and catches up immediately after sleep or a network
+    /// change.
     pub async fn start(self: Arc<Self>) {
         self.restore_from_cache().await;
         self.sync_accounts().await;
         self.poll(false);
         let chat = self.clone();
         tokio::spawn(async move {
+            crate::polling::periodic(|| chat.poll_interval(), &chat.interval_changed, || chat.poll(true)).await;
+        });
+        let chat = self.clone();
+        tokio::spawn(async move {
             loop {
-                let seconds = chat.settings.value(Setting::ChatPollSeconds).as_u64().unwrap_or(20).max(1);
+                let open = chat.state().open.clone();
+                let Some(key) = open else {
+                    chat.open_changed.notified().await;
+                    continue;
+                };
+                let wait = OPEN_POLL_INTERVAL.min(chat.poll_interval());
                 tokio::select! {
-                    () = tokio::time::sleep(Duration::from_secs(seconds)) => chat.poll(true),
-                    () = chat.interval_changed.notified() => {}
+                    () = tokio::time::sleep(wait) => {
+                        if chat.state().open.as_ref() == Some(&key) {
+                            chat.fetch_latest(key, true);
+                        }
+                    }
+                    () = chat.open_changed.notified() => {}
                 }
+            }
+        });
+        let chat = self.clone();
+        tokio::spawn(async move {
+            loop {
+                next_wake(WAKE_CHECK).await;
+                chat.refresh_after_resume();
+            }
+        });
+        let chat = self.clone();
+        tokio::spawn(async move {
+            let Some(mut changes) = ProcessSignal::NETWORK_CHANGE.posts() else { return };
+            while changes.next().await {
+                chat.refresh_after_resume();
             }
         });
     }
 
-    /// settings.json changed: a changed `chat.pollSeconds` starts the wait afresh.
+    fn poll_interval(&self) -> Duration {
+        let seconds = self.settings.value(Setting::ChatPollSeconds).as_u64().unwrap_or(10).max(1);
+        Duration::from_secs(seconds)
+    }
+
+    fn refresh_after_resume(self: &Arc<Self>) {
+        self.poll(true);
+        if let Some(key) = self.state().open.clone() {
+            self.fetch_latest(key, true);
+        }
+    }
+
+    /// settings.json changed: a changed `chat.pollSeconds` starts the wait afresh; unrelated
+    /// settings keep the wait already running.
     pub fn settings_changed(&self) {
-        self.interval_changed.notify_waiters();
+        self.interval_changed.notify_one();
     }
 
     /// Signed-in accounts changed: removed ones drop their spaces and messages, added ones load.
@@ -311,6 +361,7 @@ impl Chat {
         }
         if state.open.as_ref().is_some_and(|open| !names.contains(&open.account)) {
             state.open = None;
+            self.open_changed.notify_one();
             self.events.emit_soon("chatMessages");
         }
     }
@@ -422,7 +473,7 @@ impl Chat {
             }
         }
         if let Some(key) = fetch {
-            self.fetch_latest(key);
+            self.fetch_latest(key, false);
         }
     }
 
@@ -535,36 +586,44 @@ impl Chat {
             let mut state = self.state();
             state.open = Some(key.clone());
             self.remember(&mut state, key);
+            self.open_changed.notify_one();
             self.events.emit_soon("chatMessages");
         }
         self.preload(key);
-        self.fetch_latest(key.clone());
+        self.fetch_latest(key.clone(), false);
         self.mark_read(key);
     }
 
     fn close(&self) {
         let mut state = self.state();
         if state.open.take().is_some() {
+            self.open_changed.notify_one();
             self.events.emit_soon("chatMessages");
         }
     }
 
-    fn fetch_latest(self: &Arc<Self>, key: ChatSpaceKey) {
+    fn fetch_latest(self: &Arc<Self>, key: ChatSpaceKey, quiet: bool) {
         {
             let mut state = self.state();
             if let Some(fetch) = state.fetches.get_mut(&key) {
-                fetch.again = true;
+                if !quiet {
+                    fetch.again = true;
+                }
                 return;
             }
             state.fetches.insert(key.clone(), Fetch::default());
         }
         let chat = self.clone();
         tokio::spawn(async move {
+            let mut quiet = quiet;
             loop {
-                chat.fetch_pass(&key).await;
+                chat.fetch_pass(&key, quiet).await;
                 let mut state = chat.state();
                 match state.fetches.get_mut(&key) {
-                    Some(fetch) if fetch.again => fetch.again = false,
+                    Some(fetch) if fetch.again => {
+                        fetch.again = false;
+                        quiet = false;
+                    }
                     _ => {
                         state.fetches.remove(&key);
                         return;
@@ -574,13 +633,36 @@ impl Chat {
         });
     }
 
-    /// Asked for while open: a space closed before an extra fetch began needs none.
-    async fn fetch_pass(self: &Arc<Self>, key: &ChatSpaceKey) {
-        if self.state().open.as_ref() != Some(key) {
-            return;
-        }
+    fn overlaps_thread(&self, key: &ChatSpaceKey, messages: &[ChatMessage]) -> bool {
+        let state = self.state();
+        let Some(thread) = state.threads.get(key) else { return false };
+        let known: HashSet<&str> = thread.messages.iter().map(|message| message.name.as_str()).collect();
+        messages.iter().any(|message| known.contains(message.name.as_str()))
+    }
+
+    /// Asked for while open: a space closed before an extra fetch began needs none. Quiet
+    /// polls of an already-loaded space fetch only the newest summary page in one request,
+    /// falling back to a full page if a burst outran it.
+    async fn fetch_pass(self: &Arc<Self>, key: &ChatSpaceKey, quiet: bool) {
+        let light = {
+            let state = self.state();
+            if state.open.as_ref() != Some(key) {
+                return;
+            }
+            quiet
+                && state.threads.get(key).is_some_and(|thread| thread.loaded && !thread.messages.is_empty())
+                && self.remote.has_me(&key.account)
+        };
         let result = match self.api(&key.account) {
-            Ok(api) => self.remote.messages(&api, &key.account, &key.space, MESSAGES_PAGE, None).await,
+            Ok(api) if light => {
+                match self.remote.messages(&api, &key.account, &key.space, SUMMARY_MESSAGES, None, false).await {
+                    Ok(page) if page.more && !self.overlaps_thread(key, &page.messages) => {
+                        self.remote.messages(&api, &key.account, &key.space, MESSAGES_PAGE, None, false).await
+                    }
+                    other => other,
+                }
+            }
+            Ok(api) => self.remote.messages(&api, &key.account, &key.space, MESSAGES_PAGE, None, true).await,
             Err(error) => Err(error),
         };
         match result {
@@ -609,40 +691,62 @@ impl Chat {
             if !state.has_account(&key.account) {
                 return;
             }
-            let thread = state.threads.entry(key.clone()).or_default();
-            // Messages newer than the page's newest were confirmed (sent from here) after this
-            // fetch left; the page can't have them, so they stay.
-            let newest = page.messages.last().map_or(DISTANT_PAST, |message| message.created);
-            let names: HashSet<&str> = page.messages.iter().map(|message| message.name.as_str()).collect();
-            let newer: Vec<ChatMessage> = thread
-                .messages
-                .iter()
-                .filter(|message| !names.contains(message.name.as_str()) && message.created > newest)
-                .cloned()
-                .collect();
-            if page.more
-                && let Some(oldest) = page.messages.first().map(|message| message.created)
-            {
-                let older: Vec<ChatMessage> = thread
+            let (next_messages, next_more, next_last_read, changed, newest_message, newest_incoming) = {
+                let thread = state.threads.entry(key.clone()).or_default();
+                // Messages newer than the page's newest were confirmed (sent from here) after this
+                // fetch left; the page can't have them, so they stay.
+                let newest = page.messages.last().map_or(DISTANT_PAST, |message| message.created);
+                let names: HashSet<&str> = page.messages.iter().map(|message| message.name.as_str()).collect();
+                let newer: Vec<ChatMessage> = thread
                     .messages
                     .iter()
-                    .filter(|message| !names.contains(message.name.as_str()) && message.created < oldest)
+                    .filter(|message| !names.contains(message.name.as_str()) && message.created > newest)
                     .cloned()
                     .collect();
-                if older.is_empty() {
-                    thread.more = true;
+                let (next_messages, next_more): (Vec<ChatMessage>, bool) = if page.more
+                    && let Some(oldest) = page.messages.first().map(|message| message.created)
+                {
+                    let older: Vec<ChatMessage> = thread
+                        .messages
+                        .iter()
+                        .filter(|message| !names.contains(message.name.as_str()) && message.created < oldest)
+                        .cloned()
+                        .collect();
+                    let more = if older.is_empty() { true } else { thread.more };
+                    (older.into_iter().chain(page.messages.iter().cloned()).chain(newer).collect(), more)
+                } else {
+                    (page.messages.iter().cloned().chain(newer).collect(), page.more)
+                };
+                let next_last_read = page.last_read.or(thread.last_read);
+                let changed = !thread.loaded
+                    || thread.failure.is_some()
+                    || thread.more != next_more
+                    || thread.last_read != next_last_read
+                    || thread.messages != next_messages;
+                let newest_message = next_messages.last().cloned();
+                let newest_incoming =
+                    next_messages.iter().rev().find(|message| !message.mine).map(|message| message.created);
+                (next_messages, next_more, next_last_read, changed, newest_message, newest_incoming)
+            };
+            if changed {
+                if let Some(thread) = state.threads.get_mut(key) {
+                    thread.messages = next_messages;
+                    thread.more = next_more;
+                    thread.last_read = next_last_read;
+                    thread.loaded = true;
+                    thread.failure = None;
                 }
-                thread.messages = older.into_iter().chain(page.messages.iter().cloned()).chain(newer).collect();
-            } else {
-                thread.messages = page.messages.iter().cloned().chain(newer).collect();
-                thread.more = page.more;
+                self.persist(&state, key);
+                self.thread_changed(&state, key);
+                if let Some(latest) = newest_message {
+                    self.update_space(&mut state, key, |space| {
+                        if space.latest.as_ref().map_or(DISTANT_PAST, |known| known.created) <= latest.created {
+                            space.latest = Some(latest.clone());
+                        }
+                        space.last_active = Some(space.last_active.unwrap_or(latest.created).max(latest.created));
+                    });
+                }
             }
-            thread.last_read = page.last_read.or(thread.last_read);
-            thread.loaded = true;
-            thread.failure = None;
-            let newest_incoming = thread.messages.iter().rev().find(|message| !message.mine).map(|message| message.created);
-            self.persist(&state, key);
-            self.thread_changed(&state, key);
             // While open, a message from someone else newer than the read mark is read on arrival.
             state.open.as_ref() == Some(key)
                 && newest_incoming.is_some_and(|created| created > state.read_marks.get(key).copied().unwrap_or(DISTANT_PAST))
@@ -668,7 +772,7 @@ impl Chat {
         let (chat, key) = (self.clone(), key.clone());
         tokio::spawn(async move {
             let result = match chat.api(&key.account) {
-                Ok(api) => chat.remote.messages(&api, &key.account, &key.space, MESSAGES_PAGE, Some(oldest)).await,
+                Ok(api) => chat.remote.messages(&api, &key.account, &key.space, MESSAGES_PAGE, Some(oldest), false).await,
                 Err(error) => Err(error),
             };
             let mut state = chat.state();

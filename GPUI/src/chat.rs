@@ -1079,6 +1079,13 @@ impl ChatPane {
         cx.notify();
     }
 
+    /// Leaves Chat for mail or the calendar: closes the open space in the engine so fast polling
+    /// and automatic read marks stop while Chat is hidden.
+    pub fn hide(&mut self, cx: &mut Context<Self>) {
+        self.leave_space(cx);
+        self.view = View::Spaces;
+    }
+
     /// Whether the sidebar lists Chat: an account uses it, or a Google account could connect it.
     pub fn shown(&self) -> bool {
         !self.accounts.is_empty() || !self.chat_offers.is_empty()

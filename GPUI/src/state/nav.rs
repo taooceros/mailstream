@@ -12,7 +12,9 @@ impl MailApp {
 
     /// Chat or the calendar gives way to mail.
     fn leave_panes(&mut self, cx: &mut Context<Self>) {
-        self.chat_view = None;
+        if self.chat_view.take().is_some() {
+            self.chat.update(cx, |chat, cx| chat.hide(cx));
+        }
         if std::mem::take(&mut self.calendar_view) {
             self.calendar.update(cx, |calendar, cx| calendar.hide(cx));
         }
@@ -60,7 +62,9 @@ impl MailApp {
         self.chat.update(cx, |chat, cx| {
             chat.close_video_lightbox(window, cx);
         });
-        self.chat_view = None;
+        if self.chat_view.take().is_some() {
+            self.chat.update(cx, |chat, cx| chat.hide(cx));
+        }
         self.drawer_open = false;
         self.calendar_view = true;
         self.context_menu = None;

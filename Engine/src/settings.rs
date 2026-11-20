@@ -148,7 +148,7 @@ impl Setting {
             Self::PushPollSeconds => {
                 (Kind::Int(60, 86_400), json!(900), "Safety-net polling interval while push is connected.")
             }
-            Self::ChatPollSeconds => (Kind::Int(5, 3600), json!(20), "Google Chat polling interval."),
+            Self::ChatPollSeconds => (Kind::Int(5, 3600), json!(10), "Google Chat polling interval."),
             Self::FlutterShowFrameRate => (
                 Kind::Bool,
                 json!(false),
