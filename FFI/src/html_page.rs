@@ -412,6 +412,8 @@ impl Pages {
         };
         // List bullets draw with Blitz's own font.
         fonts.collection.register_fonts(peniko::Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _), None);
+        #[cfg(target_os = "android")]
+        configure_android_fonts(&mut fonts.collection);
         // The fonts the system falls back to for the scripts mail is mostly written in, looked up
         // once: every page's copy would ask the system again (Han for every page, as parley adds
         // it to each fallback list).
@@ -554,6 +556,162 @@ impl Pages {
             let _ = reply.send(version);
         }
     }
+}
+
+/// Configures Android `fontique` fallbacks for CJK scripts and monospace (MS-420).
+///
+/// `fontique`'s Android backend parses `/system/etc/fonts.xml` for fallback scripts, which fails
+/// in three ways on real Android devices:
+/// 1. SELinux (e.g. HyperOS symlinking `fonts.xml` into `theme_data_file`) or Android 15+
+///    `font_fallback.xml` makes `fonts.xml` unreadable, leaving `Script::Han` with no CJK fallback
+///    (so Chinese falls back to Roboto and renders as tofu).
+/// 2. When `fonts.xml` is readable, `fontique` maps `Script::Han` (`Hani`) only from `zh-Hant`
+///    and returns a single family; on HyperOS that binds `Hani` solely to `Misans TC VF`, which
+///    omits common Simplified Chinese glyphs.
+/// 3. On stock AOSP `fonts.xml`, all CJK `<family>` entries share `postScriptName="NotoSansCJKJP-Regular"`
+///    and differentiate via `index`, which `fontique` ignores, routing `zh-Hans`/`Hani` to JP glyphs.
+#[cfg(any(target_os = "android", test))]
+fn configure_android_fonts(collection: &mut parley::fontique::Collection) {
+    use parley::fontique::{FallbackKey, GenericFamily, Language, Script};
+
+    const SC: &[&str] = &[
+        "Noto Sans CJK SC",
+        "Noto Sans SC",
+        "Source Han Sans CN",
+        "Source Han Sans SC",
+        "HarmonyOS Sans SC",
+        "MiSans VF",
+        "Noto Serif CJK SC",
+        "Droid Sans Fallback",
+        "Noto Sans CJK TC",
+        "Noto Sans CJK HK",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK KR",
+        "Misans TC VF",
+        "MiSans L3",
+    ];
+    const TC: &[&str] = &[
+        "Noto Sans CJK TC",
+        "Noto Sans TC",
+        "Source Han Sans TW",
+        "Source Han Sans TC",
+        "HarmonyOS Sans TC",
+        "Misans TC VF",
+        "Noto Sans CJK HK",
+        "Noto Sans CJK SC",
+        "MiSans VF",
+        "Noto Serif CJK TC",
+        "Droid Sans Fallback",
+        "MiSans L3",
+    ];
+    const HK: &[&str] = &[
+        "Noto Sans CJK HK",
+        "Noto Sans HK",
+        "Noto Sans CJK TC",
+        "Misans TC VF",
+        "Noto Sans CJK SC",
+        "MiSans VF",
+        "Droid Sans Fallback",
+        "MiSans L3",
+    ];
+    const JP: &[&str] = &[
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "MiSans Japanese VF",
+        "Noto Sans CJK SC",
+        "MiSans VF",
+        "Droid Sans Fallback",
+    ];
+    const KR: &[&str] = &[
+        "Noto Sans CJK KR",
+        "Noto Sans KR",
+        "MiSans Korean VF",
+        "Noto Sans CJK SC",
+        "MiSans VF",
+        "Droid Sans Fallback",
+    ];
+    const SANS: &[&str] = &["Roboto Flex", "Roboto", "MiSans Latin VF", "Noto Sans", "MiSans VF"];
+    const MONO: &[&str] = &["Roboto Mono", "Droid Sans Mono", "Cutive Mono", "Noto Sans Mono"];
+
+    let resolve = |collection: &mut parley::fontique::Collection, names: &[&str]| -> Vec<_> {
+        let mut ids = Vec::new();
+        for name in names {
+            if let Some(id) = collection.family_id(name)
+                && collection.family(id).is_some_and(|family| !family.fonts().is_empty())
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+            }
+        }
+        ids
+    };
+
+    let has_generic_faces = |collection: &mut parley::fontique::Collection, generic: GenericFamily| -> bool {
+        let ids: Vec<_> = collection.generic_families(generic).collect();
+        ids.into_iter().any(|id| collection.family(id).is_some_and(|family| !family.fonts().is_empty()))
+    };
+
+    for generic in [GenericFamily::SansSerif, GenericFamily::SystemUi] {
+        if !has_generic_faces(collection, generic) {
+            let sans = resolve(collection, SANS);
+            if !sans.is_empty() {
+                collection.set_generic_families(generic, sans.into_iter());
+            }
+        }
+    }
+    if !has_generic_faces(collection, GenericFamily::Monospace) {
+        let mono = resolve(collection, MONO);
+        if !mono.is_empty() {
+            collection.set_generic_families(GenericFamily::Monospace, mono.into_iter());
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    if resolve(collection, SC).is_empty() {
+        for path in [
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/product/fonts/NotoSansCJK-Regular.ttc",
+            "/system_ext/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/MiSansVF.ttf",
+            "/product/fonts/MiSansVF.ttf",
+            "/system/fonts/DroidSansFallback.ttf",
+        ] {
+            if let Ok(bytes) = fs::read(path) {
+                collection.register_fonts(peniko::Blob::new(Arc::new(bytes) as _), None);
+                if !resolve(collection, SC).is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let hani = Script::from_bytes(*b"Hani");
+    let set_chain = |collection: &mut parley::fontique::Collection, key: FallbackKey, names: &[&str]| {
+        let ids = resolve(collection, names);
+        if !ids.is_empty() {
+            collection.set_fallbacks(key, ids.into_iter());
+        }
+    };
+
+    // Default `Hani` handles untagged text as well as `zh`, `zh-CN`, and `zh-Hans` via
+    // `fontique::FallbackKey`'s canonical locale mapping.
+    set_chain(collection, FallbackKey::new(hani, None), SC);
+    for (tag, names) in [
+        ("zh-SG", SC),
+        ("zh-TW", TC),
+        ("zh-HK", HK),
+        ("zh-MO", HK),
+        ("ja", JP),
+        ("ko", KR),
+    ] {
+        if let Ok(lang) = Language::parse(tag) {
+            set_chain(collection, FallbackKey::new(hani, Some(&lang)), names);
+        }
+    }
+    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Hira"), None), JP);
+    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Kana"), None), JP);
+    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Hang"), None), KR);
+    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Bopo"), None), TC);
 }
 
 /// `html` parsed, its requests going to `net`, its fonts a copy of `fonts`.
@@ -2570,6 +2728,120 @@ mod tests {
         assert_eq!(selected.text, "Line one\nLine two");
         assert!(selected.html.contains("Line one<br>Line two"), "got: {}", selected.html);
         assert_eq!(crate::html_to_markdown(&selected.html), "Line one\nLine two");
+    }
+
+    #[test]
+    fn android_cjk_fallbacks_prefer_sc_and_cover_locales() {
+        use parley::fontique::{
+            Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, Language, Script,
+        };
+
+        let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
+        let blob = peniko::Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _);
+        for family in [
+            "Roboto",
+            "Droid Sans Mono",
+            "Misans TC VF",
+            "MiSans VF",
+            "MiSans L3",
+            "Noto Sans CJK JP",
+            "Noto Sans CJK KR",
+            "Noto Sans CJK SC",
+            "Noto Sans CJK TC",
+            "Noto Sans CJK HK",
+        ] {
+            collection.register_fonts(
+                blob.clone(),
+                Some(FontInfoOverride { family_name: Some(family), ..Default::default() }),
+            );
+        }
+        // Simulate fontique's buggy HyperOS state: `Hani` bound solely to `Misans TC VF`.
+        let tc_only = collection.family_id("Misans TC VF").expect("registered");
+        let hani = Script::from_bytes(*b"Hani");
+        collection.set_fallbacks(FallbackKey::new(hani, None), std::iter::once(tc_only));
+
+        configure_android_fonts(&mut collection);
+
+        let names_for = |collection: &mut Collection, key: FallbackKey| -> Vec<String> {
+            let ids: Vec<_> = collection.fallback_families(key).collect();
+            ids.into_iter().filter_map(|id| collection.family_name(id).map(str::to_owned)).collect()
+        };
+
+        // Untagged / zh-CN / zh-Hans prefer Noto Sans CJK SC, with MiSans VF and MiSans L3 in chain.
+        let default_hani = names_for(&mut collection, FallbackKey::new(hani, None));
+        assert_eq!(default_hani.first().map(String::as_str), Some("Noto Sans CJK SC"), "{default_hani:?}");
+        assert!(default_hani.iter().any(|n| n == "MiSans VF"), "{default_hani:?}");
+        assert!(default_hani.iter().any(|n| n == "MiSans L3"), "{default_hani:?}");
+
+        let zh_cn = Language::parse("zh-CN").unwrap();
+        assert_eq!(names_for(&mut collection, FallbackKey::new(hani, Some(&zh_cn))), default_hani);
+        let zh_hans = Language::parse("zh-Hans").unwrap();
+        assert_eq!(names_for(&mut collection, FallbackKey::new(hani, Some(&zh_hans))), default_hani);
+
+        // zh-TW / zh-Hant prefer Traditional Chinese, zh-HK prefers HK, ja/ko prefer JP/KR.
+        let zh_tw = Language::parse("zh-TW").unwrap();
+        assert_eq!(
+            names_for(&mut collection, FallbackKey::new(hani, Some(&zh_tw))).first().map(String::as_str),
+            Some("Noto Sans CJK TC"),
+        );
+        let zh_hant = Language::parse("zh-Hant").unwrap();
+        assert_eq!(
+            names_for(&mut collection, FallbackKey::new(hani, Some(&zh_hant))).first().map(String::as_str),
+            Some("Noto Sans CJK TC"),
+        );
+        let zh_hk = Language::parse("zh-HK").unwrap();
+        assert_eq!(
+            names_for(&mut collection, FallbackKey::new(hani, Some(&zh_hk))).first().map(String::as_str),
+            Some("Noto Sans CJK HK"),
+        );
+        let ja = Language::parse("ja").unwrap();
+        assert_eq!(
+            names_for(&mut collection, FallbackKey::new(hani, Some(&ja))).first().map(String::as_str),
+            Some("Noto Sans CJK JP"),
+        );
+        let ko = Language::parse("ko").unwrap();
+        assert_eq!(
+            names_for(&mut collection, FallbackKey::new(hani, Some(&ko))).first().map(String::as_str),
+            Some("Noto Sans CJK KR"),
+        );
+
+        // Generic SansSerif and Monospace resolve to real Android families.
+        let mono_ids: Vec<_> = collection.generic_families(GenericFamily::Monospace).collect();
+        let mono_names: Vec<_> = mono_ids.into_iter().filter_map(|id| collection.family_name(id).map(str::to_owned)).collect();
+        assert_eq!(mono_names, vec!["Droid Sans Mono"]);
+        let sans_ids: Vec<_> = collection.generic_families(GenericFamily::SansSerif).collect();
+        let sans_names: Vec<_> = sans_ids.into_iter().filter_map(|id| collection.family_name(id).map(str::to_owned)).collect();
+        assert_eq!(sans_names.first().map(String::as_str), Some("Roboto"));
+    }
+
+    #[test]
+    fn android_cjk_fallbacks_work_without_noto_cjk_and_preserve_existing_generics() {
+        use parley::fontique::{
+            Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, Script,
+        };
+
+        let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
+        let blob = peniko::Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _);
+        for family in ["Custom Sans", "MiSans VF", "Droid Sans Fallback"] {
+            collection.register_fonts(
+                blob.clone(),
+                Some(FontInfoOverride { family_name: Some(family), ..Default::default() }),
+            );
+        }
+        let custom_sans = collection.family_id("Custom Sans").unwrap();
+        collection.set_generic_families(GenericFamily::SansSerif, std::iter::once(custom_sans));
+
+        configure_android_fonts(&mut collection);
+
+        // Existing populated generic family is kept intact.
+        let sans: Vec<_> = collection.generic_families(GenericFamily::SansSerif).collect();
+        assert_eq!(sans, vec![custom_sans]);
+
+        // Without Noto Sans CJK SC, Hani falls back to MiSans VF then Droid Sans Fallback.
+        let hani = Script::from_bytes(*b"Hani");
+        let ids: Vec<_> = collection.fallback_families(FallbackKey::new(hani, None)).collect();
+        let names: Vec<_> = ids.into_iter().filter_map(|id| collection.family_name(id).map(str::to_owned)).collect();
+        assert_eq!(names, vec!["MiSans VF", "Droid Sans Fallback"]);
     }
 
     /// A 2×2 red PNG.

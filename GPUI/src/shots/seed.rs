@@ -372,6 +372,13 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
     let mut chinese = Mail::new(GMAIL, "dinner", XIAOMING, "周末聚餐");
     chinese.minutes_ago = 180.;
     chinese.text = Some("Sam 你好，\n\n这周六晚上大家一起吃个饭吧？地点在老地方，六点半。能来的话回我一下。\n\n小明".into());
+    chinese.html = Some(
+        "<div style=\"font-family:sans-serif;font-size:14px;line-height:1.6\">\
+         <p>Sam 你好，</p>\
+         <p>这周六晚上大家一起吃个饭吧？地点在<strong>老地方</strong>，六点半。能来的话回我一下。</p>\
+         <p>小明</p></div>"
+            .into(),
+    );
     all.push((chinese, None));
     // Sam answered last: the row shows the reply, from "me", at its time.
     let mut dinner_reply = Mail::sent(GMAIL, "dinner-2", "Re: 周末聚餐");
