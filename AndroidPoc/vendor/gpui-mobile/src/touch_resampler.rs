@@ -18,6 +18,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use crate::frame_timing::VsyncTimeline;
+
 /// Minimum interval between two samples before velocity is considered valid
 /// (0.5 ms), guarding against duplicate or near-simultaneous samples.
 const MIN_DT_NS: i64 = 500_000;
@@ -154,13 +156,38 @@ impl TouchResampler {
         }
     }
 
-    /// Flush buffered move samples on a vsync tick (`vsync_ns`), attaching a
-    /// bounded linear resample/prediction to the latest move of each active
-    /// pointer and bridging a missed-beat vsync when touch arrives slower than
-    /// the display refresh rate.
+    /// Flush buffered move samples on a vsync timeline, targeting the
+    /// anti-overshoot presentation-aligned instant
+    /// `min(expected_present_ns - refresh, frame_time_ns + min(refresh / 2, 4 ms))`
+    /// while checking the 1.5× refresh bridge window against `frame_time_ns`.
+    pub(crate) fn flush_for_timeline(
+        &mut self,
+        timeline: VsyncTimeline,
+        refresh_interval_ns: i64,
+        emit: impl FnMut(ResampledMove),
+    ) {
+        let target_ns = timeline.touch_resample_target_ns(refresh_interval_ns);
+        self.flush_for_target(timeline.frame_time_ns, target_ns, refresh_interval_ns, emit);
+    }
+
+    /// Flush buffered move samples on a vsync tick (`vsync_ns`), attaching an
+    /// exponentially-saturated bounded prediction to the latest move of each
+    /// active pointer and bridging a missed-beat vsync when touch arrives
+    /// slower than the display refresh rate.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub(crate) fn flush_for_vsync(
         &mut self,
         vsync_ns: i64,
+        refresh_interval_ns: i64,
+        emit: impl FnMut(ResampledMove),
+    ) {
+        self.flush_for_target(vsync_ns, vsync_ns, refresh_interval_ns, emit);
+    }
+
+    fn flush_for_target(
+        &mut self,
+        frame_time_ns: i64,
+        target_ns: i64,
         refresh_interval_ns: i64,
         mut emit: impl FnMut(ResampledMove),
     ) {
@@ -173,7 +200,7 @@ impl TouchResampler {
             let Some(track) = self.pointers.get_mut(&id) else {
                 continue;
             };
-            let predicted = resample_position(&track.history, vsync_ns, max_bridge_ns);
+            let predicted = resample_position(&track.history, target_ns, refresh_interval_ns);
 
             if !track.pending.is_empty() {
                 let last_ix = track.pending.len() - 1;
@@ -186,11 +213,11 @@ impl TouchResampler {
                         predicted: if ix == last_ix { predicted } else { None },
                     });
                 }
-                track.last_flushed_vsync_ns = Some(vsync_ns);
+                track.last_flushed_vsync_ns = Some(frame_time_ns);
             } else if let Some(pred) = predicted {
                 let last = track.last();
-                let already_flushed = track.last_flushed_vsync_ns == Some(vsync_ns);
-                let age_ns = vsync_ns.saturating_sub(last.time_ns);
+                let already_flushed = track.last_flushed_vsync_ns == Some(frame_time_ns);
+                let age_ns = frame_time_ns.saturating_sub(last.time_ns);
                 if !already_flushed && age_ns > 0 && age_ns <= max_bridge_ns {
                     emit(ResampledMove {
                         id,
@@ -199,7 +226,7 @@ impl TouchResampler {
                         raw_time_ns: last.time_ns,
                         predicted: Some(pred),
                     });
-                    track.last_flushed_vsync_ns = Some(vsync_ns);
+                    track.last_flushed_vsync_ns = Some(frame_time_ns);
                 }
             }
         }
@@ -298,7 +325,7 @@ fn latest_step_stopped(history: &VecDeque<Sample>) -> bool {
 fn resample_position(
     history: &VecDeque<Sample>,
     target_ns: i64,
-    max_bridge_ns: i64,
+    refresh_interval_ns: i64,
 ) -> Option<(f32, f32)> {
     if history.len() < 2 {
         return None;
@@ -331,7 +358,10 @@ fn resample_position(
     }
 
     // Case 2: `target_ns` is ahead of the latest sample — extrapolate along the
-    // trailing ~16 ms window, guarded against a stopped or reversing finger.
+    // trailing ~16 ms window with exponential saturation
+    // `tau_max = 0.85 * T_refresh`, `extrap = min(dt, tau_max * (1 - exp(-ahead / tau_max)))`,
+    // guarded against a stopped or reversing finger.
+    let max_bridge_ns = max_bridge_horizon_ns(refresh_interval_ns);
     let ahead = target_ns - last.time_ns;
     if ahead > max_bridge_ns * 2 || latest_step_stopped(history) {
         return None;
@@ -356,8 +386,11 @@ fn resample_position(
     if dx.hypot(dy) < MIN_EXTRAP_DISTANCE_PX {
         return None;
     }
-    let extrap = ahead.min(max_bridge_ns).min(dt);
-    let alpha = extrap as f64 / dt as f64;
+    let base_refresh = refresh_interval_ns.clamp(4_000_000, 16_666_667) as f64;
+    let tau_max = 0.85 * base_refresh;
+    let saturated = tau_max * (1.0 - (-(ahead as f64) / tau_max).exp());
+    let extrap = saturated.min(dt as f64);
+    let alpha = extrap / (dt as f64);
     Some((
         last.x + (dx as f64 * alpha) as f32,
         last.y + (dy as f64 * alpha) as f32,
@@ -378,23 +411,31 @@ mod tests {
         r.on_move(0, 11 * MS, 100.0, 890.0);
 
         let mut out = Vec::new();
-        // Vsync 1 at 12 ms: raw at 11 ms, extrapolated +1 ms to 880.0.
+        // Vsync 1 at 12 ms: raw at 11 ms, ahead = 1 ms -> saturated ~0.933 ms (~880.67).
         r.flush_for_vsync(12 * MS, REFRESH_120HZ, |m| out.push(m));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].raw_y, 890.0);
-        assert!((out[0].predicted.unwrap().1 - 880.0).abs() < 0.01);
+        let y1 = out[0].predicted.unwrap().1;
+        assert!(y1 < 890.0 && y1 > 880.0, "expected damped prediction near 880.67, got {y1}");
         assert!(r.needs_next_vsync(12 * MS, REFRESH_120HZ));
 
         // Vsync 2 at 19.3 ms: next touch (at 22 ms) hasn't arrived yet!
-        // Resampler bridges this single vsync cleanly without changing raw sample.
+        // Resampler bridges this single vsync smoothly with bounded exponential saturation.
         out.clear();
         r.flush_for_vsync(19_300_000, REFRESH_120HZ, |m| out.push(m));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].raw_time_ns, 11 * MS);
         assert_eq!(out[0].raw_y, 890.0);
-        assert!((out[0].predicted.unwrap().1 - 807.0).abs() < 0.2);
+        let y2 = out[0].predicted.unwrap().1;
+        assert!(y2 < y1, "bridged vsync must continue advancing monotonically: {y1} -> {y2}");
+        // Overshoot past latest raw sample is strictly bounded by 0.85 refresh steps (70.83 px).
+        assert!(
+            890.0 - y2 <= 0.85 * (REFRESH_120HZ as f32 / 1_000_000.0) * 10.0,
+            "extrapolation must saturate <= 0.85 steps, got {}",
+            890.0 - y2
+        );
 
-        // If no touch arrives by 28 ms (> max_extrap_ns), stops scheduling.
+        // If no touch arrives by 28 ms (> max_bridge_horizon), stops scheduling.
         assert!(!r.needs_next_vsync(28 * MS, REFRESH_120HZ));
     }
 
@@ -411,7 +452,11 @@ mod tests {
         assert_eq!(out[0].raw_time_ns, 4 * MS);
         assert_eq!(out[0].predicted, None);
         assert_eq!(out[1].raw_time_ns, 8 * MS);
-        assert!((out[1].predicted.unwrap().1 - 450.0).abs() < 0.01);
+        let pred_y = out[1].predicted.unwrap().1;
+        assert!(
+            (pred_y - 451.29).abs() < 0.1,
+            "expected exponentially-damped prediction ~451.29, got {pred_y}"
+        );
     }
 
     #[test]
@@ -465,7 +510,7 @@ mod tests {
         r.flush_for_vsync(25_000_000, REFRESH_120HZ, |m| out.push(m));
         assert!(!out.is_empty());
         let y1 = out.last().unwrap().predicted.unwrap().1;
-        assert!((y1 - 925.0).abs() < 0.2, "expected ~925.0 at 25 ms, got {y1}");
+        assert!(y1 < 933.3333 && y1 > 925.0, "expected damped prediction ~926.44, got {y1}");
 
         // Next 120 Hz vsync at 33.33 ms: next 90 Hz packet is still 0 ms away
         // (age = 11.11 ms > 8.33 ms refresh, within 1.5x horizon = 12.5 ms).
@@ -474,9 +519,11 @@ mod tests {
         r.flush_for_vsync(33_333_333, REFRESH_120HZ, |m| out.push(m));
         assert_eq!(out.len(), 1, "must bridge 11.1 ms gap without dropping frame");
         let y2 = out[0].predicted.unwrap().1;
+        assert!(y2 < y1, "must advance monotonically across 11.1 ms gap: {y1} -> {y2}");
         assert!(
-            (y2 - 900.0).abs() < 0.5,
-            "expected uniform step to ~900.0 at 33.33 ms, got {y2}"
+            933.3333 - y2 <= 0.85 * (REFRESH_120HZ as f32 / 1_000_000.0) * 3.0,
+            "overshoot must stay <= 0.85 refresh steps, got {}",
+            933.3333 - y2
         );
     }
 
@@ -497,8 +544,8 @@ mod tests {
         r.flush_for_vsync(20_000_000, REFRESH_120HZ, |m| out.push(m));
         let pred = out.last().unwrap().predicted.expect("slow high-rate drag must resample");
         assert!(
-            (pred.1 - 494.0).abs() < 0.15,
-            "expected ~494.0 at 20 ms, got {}",
+            (pred.1 - 494.20).abs() < 0.1,
+            "expected exponentially-damped ~494.20 at 20 ms, got {}",
             pred.1
         );
     }
@@ -530,5 +577,70 @@ mod tests {
         r.flush_for_vsync(15 * MS, REFRESH_120HZ, |m| out.push(m));
         assert_eq!(out.last().unwrap().predicted, None);
         assert!(!r.needs_next_vsync(15 * MS, REFRESH_120HZ));
+    }
+
+    #[test]
+    fn hundred_hz_touch_at_120hz_is_monotonic_without_beat_stalls_and_bounds_stop_overshoot() {
+        let mut r = TouchResampler::new();
+        // 100 Hz touch packets (every 10 ms) moving steadily at 1.0 px/ms
+        // (= 8.333 px per 120 Hz frame) for 120 ms, then finger halts abruptly.
+        let speed_px_per_ms = 1.0_f32;
+        let frame_step_px = speed_px_per_ms * (REFRESH_120HZ as f32 / 1_000_000.0);
+        r.on_down(0, 0, 100.0, 1000.0);
+
+        let mut next_touch_idx = 1_i64;
+        let mut emitted_y = Vec::new();
+        for frame in 1..=14_i64 {
+            let frame_time_ns = frame * REFRESH_120HZ;
+            // Deliver any 100 Hz packets up to 110 ms that arrived before this vsync.
+            while next_touch_idx <= 11 && next_touch_idx * 10 * MS <= frame_time_ns {
+                let t = next_touch_idx * 10 * MS;
+                let y = 1000.0 - (next_touch_idx as f32) * 10.0 * speed_px_per_ms;
+                r.on_move(0, t, 100.0, y);
+                next_touch_idx += 1;
+            }
+            // Typical API 33+ timeline: expected_present_ns is 2 refreshes ahead.
+            let timeline = VsyncTimeline::new(
+                frame_time_ns,
+                frame_time_ns + 2 * REFRESH_120HZ,
+                frame_time_ns + REFRESH_120HZ,
+                REFRESH_120HZ,
+            );
+            let mut out = Vec::new();
+            r.flush_for_timeline(timeline, REFRESH_120HZ, |m| out.push(m));
+            if frame >= 2 && frame <= 13 {
+                assert!(
+                    !out.is_empty(),
+                    "100 Hz touch at 120 Hz frame {frame} must not drop to a 0-px stall frame"
+                );
+                let last = out.last().unwrap();
+                let y = last.predicted.map_or(last.raw_y, |p| p.1);
+                emitted_y.push(y);
+            }
+        }
+
+        // Verify strictly monotonic advance with no 0-px stall or 2x beat jump.
+        for pair in emitted_y.windows(2) {
+            let step = pair[0] - pair[1];
+            assert!(step > 1.0, "expected strictly monotonic step > 1 px, got {step}");
+            assert!(
+                step < frame_step_px * 1.4,
+                "expected no 2x beat-frequency jump (step={step}, 1x={frame_step_px})"
+            );
+        }
+
+        // Finger stopped abruptly at 110 ms (raw_y = 890.0). Even across subsequent
+        // bridged vsyncs before the next packet arrives, overshoot past 890.0 must
+        // stay strictly <= 0.85 frame steps.
+        let final_raw_y = 1000.0 - 110.0 * speed_px_per_ms;
+        let max_overshoot = emitted_y
+            .iter()
+            .map(|&y| (final_raw_y - y).max(0.0))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_overshoot <= 0.85 * frame_step_px + 1e-4,
+            "stop-finger overshoot {max_overshoot} exceeded 0.85 steps ({})",
+            0.85 * frame_step_px
+        );
     }
 }

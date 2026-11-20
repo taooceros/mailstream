@@ -78,6 +78,8 @@ pub(crate) mod fling_guard;
 pub(crate) mod frame_demand;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) mod frame_pacer;
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) mod frame_timing;
 pub mod momentum;
 pub mod packages;
 pub mod platform_view;

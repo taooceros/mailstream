@@ -149,6 +149,7 @@ pub fn size<T>(width: T, height: T) -> Size<T> {
 
 // ── sub-modules ──────────────────────────────────────────────────────────────
 
+pub(crate) mod adpf;
 pub mod dispatcher;
 pub mod display;
 mod document_picker;
@@ -156,6 +157,7 @@ mod fonts;
 pub(crate) mod frame_source;
 pub mod host;
 pub mod jni;
+pub(crate) mod loop_driver;
 pub mod keyboard;
 pub mod platform;
 pub mod platform_view;

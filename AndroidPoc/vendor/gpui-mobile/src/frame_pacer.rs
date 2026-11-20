@@ -134,8 +134,7 @@ impl FramePacer {
 
     /// Whether a frame is wanted: posted, due, or waiting on the fallback
     /// clock.
-    #[cfg(test)]
-    fn has_demand(&self) -> bool {
+    pub(crate) fn has_demand(&self) -> bool {
         self.posted.get() || self.due.get() || self.fallback_due_at.get().is_some()
     }
 

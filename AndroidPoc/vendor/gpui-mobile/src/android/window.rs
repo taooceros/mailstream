@@ -99,8 +99,6 @@ type SetFrameRateWithChangeStrategyFn =
 
 const DEFAULT_FRAME_RATE_COMPATIBILITY: i8 = 0;
 const ONLY_IF_SEAMLESS: i8 = 0;
-const HIGH_FRAME_RATE: f32 = 120.0;
-
 // Resolve an optional libandroid symbol at runtime.
 //
 // Linking API 30/31 frame-rate entry points directly would make the shared
@@ -138,11 +136,12 @@ fn load_set_frame_rate_with_change_strategy() -> Option<SetFrameRateWithChangeSt
     })
 }
 
-/// Request 120 Hz refresh rate from the native window when the platform exposes the API.
+/// Sets the `ANativeWindow` frame-rate vote (`120.0` while active, `0.0` to
+/// release back to SurfaceFlinger / LTPO) when the platform exposes the API.
 ///
 /// The NDK entry points are resolved with `dlsym` so this library still loads
 /// on pre-API-30/31 devices where the symbols do not exist.
-fn request_high_frame_rate(window: &NativeWindow) {
+fn set_native_window_frame_rate(window: &NativeWindow, frame_rate: f32) {
     let api_level = unsafe { ndk_sys::android_get_device_api_level() };
     let native_window = window.ptr().as_ptr();
 
@@ -150,27 +149,25 @@ fn request_high_frame_rate(window: &NativeWindow) {
         load_set_frame_rate_with_change_strategy().map(|set_frame_rate| unsafe {
             set_frame_rate(
                 native_window,
-                HIGH_FRAME_RATE,
+                frame_rate,
                 DEFAULT_FRAME_RATE_COMPATIBILITY,
                 ONLY_IF_SEAMLESS,
             )
         })
     } else if api_level >= 30 {
         load_set_frame_rate().map(|set_frame_rate| unsafe {
-            set_frame_rate(
-                native_window,
-                HIGH_FRAME_RATE,
-                DEFAULT_FRAME_RATE_COMPATIBILITY,
-            )
+            set_frame_rate(native_window, frame_rate, DEFAULT_FRAME_RATE_COMPATIBILITY)
         })
     } else {
         None
     };
 
     match status {
-        Some(0) => log::info!("Requested 120 Hz frame rate"),
-        Some(status) => log::warn!("ANativeWindow_setFrameRate* failed with status {status}"),
-        None => log::debug!("Skipping high frame rate request on API {api_level}"),
+        Some(0) => log::debug!("Set ANativeWindow frame rate vote to {frame_rate:.1} Hz"),
+        Some(status) => {
+            log::warn!("ANativeWindow_setFrameRate*({frame_rate:.1}) failed with status {status}")
+        }
+        None => log::debug!("Skipping frame rate vote ({frame_rate:.1} Hz) on API {api_level}"),
     }
 }
 
@@ -331,6 +328,12 @@ pub struct AndroidWindow {
     /// present an empty image (a black screen). One `force_render` frame
     /// repopulates it.
     force_render_once: Arc<std::sync::atomic::AtomicBool>,
+    /// Accumulated `surface.get_current_texture()` wait duration during the
+    /// current frame, in nanoseconds (deducted before reporting ADPF work time).
+    last_acquire_wait_ns: std::sync::atomic::AtomicU64,
+    /// Whether `WgpuRenderer::draw` actually presented a frame during the
+    /// current `request_frame` tick.
+    drew_frame: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: `WindowState` is protected by a `Mutex`.
@@ -359,7 +362,7 @@ impl AndroidWindow {
         scale_factor: f32,
         transparent: bool,
     ) -> Result<Arc<Self>> {
-        request_high_frame_rate(&native_window);
+        set_native_window_frame_rate(&native_window, crate::frame_timing::LTPO_ACTIVE_HZ);
 
         let width = native_window.width();
         let height = native_window.height();
@@ -414,6 +417,8 @@ impl AndroidWindow {
             id,
             active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             force_render_once: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_acquire_wait_ns: std::sync::atomic::AtomicU64::new(0),
+            drew_frame: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -448,6 +453,8 @@ impl AndroidWindow {
             id: ((width as u64) << 32) | (height as u64),
             active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             force_render_once: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_acquire_wait_ns: std::sync::atomic::AtomicU64::new(0),
+            drew_frame: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -456,7 +463,7 @@ impl AndroidWindow {
     /// Called when `APP_CMD_INIT_WINDOW` fires and a new `NativeWindow` is
     /// available (e.g. after returning from the background).
     pub fn init_window(&self, native_window: NativeWindow, gpu_context: GpuContext) -> Result<()> {
-        request_high_frame_rate(&native_window);
+        set_native_window_frame_rate(&native_window, crate::frame_timing::LTPO_ACTIVE_HZ);
 
         let width = native_window.width();
         let height = native_window.height();
@@ -504,7 +511,7 @@ impl AndroidWindow {
             let config = WgpuSurfaceConfig {
                 size: gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
                 transparent,
-                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+                preferred_present_mode: Some(wgpu::PresentMode::Fifo),
             };
             let instance = state
                 .gpu_context
@@ -771,11 +778,53 @@ impl AndroidWindow {
             }
         };
 
-        renderer.draw(scene);
+        let drew = renderer.draw(scene);
+        let wait_ns = renderer
+            .take_last_acquire_wait()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        if wait_ns > 0 {
+            self.last_acquire_wait_ns
+                .fetch_add(wait_ns, std::sync::atomic::Ordering::Relaxed);
+        }
+        if drew {
+            self.drew_frame
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
 
         // Put the renderer back.
         let mut state = self.state.lock();
         state.renderer = Some(renderer);
+    }
+
+    /// Clears per-frame ADPF timing accumulators before ticking a frame.
+    pub(crate) fn reset_frame_metrics(&self) {
+        self.last_acquire_wait_ns
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.drew_frame
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns `(drew_frame, acquire_wait_ns)` recorded during the frame tick
+    /// and resets both accumulators.
+    pub(crate) fn take_frame_metrics(&self) -> (bool, i64) {
+        let drew = self
+            .drew_frame
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        let wait_ns = self
+            .last_acquire_wait_ns
+            .swap(0, std::sync::atomic::Ordering::AcqRel)
+            .min(i64::MAX as u64) as i64;
+        (drew, wait_ns)
+    }
+
+    /// Updates the native window's dynamic LTPO refresh-rate vote (`120.0`
+    /// when active, `0.0` when idle).
+    pub(crate) fn set_frame_rate_vote(&self, hz: f32) {
+        let state = self.state.lock();
+        if let Some(native_window) = state.native_window.as_ref() {
+            set_native_window_frame_rate(native_window, hz);
+        }
     }
 
     /// Invoke the `request_frame_callback` if one is registered.
@@ -1206,7 +1255,7 @@ impl AndroidWindow {
         let config = WgpuSurfaceConfig {
             size: gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
             transparent,
-            preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+            preferred_present_mode: Some(wgpu::PresentMode::Fifo),
         };
 
         WgpuRenderer::new(gpu_context, &raw, config, None)

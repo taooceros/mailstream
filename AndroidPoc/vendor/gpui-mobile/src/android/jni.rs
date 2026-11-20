@@ -654,40 +654,10 @@ pub fn query_cache_dir_via_jni() -> Option<std::path::PathBuf> {
     .flatten()
 }
 
-thread_local! {
-    static TOUCH_RESAMPLER: std::cell::RefCell<crate::touch_resampler::TouchResampler> =
-        std::cell::RefCell::new(crate::touch_resampler::TouchResampler::new());
-}
-
-fn flush_resampled_touches(win: &super::window::AndroidWindow) {
-    let vsync_ns = super::frame_source::last_vsync_ns();
-    let target_ns = if vsync_ns > 0 {
-        vsync_ns
-    } else {
-        super::frame_source::monotonic_nanos_now()
-    };
-    let refresh_ns = super::frame_source::refresh_interval_ns();
-    let mut moves = Vec::new();
-    TOUCH_RESAMPLER.with(|slot| {
-        slot.borrow_mut()
-            .flush_for_vsync(target_ns, refresh_ns, |m| moves.push(m));
-    });
-    for m in moves {
-        win.handle_touch(crate::android::TouchPoint {
-            id: m.id,
-            x: m.raw_x,
-            y: m.raw_y,
-            action: AMOTION_EVENT_ACTION_MOVE,
-            predicted: m.predicted,
-            timestamp: Some(super::frame_source::monotonic_nanos_to_instant(m.raw_time_ns)),
-        });
-    }
-}
-
 // ── input event processing ────────────────────────────────────────────────────
 
 /// Process input events from the `AndroidApp` and dispatch them to the window.
-fn process_input_events(app: &AndroidApp) {
+fn process_input_events(app: &AndroidApp, driver: &mut super::loop_driver::LoopDriver) {
     let platform = match PLATFORM.get() {
         Some(p) => p,
         None => {
@@ -763,14 +733,11 @@ fn process_input_events(app: &AndroidApp) {
                             }
 
                             let event_time_ns = motion_event.event_time();
-                            let event_instant =
-                                super::frame_source::monotonic_nanos_to_instant(event_time_ns);
 
                             if matches!(action, MotionAction::Down) {
                                 // `ACTION_DOWN` always starts a new gesture with no other active pointers.
-                                TOUCH_RESAMPLER.with(|slot| slot.borrow_mut().clear());
+                                driver.on_touch_stream_reset();
                             }
-
                             for i in 0..pointer_count {
                                 let pointer = motion_event.pointer_at_index(i);
 
@@ -799,88 +766,51 @@ fn process_input_events(app: &AndroidApp) {
                                 let pointer_id = pointer.pointer_id();
                                 match touch_action {
                                     AMOTION_EVENT_ACTION_DOWN => {
-                                        TOUCH_RESAMPLER.with(|slot| {
-                                            slot.borrow_mut().on_down(
-                                                pointer_id,
-                                                event_time_ns,
-                                                pointer.x(),
-                                                pointer.y(),
-                                            );
-                                        });
-                                        win.handle_touch(crate::android::TouchPoint {
-                                            id: pointer_id,
-                                            x: pointer.x(),
-                                            y: pointer.y(),
-                                            action: AMOTION_EVENT_ACTION_DOWN,
-                                            predicted: None,
-                                            timestamp: Some(event_instant),
-                                        });
+                                        driver.on_touch_down(
+                                            &win,
+                                            pointer_id,
+                                            event_time_ns,
+                                            pointer.x(),
+                                            pointer.y(),
+                                        );
                                     }
                                     AMOTION_EVENT_ACTION_MOVE => {
                                         let mut any_sample = false;
-                                        TOUCH_RESAMPLER.with(|slot| {
-                                            let mut resampler = slot.borrow_mut();
-                                            for hist in pointer.history() {
-                                                any_sample |= resampler.on_move(
-                                                    pointer_id,
-                                                    hist.event_time(),
-                                                    hist.x(),
-                                                    hist.y(),
-                                                );
-                                            }
-                                            any_sample |= resampler.on_move(
+                                        for hist in pointer.history() {
+                                            any_sample |= driver.on_touch_move_sample(
                                                 pointer_id,
-                                                event_time_ns,
-                                                pointer.x(),
-                                                pointer.y(),
+                                                hist.event_time(),
+                                                hist.x(),
+                                                hist.y(),
                                             );
-                                        });
+                                        }
+                                        any_sample |= driver.on_touch_move_sample(
+                                            pointer_id,
+                                            event_time_ns,
+                                            pointer.x(),
+                                            pointer.y(),
+                                        );
                                         if any_sample {
-                                            super::frame_source::schedule_frame();
+                                            driver.on_touch_move_accepted(&win);
                                         }
                                     }
                                     AMOTION_EVENT_ACTION_UP => {
-                                        let mut pending = Vec::new();
-                                        TOUCH_RESAMPLER.with(|slot| {
-                                            slot.borrow_mut().on_up_or_cancel(pointer_id, |m| {
-                                                pending.push(m);
-                                            });
-                                        });
-                                        for m in pending {
-                                            win.handle_touch(crate::android::TouchPoint {
-                                                id: m.id,
-                                                x: m.raw_x,
-                                                y: m.raw_y,
-                                                action: AMOTION_EVENT_ACTION_MOVE,
-                                                predicted: None,
-                                                timestamp: Some(
-                                                    super::frame_source::monotonic_nanos_to_instant(
-                                                        m.raw_time_ns,
-                                                    ),
-                                                ),
-                                            });
-                                        }
-                                        win.handle_touch(crate::android::TouchPoint {
-                                            id: pointer_id,
-                                            x: pointer.x(),
-                                            y: pointer.y(),
-                                            action: AMOTION_EVENT_ACTION_UP,
-                                            predicted: None,
-                                            timestamp: Some(event_instant),
-                                        });
+                                        driver.on_touch_up(
+                                            &win,
+                                            pointer_id,
+                                            event_time_ns,
+                                            pointer.x(),
+                                            pointer.y(),
+                                        );
                                     }
                                     AMOTION_EVENT_ACTION_CANCEL => {
-                                        TOUCH_RESAMPLER.with(|slot| {
-                                            slot.borrow_mut().on_cancel(pointer_id);
-                                        });
-                                        win.handle_touch(crate::android::TouchPoint {
-                                            id: pointer_id,
-                                            x: pointer.x(),
-                                            y: pointer.y(),
-                                            action: AMOTION_EVENT_ACTION_CANCEL,
-                                            predicted: None,
-                                            timestamp: Some(event_instant),
-                                        });
+                                        driver.on_touch_cancel(
+                                            &win,
+                                            pointer_id,
+                                            event_time_ns,
+                                            pointer.x(),
+                                            pointer.y(),
+                                        );
                                     }
                                     _ => {}
                                 }
@@ -963,6 +893,7 @@ pub fn run_event_loop(app: &AndroidApp) {
     INIT_WINDOW_DONE.store(false, Ordering::Relaxed);
     // Vsync pacing lives on this thread's looper.
     super::frame_source::install();
+    let mut driver = super::loop_driver::LoopDriver::new();
     let mut iteration: u64 = 0;
     let mut app_is_active = false;
 
@@ -986,7 +917,9 @@ pub fn run_event_loop(app: &AndroidApp) {
         // `frame_source` posted for a wanted frame. The timeout only covers
         // the delayed dispatcher tasks `platform.tick()` has to release and
         // the clock fallback without a choreographer.
-        let timeout = super::frame_source::poll_timeout(
+        let active_window = PLATFORM.get().and_then(|platform| platform.primary_window());
+        let timeout = driver.poll_timeout(
+            active_window.as_deref(),
             PLATFORM
                 .get()
                 .and_then(|platform| platform.next_delayed_due()),
@@ -1022,6 +955,7 @@ pub fn run_event_loop(app: &AndroidApp) {
             log::info!("deferred: TerminateWindow (iter={})", iteration);
             INIT_WINDOW_DONE.store(false, Ordering::Relaxed);
             *LAST_CHROME_STYLE.lock().unwrap() = None;
+            driver.on_surface_destroyed();
             if let Some(platform) = PLATFORM.get() {
                 if let Some(win) = platform.primary_window() {
                     win.term_window();
@@ -1051,6 +985,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                         let gpu_ctx = platform.gpu_context();
                         match existing.init_window(native_window, gpu_ctx) {
                             Ok(()) => {
+                                driver.on_surface_attached();
                                 log::info!("InitWindow: reinitialised existing window");
                             }
                             Err(e) => {
@@ -1072,6 +1007,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                     } else {
                         match platform.open_window(native_window, scale_factor, false) {
                             Ok(win) => {
+                                driver.on_surface_attached();
                                 log::info!(
                                     "window opened — id={:#x} scale={:.3}",
                                     win.id(),
@@ -1138,26 +1074,28 @@ pub fn run_event_loop(app: &AndroidApp) {
         // 5. Pause / background
         if PAUSE_PENDING.swap(false, Ordering::Relaxed) {
             log::info!("deferred: Pause (iter={})", iteration);
+            let win = PLATFORM.get().and_then(|platform| platform.primary_window());
+            driver.on_paused(win.as_deref());
             if let Some(platform) = PLATFORM.get() {
                 platform.did_enter_background();
-                if let Some(win) = platform.primary_window() {
+                if let Some(win) = win {
                     win.set_active(false);
                 }
             }
-            // Pause platform views
             pause_platform_views();
         }
 
         // 6. Resume / foreground
         if RESUME_PENDING.swap(false, Ordering::Relaxed) {
             log::info!("deferred: Resume (iter={})", iteration);
+            let win = PLATFORM.get().and_then(|platform| platform.primary_window());
             if let Some(platform) = PLATFORM.get() {
                 platform.did_become_active();
-                if let Some(win) = platform.primary_window() {
+                if let Some(win) = &win {
                     win.set_active(true);
                 }
             }
-            // Resume platform views
+            driver.on_resumed(win.as_deref());
             resume_platform_views();
         }
 
@@ -1198,7 +1136,7 @@ pub fn run_event_loop(app: &AndroidApp) {
         }
 
         // Process input events.
-        process_input_events(app);
+        process_input_events(app, &mut driver);
 
         // Deferred initialisation callbacks (runs once).
         if !INIT_WINDOW_DONE.load(Ordering::Relaxed) {
@@ -1222,7 +1160,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                     // Render first frame immediately.
                     platform.flush_main_thread_tasks();
                     if let Some(win) = platform.primary_window() {
-                        win.request_frame();
+                        driver.render_immediate_frame(&win);
                     }
                 }
             }
@@ -1237,28 +1175,18 @@ pub fn run_event_loop(app: &AndroidApp) {
                 if crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
                     super::frame_source::schedule_frame();
                 }
-                if super::frame_source::take_frame() {
-                    // Pull any last-moment touch samples right up to hardware vsync,
-                    // then flush resampled moves once per vsync before drawing.
-                    process_input_events(app);
-                    if let Some(win) = platform.primary_window() {
-                        flush_resampled_touches(&win);
-                        win.request_frame();
-                    }
-
-                    // Drain lifecycle events that arrived during rendering
-                    // (e.g. rotation triggers TerminateWindow while we were
-                    // in get_current_texture / present).
-                    drain_events(app);
-                    process_input_events(app);
-                    let now_ns = super::frame_source::monotonic_nanos_now();
-                    let refresh_ns = super::frame_source::refresh_interval_ns();
-                    let keep_pacing = TOUCH_RESAMPLER.with(|slot| {
-                        slot.borrow().needs_next_vsync(now_ns, refresh_ns)
-                    });
-                    if keep_pacing {
-                        super::frame_source::schedule_frame();
-                    }
+                if let Some(win) = platform.primary_window() {
+                    driver.render_due_frame(
+                        &win,
+                        |driver| process_input_events(app, driver),
+                        |driver| {
+                            // Drain lifecycle events that arrived during rendering
+                            // (e.g. rotation triggers TerminateWindow while we were
+                            // in get_current_texture / present).
+                            drain_events(app);
+                            process_input_events(app, driver);
+                        },
+                    );
                 }
             }
         }
@@ -1451,7 +1379,8 @@ pub fn poll_events(timeout_ms: i32) -> bool {
         _ => {}
     });
 
-    process_input_events(app);
+    let mut compat_driver = super::loop_driver::LoopDriver::without_adpf();
+    process_input_events(app, &mut compat_driver);
 
     // Drive the GPUI rendering pipeline (same as run_event_loop).
     if let Some(platform) = PLATFORM.get() {

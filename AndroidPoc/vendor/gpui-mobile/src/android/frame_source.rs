@@ -40,15 +40,19 @@
 
 use std::{
     cell::RefCell,
+    ffi::c_void,
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, Ordering},
-        mpsc, OnceLock,
+        atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU64, Ordering},
+        mpsc, LazyLock, OnceLock,
     },
     time::{Duration, Instant},
 };
 
-use crate::frame_pacer::FramePacer;
+use crate::{
+    frame_pacer::FramePacer,
+    frame_timing::{MonotonicClockAnchor, VsyncTimeline},
+};
 
 /// Longest the loop blocks with nothing due; a missed wakeup costs at most
 /// this much latency instead of a frozen app.
@@ -60,8 +64,113 @@ const DEFAULT_REFRESH_INTERVAL_NS: u64 = 16_666_667;
 /// Active display refresh interval in nanoseconds (updated from `Display.getRefreshRate()`).
 static REFRESH_INTERVAL_NS: AtomicU64 = AtomicU64::new(DEFAULT_REFRESH_INTERVAL_NS);
 
-/// Most recent hardware `AChoreographer` vsync timestamp in `CLOCK_MONOTONIC` ns.
-static LAST_VSYNC_NS: AtomicI64 = AtomicI64::new(0);
+#[repr(C)]
+struct AChoreographerFrameCallbackData {
+    _private: [u8; 0],
+}
+
+type ChoreographerVsyncCallback =
+    unsafe extern "C" fn(*const AChoreographerFrameCallbackData, *mut c_void);
+type ChoreographerFrameCallback64 = unsafe extern "C" fn(i64, *mut c_void);
+
+type PostVsyncCallbackFn =
+    unsafe extern "C" fn(*mut ndk_sys::AChoreographer, ChoreographerVsyncCallback, *mut c_void);
+type GetFrameTimeNanosFn = unsafe extern "C" fn(*const AChoreographerFrameCallbackData) -> i64;
+type GetFrameTimelinesLengthFn =
+    unsafe extern "C" fn(*const AChoreographerFrameCallbackData) -> usize;
+type GetPreferredFrameTimelineIndexFn =
+    unsafe extern "C" fn(*const AChoreographerFrameCallbackData) -> usize;
+type GetExpectedPresentationTimeNanosFn =
+    unsafe extern "C" fn(*const AChoreographerFrameCallbackData, usize) -> i64;
+type GetDeadlineNanosFn =
+    unsafe extern "C" fn(*const AChoreographerFrameCallbackData, usize) -> i64;
+type PostFrameCallback64Fn =
+    unsafe extern "C" fn(*mut ndk_sys::AChoreographer, ChoreographerFrameCallback64, *mut c_void);
+
+struct ChoreographerVsyncApi {
+    post_vsync_callback: PostVsyncCallbackFn,
+    get_frame_time_nanos: GetFrameTimeNanosFn,
+    get_frame_timelines_length: GetFrameTimelinesLengthFn,
+    get_preferred_frame_timeline_index: GetPreferredFrameTimelineIndexFn,
+    get_expected_presentation_time_nanos: GetExpectedPresentationTimeNanosFn,
+    get_deadline_nanos: GetDeadlineNanosFn,
+}
+
+fn load_libandroid_symbol(name: &[u8]) -> *mut c_void {
+    debug_assert_eq!(name.last().copied(), Some(0));
+    unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr().cast()) }
+}
+
+static VSYNC_API: LazyLock<Option<ChoreographerVsyncApi>> = LazyLock::new(|| {
+    let api_level = unsafe { ndk_sys::android_get_device_api_level() };
+    if api_level < 33 {
+        return None;
+    }
+    let post_vsync = load_libandroid_symbol(b"AChoreographer_postVsyncCallback\0");
+    let get_frame_time =
+        load_libandroid_symbol(b"AChoreographerFrameCallbackData_getFrameTimeNanos\0");
+    let get_len =
+        load_libandroid_symbol(b"AChoreographerFrameCallbackData_getFrameTimelinesLength\0");
+    let get_preferred =
+        load_libandroid_symbol(b"AChoreographerFrameCallbackData_getPreferredFrameTimelineIndex\0");
+    let get_expected_present = load_libandroid_symbol(
+        b"AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos\0",
+    );
+    let get_deadline =
+        load_libandroid_symbol(b"AChoreographerFrameCallbackData_getFrameTimelineDeadlineNanos\0");
+
+    if post_vsync.is_null()
+        || get_frame_time.is_null()
+        || get_len.is_null()
+        || get_preferred.is_null()
+        || get_expected_present.is_null()
+        || get_deadline.is_null()
+    {
+        return None;
+    }
+
+    // SAFETY: symbol names and signatures match Android NDK `choreographer.h` (API 33+).
+    Some(unsafe {
+        ChoreographerVsyncApi {
+            post_vsync_callback: std::mem::transmute::<*mut c_void, PostVsyncCallbackFn>(
+                post_vsync,
+            ),
+            get_frame_time_nanos: std::mem::transmute::<*mut c_void, GetFrameTimeNanosFn>(
+                get_frame_time,
+            ),
+            get_frame_timelines_length: std::mem::transmute::<
+                *mut c_void,
+                GetFrameTimelinesLengthFn,
+            >(get_len),
+            get_preferred_frame_timeline_index: std::mem::transmute::<
+                *mut c_void,
+                GetPreferredFrameTimelineIndexFn,
+            >(get_preferred),
+            get_expected_presentation_time_nanos: std::mem::transmute::<
+                *mut c_void,
+                GetExpectedPresentationTimeNanosFn,
+            >(get_expected_present),
+            get_deadline_nanos: std::mem::transmute::<*mut c_void, GetDeadlineNanosFn>(
+                get_deadline,
+            ),
+        }
+    })
+});
+
+static POST_FRAME_CALLBACK_64: LazyLock<Option<PostFrameCallback64Fn>> = LazyLock::new(|| {
+    let api_level = unsafe { ndk_sys::android_get_device_api_level() };
+    if api_level < 29 {
+        return None;
+    }
+    let symbol = load_libandroid_symbol(b"AChoreographer_postFrameCallback64\0");
+    if symbol.is_null() {
+        None
+    } else {
+        // SAFETY: symbol signature matches Android NDK `choreographer.h` (API 29+).
+        Some(unsafe { std::mem::transmute::<*mut c_void, PostFrameCallback64Fn>(symbol) })
+    }
+});
+
 thread_local! {
     /// The loop thread's pacer, installed by [`install`].
     static PACER: RefCell<Option<FramePacer>> = const { RefCell::new(None) };
@@ -72,6 +181,9 @@ static MAIN_LOOPER: AtomicPtr<ndk_sys::ALooper> = AtomicPtr::new(ptr::null_mut()
 
 /// The vsync thread's `ALooper`; null while it has no choreographer.
 static VSYNC_LOOPER: AtomicPtr<ndk_sys::ALooper> = AtomicPtr::new(ptr::null_mut());
+
+/// Linux/Android TID of the dedicated `gpui-vsync` thread (for ADPF binding).
+static VSYNC_THREAD_TID: AtomicI32 = AtomicI32::new(0);
 
 /// The vsync thread, spawned once per process; `true` if it found a
 /// choreographer.
@@ -87,10 +199,18 @@ static FRAME_DUE: AtomicBool = AtomicBool::new(false);
 /// into [`schedule_frame`] on its next iteration.
 static OFF_THREAD_DEMAND: AtomicBool = AtomicBool::new(false);
 
-/// Hardware vsync instant captured when `AChoreographer` last fired, passed
-/// through `RequestFrameOptions::signal_at` for jitter-free animation clocks.
-static LAST_VSYNC_AT: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
+/// Latest hardware vsync timeline and pending presentation-aligned `signal_at`
+/// passed through `RequestFrameOptions::signal_at` for `FrameClock` and
+/// `tick_momentum_at`.
+struct VsyncState {
+    latest: Option<VsyncTimeline>,
+    pending_signal_at: Option<Instant>,
+}
 
+static VSYNC_STATE: parking_lot::Mutex<VsyncState> = parking_lot::Mutex::new(VsyncState {
+    latest: None,
+    pending_signal_at: None,
+});
 /// Installs the pacer on the calling thread, which must own an `ALooper`
 /// (`android-activity`'s native thread, or the host render thread after
 /// `ALooper_prepare`). Idempotent; spawns the vsync thread on first use.
@@ -153,7 +273,16 @@ fn vsync_thread(ready: mpsc::Sender<bool>) {
         let _ = ready.send(false);
         return;
     }
+    VSYNC_THREAD_TID.store(unsafe { libc::gettid() as i32 }, Ordering::Release);
     VSYNC_LOOPER.store(looper, Ordering::Release);
+    let api_tier = if VSYNC_API.is_some() {
+        "API 33+ AChoreographer_postVsyncCallback"
+    } else if POST_FRAME_CALLBACK_64.is_some() {
+        "API 29-32 AChoreographer_postFrameCallback64"
+    } else {
+        "API 26-28 AChoreographer_postFrameCallback"
+    };
+    log::info!("frame_source: vsync thread ready ({api_tier})");
     let _ = ready.send(true);
 
     loop {
@@ -161,14 +290,19 @@ fn vsync_thread(ready: mpsc::Sender<bool>) {
             // SAFETY: the choreographer belongs to this thread and lives as
             // long as it; the callback takes no data pointer.
             unsafe {
-                ndk_sys::AChoreographer_postFrameCallback(
-                    choreographer,
-                    Some(on_vsync),
-                    ptr::null_mut(),
-                )
-            };
+                if let Some(api) = VSYNC_API.as_ref() {
+                    (api.post_vsync_callback)(choreographer, on_vsync_callback, ptr::null_mut());
+                } else if let Some(post64) = *POST_FRAME_CALLBACK_64 {
+                    post64(choreographer, on_vsync_64, ptr::null_mut());
+                } else {
+                    ndk_sys::AChoreographer_postFrameCallback(
+                        choreographer,
+                        Some(on_vsync_legacy),
+                        ptr::null_mut(),
+                    );
+                }
+            }
         }
-        // Returns on the frame callback (delivered through this looper) and on
         // a wake from `POST_REQUESTED`.
         // SAFETY: called only from the thread that owns this looper.
         unsafe { ndk_sys::ALooper_pollOnce(-1, ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
@@ -189,65 +323,18 @@ pub(crate) fn monotonic_nanos_now() -> i64 {
 }
 
 /// Cached `(Instant, CLOCK_MONOTONIC ns)` anchor so consecutive hardware touch
-/// and `AChoreographer` timestamps map onto the exact same epoch with zero
-/// per-sample syscall jitter.
-static CLOCK_ANCHOR: parking_lot::Mutex<Option<(Instant, i64)>> = parking_lot::Mutex::new(None);
+/// and `AChoreographer` timestamps (including future `expectedPresentationTimeNanos`)
+/// map onto the exact same epoch with zero per-sample syscall jitter.
+static CLOCK_ANCHOR: parking_lot::Mutex<MonotonicClockAnchor> =
+    parking_lot::Mutex::new(MonotonicClockAnchor::new());
 
 /// Converts a `CLOCK_MONOTONIC` nanosecond timestamp (`AChoreographer` vsync or
 /// `AMotionEvent` event time) to `std::time::Instant`.
 pub(crate) fn monotonic_nanos_to_instant(nanos: i64) -> Instant {
-    if nanos <= 0 {
-        return Instant::now();
-    }
-    let (anchor_instant, anchor_ns) = {
-        let mut guard = CLOCK_ANCHOR.lock();
-        match *guard {
-            Some(anchor) => anchor,
-            None => {
-                let now = Instant::now();
-                let now_ns = monotonic_nanos_now();
-                if now_ns <= 0 {
-                    return now;
-                }
-                *guard = Some((now, now_ns));
-                (now, now_ns)
-            }
-        }
-    };
-    let elapsed_ns = anchor_instant.elapsed().as_nanos() as i128;
-    let now_ns_est = (anchor_ns as i128) + elapsed_ns;
-    let age_ns = now_ns_est - (nanos as i128);
-    if !(-100_000_000..=500_000_000).contains(&age_ns) {
-        // Re-anchor once in case the process resumed after a long suspend or
-        // clock shift, then validate again.
-        let now = Instant::now();
-        let now_ns = monotonic_nanos_now();
-        if now_ns <= 0 {
-            return now;
-        }
-        *CLOCK_ANCHOR.lock() = Some((now, now_ns));
-        let delta_ns = (now_ns as i128) - (nanos as i128);
-        if (0..=500_000_000).contains(&delta_ns) {
-            return now
-                .checked_sub(Duration::from_nanos(delta_ns as u64))
-                .unwrap_or(now);
-        } else if (-100_000_000..0).contains(&delta_ns) {
-            return now
-                .checked_add(Duration::from_nanos((-delta_ns) as u64))
-                .unwrap_or(now);
-        }
-        return now;
-    }
-    let offset_ns = (nanos as i128) - (anchor_ns as i128);
-    if offset_ns >= 0 {
-        anchor_instant
-            .checked_add(Duration::from_nanos(offset_ns as u64))
-            .unwrap_or_else(Instant::now)
-    } else {
-        anchor_instant
-            .checked_sub(Duration::from_nanos((-offset_ns) as u64))
-            .unwrap_or_else(Instant::now)
-    }
+    let now = Instant::now();
+    CLOCK_ANCHOR
+        .lock()
+        .to_instant_with(nanos, now, || (Instant::now(), monotonic_nanos_now()))
 }
 
 /// Updates the active display refresh interval (from `Display.getRefreshRate()`).
@@ -266,29 +353,79 @@ pub(crate) fn refresh_interval_ns() -> i64 {
     REFRESH_INTERVAL_NS.load(Ordering::Relaxed) as i64
 }
 
-/// Most recent hardware `AChoreographer` vsync timestamp in `CLOCK_MONOTONIC` ns
-/// (or `0` before the first vsync callback).
-pub(crate) fn last_vsync_ns() -> i64 {
-    LAST_VSYNC_NS.load(Ordering::Acquire)
+/// TID of the `gpui-vsync` thread once started, for ADPF session binding.
+pub(crate) fn vsync_thread_tid() -> Option<i32> {
+    let tid = VSYNC_THREAD_TID.load(Ordering::Acquire);
+    (tid > 0).then_some(tid)
 }
 
-unsafe extern "C" fn on_vsync(
-    frame_time_nanos: std::os::raw::c_long,
-    _data: *mut std::ffi::c_void,
-) {
-    let ns = frame_time_nanos as i64;
-    LAST_VSYNC_NS.store(ns, Ordering::Release);
-    *LAST_VSYNC_AT.lock() = Some(monotonic_nanos_to_instant(ns));
+/// Most recent hardware `AChoreographer` [`VsyncTimeline`], if at least one
+/// vsync callback has fired.
+pub(crate) fn last_timeline() -> Option<VsyncTimeline> {
+    VSYNC_STATE.lock().latest
+}
+
+fn record_vsync_timeline(timeline: VsyncTimeline) {
+    // Feed `expected_present_ns` to `FrameClock` and `tick_momentum_at` so
+    // animations and post-fling momentum anchor to the actual display lighting
+    // moment without triggering a false clock re-anchor.
+    let signal_at = monotonic_nanos_to_instant(timeline.expected_present_ns);
+    {
+        let mut state = VSYNC_STATE.lock();
+        state.latest = Some(timeline);
+        state.pending_signal_at = Some(signal_at);
+    }
     FRAME_DUE.store(true, Ordering::Release);
     wake_looper(&MAIN_LOOPER);
 }
 
-/// Takes the most recent `AChoreographer` vsync instant, if one fired since
-/// the last frame request.
-pub(crate) fn take_signal_at() -> Option<Instant> {
-    LAST_VSYNC_AT.lock().take()
+unsafe extern "C" fn on_vsync_callback(
+    data: *const AChoreographerFrameCallbackData,
+    _user_data: *mut c_void,
+) {
+    let refresh_ns = refresh_interval_ns();
+    let timeline = if !data.is_null() {
+        if let Some(api) = VSYNC_API.as_ref() {
+            let frame_time_ns = unsafe { (api.get_frame_time_nanos)(data) };
+            let len = unsafe { (api.get_frame_timelines_length)(data) };
+            if len > 0 {
+                let preferred = unsafe { (api.get_preferred_frame_timeline_index)(data) };
+                let idx = if preferred < len { preferred } else { 0 };
+                let expected_present_ns =
+                    unsafe { (api.get_expected_presentation_time_nanos)(data, idx) };
+                let deadline_ns = unsafe { (api.get_deadline_nanos)(data, idx) };
+                VsyncTimeline::new(frame_time_ns, expected_present_ns, deadline_ns, refresh_ns)
+            } else {
+                VsyncTimeline::from_legacy_frame_time(frame_time_ns, refresh_ns)
+            }
+        } else {
+            VsyncTimeline::from_legacy_frame_time(monotonic_nanos_now(), refresh_ns)
+        }
+    } else {
+        VsyncTimeline::from_legacy_frame_time(monotonic_nanos_now(), refresh_ns)
+    };
+    record_vsync_timeline(timeline);
 }
 
+unsafe extern "C" fn on_vsync_64(frame_time_nanos: i64, _data: *mut c_void) {
+    let timeline = VsyncTimeline::from_legacy_frame_time(frame_time_nanos, refresh_interval_ns());
+    record_vsync_timeline(timeline);
+}
+
+unsafe extern "C" fn on_vsync_legacy(
+    frame_time_nanos: std::os::raw::c_long,
+    _data: *mut c_void,
+) {
+    let timeline =
+        VsyncTimeline::from_legacy_frame_time(frame_time_nanos as i64, refresh_interval_ns());
+    record_vsync_timeline(timeline);
+}
+
+/// Takes the most recent `AChoreographer` presentation-aligned instant, if one
+/// fired since the last frame request.
+pub(crate) fn take_signal_at() -> Option<Instant> {
+    VSYNC_STATE.lock().pending_signal_at.take()
+}
 fn wake_looper(looper: &AtomicPtr<ndk_sys::ALooper>) {
     let looper = looper.load(Ordering::Acquire);
     if !looper.is_null() {
@@ -335,6 +472,14 @@ pub(crate) fn take_frame() -> bool {
         schedule_frame();
     }
     with_pacer(|pacer| pacer.take_frame(Instant::now())).unwrap_or(false)
+}
+
+/// Whether a frame is currently posted, due, or requested from another thread.
+pub(crate) fn has_demand() -> bool {
+    if OFF_THREAD_DEMAND.load(Ordering::Acquire) || FRAME_DUE.load(Ordering::Acquire) {
+        return true;
+    }
+    with_pacer(|pacer| pacer.has_demand()).unwrap_or(false)
 }
 
 /// How long the loop may block on its looper: `Some(Duration::ZERO)` with a frame due, up to

@@ -267,6 +267,7 @@ pub struct WgpuRenderer {
     observed_error_generation: u64,
     last_surface_error: Option<String>,
     needs_redraw: bool,
+    last_acquire_wait: std::time::Duration,
 }
 
 impl WgpuRenderer {
@@ -494,12 +495,29 @@ impl WgpuRenderer {
                 .preferred_present_mode
                 .filter(|mode| surface_caps.present_modes.contains(mode))
                 .unwrap_or(wgpu::PresentMode::Fifo),
-            desired_maximum_frame_latency: if cfg!(target_os = "android") { 1 } else { 2 },
+            desired_maximum_frame_latency: Self::desired_maximum_frame_latency(),
             alpha_mode,
             view_formats: vec![],
         };
 
         Ok((surface_config, transparent_alpha_mode, opaque_alpha_mode))
+    }
+
+    fn desired_maximum_frame_latency() -> u32 {
+        #[cfg(target_os = "android")]
+        {
+            if let Ok(raw) = std::env::var("GPUI_ANDROID_FRAME_LATENCY")
+                && let Ok(parsed) = raw.trim().parse::<u32>()
+                && (1..=3).contains(&parsed)
+            {
+                return parsed;
+            }
+            1
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            2
+        }
     }
 
     pub(crate) fn new_internal(
@@ -539,6 +557,7 @@ impl WgpuRenderer {
             observed_error_generation: 0,
             last_surface_error: None,
             needs_redraw: false,
+            last_acquire_wait: std::time::Duration::ZERO,
         })
     }
 }
@@ -1174,6 +1193,13 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
+    /// Returns and clears the time spent blocked in `surface.get_current_texture()`
+    /// during the most recent `draw()` call (used by Android ADPF to exclude
+    /// swapchain back-pressure from reported CPU frame work).
+    pub fn take_last_acquire_wait(&mut self) -> std::time::Duration {
+        std::mem::take(&mut self.last_acquire_wait)
+    }
+
     pub fn draw(&mut self, scene: &Scene) -> bool {
         #[cfg(target_family = "wasm")]
         if self.device_lost() {
@@ -1219,51 +1245,77 @@ impl WgpuRenderer {
             self.failed_frame_count = 0;
         }
 
-        let frame = match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                // Textures must be destroyed before the surface can be reconfigured.
-                drop(frame);
-                surface.configure(&core.resources.device, &self.surface_config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(&core.resources.device, &self.surface_config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Validation => {
-                self.last_surface_error = Some("Surface texture validation error".to_string());
-                return false;
-            }
+        self.last_acquire_wait = std::time::Duration::ZERO;
+        let configured_size = Size {
+            width: DevicePixels(self.surface_config.width as i32),
+            height: DevicePixels(self.surface_config.height as i32),
         };
-
-        // The acquired texture is the authority on frame dimensions; the surface
-        // configuration is only a request.
-        let size = Size {
-            width: DevicePixels(frame.texture.width() as i32),
-            height: DevicePixels(frame.texture.height() as i32),
-        };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
-        if let Err(error) = core.render_frame(
+        let surface_config = &self.surface_config;
+        let last_surface_error = &mut self.last_surface_error;
+        let last_acquire_wait = &mut self.last_acquire_wait;
+
+        // Defer `surface.get_current_texture()` until after `atlas.before_frame()`,
+        // scene planning, instance uploads, and offscreen scroll-layer tile
+        // rasterization so CPU preparation overlaps with SurfaceFlinger buffer
+        // release under `PresentMode::Fifo`.
+        match core.render_surface_frame(
             scene,
-            &frame_view,
-            size,
+            configured_size,
             premultiplied_alpha,
             wgpu::Color::TRANSPARENT,
-        ) {
-            log::error!("{error:#}");
-            return false;
-        }
+            |core| {
+                let acquire_start = std::time::Instant::now();
+                let current = surface.get_current_texture();
+                *last_acquire_wait = acquire_start.elapsed();
 
-        core.resources.queue.present(frame);
-        true
+                let frame = match current {
+                    wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+                    wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                        // Textures must be destroyed before the surface can be reconfigured.
+                        drop(frame);
+                        surface.configure(&core.resources.device, surface_config);
+                        return Ok(None);
+                    }
+                    wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                        surface.configure(&core.resources.device, surface_config);
+                        return Ok(None);
+                    }
+                    wgpu::CurrentSurfaceTexture::Timeout
+                    | wgpu::CurrentSurfaceTexture::Occluded => {
+                        return Ok(None);
+                    }
+                    wgpu::CurrentSurfaceTexture::Validation => {
+                        *last_surface_error =
+                            Some("Surface texture validation error".to_string());
+                        return Ok(None);
+                    }
+                };
+
+                // The acquired texture is the authority on frame dimensions; the surface
+                // configuration is only a request.
+                let size = Size {
+                    width: DevicePixels(frame.texture.width() as i32),
+                    height: DevicePixels(frame.texture.height() as i32),
+                };
+                core.prepare_target_for_size(size, premultiplied_alpha)?;
+                let frame_view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                Ok(Some((frame, frame_view)))
+            },
+        ) {
+            Ok(Some((_submission, frame))) => {
+                core.resources.queue.present(frame);
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                log::error!("{error:#}");
+                false
+            }
+        }
     }
 }
 
@@ -1483,28 +1535,7 @@ impl WgpuRendererCore {
         resources.path_msaa_view = path_msaa_view;
     }
 
-    pub(crate) fn render_frame(
-        &mut self,
-        scene: &Scene,
-        target_view: &wgpu::TextureView,
-        size: Size<DevicePixels>,
-        premultiplied_alpha: bool,
-        clear_color: wgpu::Color,
-    ) -> Result<wgpu::SubmissionIndex> {
-        anyhow::ensure!(
-            size.width.0 > 0 && size.height.0 > 0,
-            "invalid render target size: {size:?}"
-        );
-        anyhow::ensure!(
-            size.width.0 as u32 <= self.max_texture_size
-                && size.height.0 as u32 <= self.max_texture_size,
-            "render target size {size:?} exceeds maximum texture dimension {}",
-            self.max_texture_size
-        );
-
-        self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
-
+    fn write_frame_globals(&mut self, size: Size<DevicePixels>, premultiplied_alpha: bool) {
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
@@ -1522,6 +1553,57 @@ impl WgpuRendererCore {
             ..globals
         };
         crate::fast::globals::write_globals(self, &globals, &path_globals, &gamma_params);
+    }
+
+    fn prepare_target_for_size(
+        &mut self,
+        size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            size.width.0 > 0 && size.height.0 > 0,
+            "invalid render target size: {size:?}"
+        );
+        anyhow::ensure!(
+            size.width.0 as u32 <= self.max_texture_size
+                && size.height.0 as u32 <= self.max_texture_size,
+            "render target size {size:?} exceeds maximum texture dimension {}",
+            self.max_texture_size
+        );
+        self.ensure_intermediate_textures(size);
+        self.write_frame_globals(size, premultiplied_alpha);
+        Ok(())
+    }
+
+    pub(crate) fn render_surface_frame<T>(
+        &mut self,
+        scene: &Scene,
+        configured_size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+        clear_color: wgpu::Color,
+        acquire_target: impl FnOnce(&mut Self) -> Result<Option<(T, wgpu::TextureView)>>,
+    ) -> Result<Option<(wgpu::SubmissionIndex, T)>> {
+        self.atlas.before_frame();
+        if configured_size.width.0 > 0 && configured_size.height.0 > 0 {
+            self.write_frame_globals(configured_size, premultiplied_alpha);
+        }
+        crate::fast::frame::record_with_deferred_acquire(self, scene, clear_color, acquire_target)
+            .inspect_err(|_| {
+                // Queue writes are staged before encoding; flush them even if the frame fails.
+                self.resources.queue.submit(std::iter::empty());
+            })
+    }
+
+    pub(crate) fn render_frame(
+        &mut self,
+        scene: &Scene,
+        target_view: &wgpu::TextureView,
+        size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<wgpu::SubmissionIndex> {
+        self.atlas.before_frame();
+        self.prepare_target_for_size(size, premultiplied_alpha)?;
 
         self.record_frame(scene, target_view, clear_color)
             .inspect_err(|_| {

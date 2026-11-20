@@ -273,6 +273,180 @@ pub(crate) fn record_into(
     result
 }
 
+/// Prepares CPU scene planning, uploads instance data, and submits any
+/// offscreen scroll-layer tile rasterizations **before** invoking
+/// `acquire_target` to acquire the swapchain texture view.
+pub(crate) fn record_with_deferred_acquire<H, T>(
+    host: &mut H,
+    scene: &Scene,
+    clear: wgpu::Color,
+    acquire_target: impl FnOnce(&mut H) -> Result<Option<(T, wgpu::TextureView)>>,
+) -> Result<Option<(wgpu::SubmissionIndex, T)>>
+where
+    H: FrameHost,
+{
+    let mut state = std::mem::take(host.frame_state());
+    std::mem::swap(&mut state.globals, &mut host.frame_state().globals);
+    let result = record_deferred_with(host, &mut state, scene, clear, acquire_target);
+    std::mem::swap(&mut state.globals, &mut host.frame_state().globals);
+    *host.frame_state() = state;
+    result
+}
+
+fn record_deferred_with<H, T>(
+    host: &mut H,
+    state: &mut FrameState,
+    scene: &Scene,
+    clear: wgpu::Color,
+    acquire_target: impl FnOnce(&mut H) -> Result<Option<(T, wgpu::TextureView)>>,
+) -> Result<Option<(wgpu::SubmissionIndex, T)>>
+where
+    H: FrameHost,
+{
+    state.bind_groups.begin_frame();
+
+    // The layer tiles to rasterize before the frame draws them.
+    let planned = state
+        .layers
+        .begin_frame(&scene.layers, composite::composited_tiles(scene));
+    let rasters = raster::plan(&scene.layers, &planned);
+
+    let mut vertices = std::mem::take(&mut state.vertices);
+    let mut sprites = std::mem::take(&mut state.sprites);
+    let mut scenes = Vec::with_capacity(rasters.len() + 1);
+    let mut raster_indices = Vec::with_capacity(rasters.len());
+    for raster in &rasters {
+        raster_indices.push(plan_scene(
+            &raster.scene,
+            &mut scenes,
+            &mut vertices,
+            &mut sprites,
+            Vec::new(),
+        ));
+    }
+    let path_batches = std::mem::take(&mut state.path_batches);
+    plan_scene(
+        scene,
+        &mut scenes,
+        &mut vertices,
+        &mut sprites,
+        path_batches,
+    );
+
+    let mut tiles_submitted = false;
+    let result = upload(host, &state.bind_groups, &scenes, &vertices, &sprites)
+        .with_context(|| {
+            format!(
+                "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} monochrome sprites, {} subpixel sprites, {} polychrome sprites, {} layer tiles to rasterize",
+                scene.paths.len(),
+                scene.shadows.len(),
+                scene.quads.len(),
+                scene.underlines.len(),
+                scene.monochrome_sprites.len(),
+                scene.subpixel_sprites.len(),
+                scene.polychrome_sprites.len(),
+                rasters.len(),
+            )
+        })
+        .and_then(|(uploads, paths)| {
+            // Prepare and submit offscreen scroll-layer tiles before acquiring
+            // the swapchain texture so GPU tile rasterization overlaps with
+            // `surface.get_current_texture()`.
+            {
+                let target = host.target()?;
+                state.layers.prepare(&target, &scene.layers, &planned);
+                if !rasters.is_empty() {
+                    let graph = DrawGraph {
+                        scenes: &scenes,
+                        uploads: &uploads,
+                    };
+                    let mut tile_encoder =
+                        target
+                            .device
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("layer_tile_encoder"),
+                            });
+                    for (index, tile) in rasters.iter().enumerate() {
+                        let scene_index = raster_indices[index];
+                        raster::rasterize(
+                            &target,
+                            state,
+                            &mut tile_encoder,
+                            &scene.layers,
+                            tile,
+                            &uploads[scene_index],
+                            &paths,
+                            &scenes[scene_index].path_batches,
+                            &graph,
+                        );
+                    }
+                    target.queue.submit(std::iter::once(tile_encoder.finish()));
+                    tiles_submitted = true;
+                }
+            }
+
+            let Some((frame, frame_view)) = acquire_target(host)? else {
+                if !tiles_submitted {
+                    // Flush staged atlas/instance uploads even when the surface
+                    // skipped presentation (Suboptimal/Lost/Timeout/Occluded).
+                    host.target()?.queue.submit(std::iter::empty());
+                }
+                return Ok(None);
+            };
+
+            let target = host.target()?;
+            let graph = DrawGraph {
+                scenes: &scenes,
+                uploads: &uploads,
+            };
+            let mut encoder = target
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("main_encoder"),
+                });
+            let main = scenes.len() - 1;
+            draw_scene(
+                &target,
+                state,
+                &mut encoder,
+                &SceneDraw {
+                    scene,
+                    upload: &uploads[main],
+                    paths: &paths,
+                    path_batches: &scenes[main].path_batches,
+                    view: &frame_view,
+                    clear: Some(clear),
+                    label: "main_pass",
+                    globals: target.globals_bind_group,
+                    path_targets: PathTargets {
+                        globals: target.path_globals_bind_group,
+                        intermediate: target.path_intermediate_view,
+                        msaa: target.path_msaa_view,
+                    },
+                    graph: &graph,
+                },
+            );
+            let submission = target.queue.submit(std::iter::once(encoder.finish()));
+            Ok(Some((submission, frame)))
+        });
+    if result.is_err() && !tiles_submitted {
+        // The tiles this frame was to rasterize were not.
+        state.layers.clear();
+    }
+
+    let mut path_batches = scenes
+        .pop()
+        .map(|main| main.path_batches)
+        .unwrap_or_default();
+    vertices.clear();
+    sprites.clear();
+    path_batches.clear();
+    state.vertices = vertices;
+    state.sprites = sprites;
+    state.path_batches = path_batches;
+    result
+}
+
 fn record_with(
     host: &mut impl FrameHost,
     state: &mut FrameState,

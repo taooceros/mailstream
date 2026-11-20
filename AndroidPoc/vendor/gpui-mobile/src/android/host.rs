@@ -60,7 +60,7 @@ use gpui::{App, Application, ApplicationHandle};
 use ndk::native_window::NativeWindow;
 
 use super::platform::{AndroidPlatform, SharedPlatform};
-use crate::android::{AndroidKeyEvent, TouchPoint};
+use crate::android::AndroidKeyEvent;
 
 /// The render thread's `ALooper`, so other threads can wake it.
 static LOOPER: Mutex<Option<LooperPtr>> = Mutex::new(None);
@@ -100,7 +100,14 @@ enum Command {
     Paused,
     /// Input arrives on the Java UI thread but GPUI may only be touched from the
     /// render thread, so both go through the queue like everything else.
-    Touch(TouchPoint),
+    Motion {
+        action: u32,
+        time_ns: i64,
+        is_primary_down: bool,
+        id: i32,
+        x: f32,
+        y: f32,
+    },
     Key(AndroidKeyEvent),
 }
 
@@ -197,6 +204,7 @@ fn render_thread(launch: Launch) {
     *LOOPER.lock().expect("poisoned") = Some(LooperPtr(looper));
     log::info!("gpui-main: render thread started, looper={looper:p}");
     super::frame_source::install();
+    let mut driver = super::loop_driver::LoopDriver::new();
 
     // The platform must be built **here**: `AndroidDispatcher::new()` captures
     // `ALooper_forThread()`, and GPUI compares it against the calling thread forever after.
@@ -217,9 +225,12 @@ fn render_thread(launch: Launch) {
         for command in commands {
             match command {
                 Command::SurfaceCreated { window, scale } => {
-                    on_surface_created(&platform, window, scale, &mut app);
+                    if on_surface_created(&platform, window, scale, &mut app) {
+                        driver.on_surface_attached();
+                    }
                 }
                 Command::SurfaceDestroyed => {
+                    driver.on_surface_destroyed();
                     if let Some(win) = platform.primary_window() {
                         // Keeps the renderer (and its atlas) alive; only the surface goes.
                         win.term_window();
@@ -228,19 +239,45 @@ fn render_thread(launch: Launch) {
                     SURFACE_RELEASED.store(true, Ordering::SeqCst);
                 }
                 Command::Resumed => {
+                    let win = platform.primary_window();
                     platform.did_become_active();
-                    if let Some(win) = platform.primary_window() {
+                    if let Some(win) = &win {
                         win.set_active(true);
                     }
+                    driver.on_resumed(win.as_deref());
                 }
                 Command::Paused => {
+                    let win = platform.primary_window();
+                    driver.on_paused(win.as_deref());
                     platform.did_enter_background();
-                    if let Some(win) = platform.primary_window() {
+                    if let Some(win) = win {
                         win.set_active(false);
                     }
                 }
-                Command::Touch(point) => match platform.primary_window() {
-                    Some(win) => win.handle_touch(point),
+                Command::Motion {
+                    action,
+                    time_ns,
+                    is_primary_down,
+                    id,
+                    x,
+                    y,
+                } => match platform.primary_window() {
+                    Some(win) => {
+                        if is_primary_down {
+                            driver.on_touch_stream_reset();
+                        }
+                        match action {
+                            ACTION_DOWN => driver.on_touch_down(&win, id, time_ns, x, y),
+                            ACTION_MOVE => {
+                                if driver.on_touch_move_sample(id, time_ns, x, y) {
+                                    driver.on_touch_move_accepted(&win);
+                                }
+                            }
+                            ACTION_UP => driver.on_touch_up(&win, id, time_ns, x, y),
+                            ACTION_CANCEL => driver.on_touch_cancel(&win, id, time_ns, x, y),
+                            _ => {}
+                        }
+                    }
                     None => log::warn!("gpui-main: touch dropped — no window"),
                 },
                 Command::Key(event) => {
@@ -260,18 +297,17 @@ fn render_thread(launch: Launch) {
         }
         let window = platform.primary_window();
         let can_draw = window.as_ref().is_some_and(|win| win.is_active());
-        if can_draw && super::frame_source::take_frame() {
+        if can_draw {
             if let Some(win) = &window {
-                win.request_frame();
+                driver.render_due_frame(win, |_| {}, |_| {});
             }
         }
 
-        // Sleep on the looper until a command, a dispatcher task or the vsync
-        // callback for a wanted frame arrives; the timeout only covers delayed
-        // dispatcher tasks and the clock fallback without a choreographer.
-        let timeout_ms = super::frame_source::poll_timeout(platform.next_delayed_due(), can_draw)
+        // Sleep on the looper until a command, a dispatcher task, the vsync
+        // callback for a wanted frame, or the LTPO idle deadline arrives.
+        let timeout_ms = driver
+            .poll_timeout(window.as_deref(), platform.next_delayed_due(), can_draw)
             .map_or(-1, |dur| dur.as_millis().min(i32::MAX as u128) as i32);
-        // SAFETY: called only from the thread that owns this looper.
         unsafe {
             ndk_sys::ALooper_pollOnce(
                 timeout_ms,
@@ -288,7 +324,7 @@ fn on_surface_created(
     window: NativeWindow,
     scale: f32,
     app: &mut HostApp,
-) {
+) -> bool {
     SURFACE_RELEASED.store(false, Ordering::SeqCst);
 
     let incoming = window.ptr().as_ptr();
@@ -298,7 +334,7 @@ fn on_surface_created(
         if let Some(existing) = platform.primary_window() {
             existing.handle_resize();
         }
-        return;
+        return false;
     }
 
     if let Some(existing) = platform.primary_window() {
@@ -316,7 +352,7 @@ fn on_surface_created(
             Err(err) => log::error!("gpui-main: init_window failed: {err:#}"),
         }
         existing.set_active(true);
-        return;
+        return true;
     }
 
     // First surface: create the window, then let the host build its UI.
@@ -336,8 +372,12 @@ fn on_surface_created(
                 }
                 app.handle = Some(application.run_embedded(launch));
             }
+            true
         }
-        Err(err) => log::error!("gpui-main: open_window failed: {err:#}"),
+        Err(err) => {
+            log::error!("gpui-main: open_window failed: {err:#}");
+            false
+        }
     }
 }
 
@@ -396,6 +436,7 @@ pub fn motion_event(action: u32, action_index: usize, pointers: &[Pointer]) -> b
         }
     }
 
+    let event_time_ns = super::frame_source::monotonic_nanos_now();
     for (index, pointer) in pointers.iter().enumerate() {
         let touch_action = match action {
             ACTION_DOWN => ACTION_DOWN,
@@ -406,14 +447,14 @@ pub fn motion_event(action: u32, action_index: usize, pointers: &[Pointer]) -> b
             ACTION_POINTER_UP if index == action_index => ACTION_UP,
             _ => continue,
         };
-        post(Command::Touch(TouchPoint {
+        post(Command::Motion {
+            action: touch_action,
+            time_ns: event_time_ns,
+            is_primary_down: action == ACTION_DOWN && index == 0,
             id: pointer.id,
             x: pointer.x,
             y: pointer.y,
-            action: touch_action,
-            predicted: None,
-            timestamp: None,
-        }));
+        });
     }
     true
 }
