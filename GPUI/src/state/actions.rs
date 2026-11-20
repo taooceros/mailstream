@@ -430,7 +430,7 @@ impl MailApp {
                 } else {
                     counted(done, "Resolved", "Resolved {n} conversations")
                 };
-                this.settle(outcome, text, cx, move |c| c.waiting = !waiting, |error| format!("Couldn't update “Waiting on you”: {error}"));
+                this.settle(outcome, Some(text), cx, move |c| c.waiting = !waiting, |error| format!("Couldn't update “Waiting on you”: {error}"));
                 this.rebuild_items();
             },
         );
@@ -579,11 +579,11 @@ impl MailApp {
     }
 
     /// An action shown at once came to `outcome`: what the engine refused takes `undo` back and
-    /// a toast says why (`failure`), else a toast says `text` and offers undo.
+    /// a toast says why (`failure`), else a toast says `text` (when given) and offers undo.
     fn settle(
         &mut self,
         outcome: engine::Outcome,
-        text: SharedString,
+        text: Option<SharedString>,
         cx: &mut Context<Self>,
         undo: impl Fn(&mut Conversation),
         failure: impl FnOnce(&MailError) -> String,
@@ -596,7 +596,11 @@ impl MailApp {
                 self.show_toast(failure(error), cx);
                 cx.notify();
             }
-            None => self.offer_undo(text, outcome.undo, cx),
+            None => {
+                if let Some(text) = text {
+                    self.offer_undo(text, outcome.undo, cx);
+                }
+            }
         }
     }
 
@@ -617,7 +621,7 @@ impl MailApp {
                 } else {
                     counted(done, "Unstarred", "Unstarred {n} conversations")
                 };
-                this.settle(outcome, text, cx, move |c| c.starred = !starred, |error| format!("Couldn't update the star: {error}"));
+                this.settle(outcome, Some(text), cx, move |c| c.starred = !starred, |error| format!("Couldn't update the star: {error}"));
             },
         );
     }
@@ -635,11 +639,7 @@ impl MailApp {
             async move { engine::outcome(engine().set_read(asked.clone(), !unread).await.map(|r| (r.failed, r.undo)), &asked) },
             move |this, outcome, cx| {
                 let done = ids.len() - outcome.failed.len();
-                let text = if unread {
-                    counted(done, "Marked as unread", "Marked {n} conversations as unread")
-                } else {
-                    counted(done, "Marked as read", "Marked {n} conversations as read")
-                };
+                let text = read_toast(unread, done);
                 let state = if unread { "unread" } else { "read" };
                 this.settle(outcome, text, cx, move |c| c.unread = !unread, |error| format!("Couldn't mark it {state}: {error}"));
             },
@@ -758,5 +758,27 @@ fn undo_title(action: UndoAction) -> &'static str {
         UndoAction::Trash => "Move to Trash",
         UndoAction::Restore => "Move to Inbox",
         UndoAction::Tag => "Tag change",
+    }
+}
+
+/// Toast message after changing read state; marking read is quiet.
+fn read_toast(unread: bool, done: usize) -> Option<SharedString> {
+    unread.then(|| counted(done, "Marked as unread", "Marked {n} conversations as unread"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_read_shows_no_toast() {
+        assert_eq!(read_toast(false, 1), None);
+        assert_eq!(read_toast(false, 3), None);
+    }
+
+    #[test]
+    fn mark_unread_shows_toast() {
+        assert_eq!(read_toast(true, 1).as_deref(), Some("Marked as unread"));
+        assert_eq!(read_toast(true, 3).as_deref(), Some("Marked 3 conversations as unread"));
     }
 }
