@@ -22,6 +22,7 @@
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 
 use gpui::{
     App, Bounds, Canvas, Context, DispatchPhase, Entity, HitboxBehavior, HitboxId, MouseButton, MouseMoveEvent,
@@ -62,6 +63,14 @@ const SWIPE_DECISION: f32 = 6.0;
 const SIDEWAYS: f32 = 1.5;
 /// A pointer resting this long before it lets go flicks nothing.
 const STILL: Duration = Duration::from_millis(100);
+/// Trailing window over which release velocity is measured: smooths frame jitter and prevents
+/// batched events arriving microseconds apart (e.g. Android resampled touch bursts) from
+/// dividing a tiny delta by a microsecond `dt`.
+const VELOCITY_WINDOW: Duration = Duration::from_millis(60);
+/// Events arriving closer than this are part of the same frame/batch and coalesce into one sample.
+const MIN_SAMPLE_DT: Duration = Duration::from_millis(1);
+/// Minimum time span across samples needed to compute a release velocity.
+const MIN_VELOCITY_SPAN: Duration = Duration::from_millis(4);
 
 /// The state machine the trackpad and the mouse share: movement starts undecided; past `decision`
 /// points it drags the page when mostly sideways, else the gesture is left alone to its end.
@@ -72,7 +81,7 @@ struct Gesture {
     /// The side the gesture set off to (1 right, -1 left); the page never crosses back past 0.
     direction: f32,
     travel: (f32, f32),
-    velocity: f32,
+    samples: VecDeque<(Instant, f32)>,
     last: Instant,
 }
 
@@ -84,7 +93,7 @@ impl Gesture {
             offset: 0.0,
             direction: 1.0,
             travel: (0.0, 0.0),
-            velocity: 0.0,
+            samples: VecDeque::new(),
             last: Instant::now(),
         }
     }
@@ -94,14 +103,53 @@ impl Gesture {
         self.state = if can_start { State::Undecided } else { State::Ignoring };
         self.offset = 0.0;
         self.travel = (0.0, 0.0);
-        self.velocity = 0.0;
+        self.samples.clear();
         self.last = now;
     }
 
     fn cancel(&mut self) -> Step {
         let tracking = self.state == State::Tracking;
         self.state = State::Idle;
+        self.samples.clear();
         if tracking { Step::Cancel(self.offset) } else { Step::Pass }
+    }
+
+    fn record_sample(&mut self, now: Instant, offset: f32) {
+        if let Some(back) = self.samples.back_mut()
+            && now.saturating_duration_since(back.0) < MIN_SAMPLE_DT
+        {
+            *back = (now, offset);
+        } else {
+            self.samples.push_back((now, offset));
+        }
+        while self.samples.len() > 2
+            && self.samples.get(1).is_some_and(|&(next, _)| now.saturating_duration_since(next) > VELOCITY_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    fn velocity(&self, now: Instant) -> f32 {
+        if now.saturating_duration_since(self.last) > STILL {
+            return 0.0;
+        }
+        let Some(&(newest_t, newest_x)) = self.samples.back() else {
+            return 0.0;
+        };
+        let mut oldest = (newest_t, newest_x);
+        let mut prev_t = newest_t;
+        for &(t, x) in self.samples.iter().rev().skip(1) {
+            if newest_t.saturating_duration_since(t) > VELOCITY_WINDOW || prev_t.saturating_duration_since(t) > STILL {
+                break;
+            }
+            oldest = (t, x);
+            prev_t = t;
+        }
+        let span = newest_t.saturating_duration_since(oldest.0);
+        if span < MIN_VELOCITY_SPAN {
+            return 0.0;
+        }
+        (newest_x - oldest.1) / span.as_secs_f32()
     }
 
     /// The pointer moved `dx` to the right and `dy` down.
@@ -123,15 +171,14 @@ impl Gesture {
                 self.direction = if self.travel.0 > 0.0 { 1.0 } else { -1.0 };
                 self.offset = self.travel.0;
                 self.last = now;
+                self.samples.clear();
+                self.samples.push_back((now, self.offset));
                 Step::Drag(self.offset)
             }
             State::Tracking => {
-                let dt = now.duration_since(self.last).as_secs_f32();
                 self.last = now;
-                if dt > 0.0 {
-                    self.velocity = self.velocity * 0.5 + dx / dt * 0.5;
-                }
                 self.offset = self.direction * (self.direction * (self.offset + dx)).max(0.0);
+                self.record_sample(now, self.offset);
                 Step::Drag(self.offset)
             }
         }
@@ -142,7 +189,8 @@ impl Gesture {
         match self.state {
             State::Tracking => {
                 self.state = if coast { State::Coasting } else { State::Idle };
-                let velocity = if now.duration_since(self.last) > STILL { 0.0 } else { self.velocity };
+                let velocity = self.velocity(now);
+                self.samples.clear();
                 Step::Release { offset: self.offset, velocity }
             }
             State::Coasting => {
@@ -623,6 +671,60 @@ mod tests {
         assert!(matches!(slide, Slide::Settle { to, back: true, .. } if to == 900.0));
         assert!(slide.follow(Step::Release { offset: 100.0, velocity: 0.0 }, 900.0));
         assert!(matches!(slide, Slide::Settle { to, back: false, .. } if to == 0.0));
+    }
+
+    #[test]
+    fn batched_microsecond_moves_do_not_explode_release_velocity() {
+        let mut swipe = BackSwipe::default();
+        let start = Instant::now();
+        swipe.step(TouchPhase::Started, 0.0, 0.0, start, true);
+
+        // Simulate Android TouchResampler flushing 3 historical samples ~20 µs apart per 120 Hz
+        // vsync (~8.33 ms), moving at ~960 dp/s (8 dp per frame).
+        let mut t = start + Duration::from_millis(8);
+        for frame in 0..4u64 {
+            let base = start + Duration::from_micros(8_333 * (frame + 1));
+            for sub in 0..3u64 {
+                t = base + Duration::from_micros(20 * sub);
+                swipe.step(TouchPhase::Moved, 8.0 / 3.0, 0.0, t, true);
+            }
+        }
+        // Simulate on_up_or_cancel flushing 2 pending samples 20 µs apart right before lift.
+        t += Duration::from_millis(4);
+        swipe.step(TouchPhase::Moved, 2.0, 0.0, t, true);
+        t += Duration::from_micros(20);
+        swipe.step(TouchPhase::Moved, 2.0, 0.0, t, true);
+        let Step::Release { offset, velocity } = swipe.step(TouchPhase::Ended, 0.0, 0.0, t + Duration::from_micros(20), true)
+        else {
+            panic!("expected release");
+        };
+        assert!((800.0..=1_300.0).contains(&velocity), "expected realistic finger velocity (~960 dp/s), got {velocity}");
+
+        // On a 375 dp phone viewport, the page spring must NOT slam to the end in < 0.1 s.
+        let (_, arrived_at_100ms) = motion::PAGE.at(offset, 375.0, velocity, 0.10);
+        assert!(!arrived_at_100ms, "settle animation finished way too fast (offset={offset}, velocity={velocity})");
+    }
+
+    #[test]
+    fn slow_drag_with_batched_moves_does_not_falsely_flick_close() {
+        let mut swipe = BackSwipe::default();
+        let start = Instant::now();
+        swipe.step(TouchPhase::Started, 0.0, 0.0, start, true);
+
+        // Drag slowly (~240 dp/s = 2 dp per 8.33 ms frame) in 2-sample microsecond bursts.
+        let mut t = start;
+        for frame in 0..10u64 {
+            let base = start + Duration::from_micros(8_333 * (frame + 1));
+            swipe.step(TouchPhase::Moved, 1.0, 0.0, base, true);
+            t = base + Duration::from_micros(20);
+            swipe.step(TouchPhase::Moved, 1.0, 0.0, t, true);
+        }
+        let Step::Release { offset, velocity } = swipe.step(TouchPhase::Ended, 0.0, 0.0, t + Duration::from_micros(20), true)
+        else {
+            panic!("expected release");
+        };
+        assert!(velocity < 400.0, "slow batched drag should not exceed flick threshold: {velocity}");
+        assert_eq!(settle(offset, velocity, 375.0), (false, 0.0));
     }
 
     struct OverlayHost {

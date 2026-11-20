@@ -27,6 +27,13 @@ use ndk::configuration::Configuration;
 
 // Well-known Android density buckets (dp/inch).
 const DENSITY_DEFAULT: i32 = 160;
+/// Stable `DisplayId` for the primary Android display (`Display.DEFAULT_DISPLAY = 0`).
+///
+/// Using the raw `ANativeWindow` pointer as the display ID breaks `Window::refresh_interval`
+/// whenever Android destroys and recreates the surface across background/foreground or lock/unlock
+/// (`TerminateWindow` -> `InitWindow`), because `Window::display_id` keeps the old pointer while
+/// `Platform::displays()` replaces it with the new pointer.
+const PRIMARY_DISPLAY_ID: u64 = 0;
 
 // ── AndroidDisplay ────────────────────────────────────────────────────────────
 
@@ -75,7 +82,7 @@ impl AndroidDisplay {
             DENSITY_DEFAULT
         };
         let scale_factor = density as f32 / DENSITY_DEFAULT as f32;
-        let id = window.ptr().as_ptr() as u64;
+        let id = PRIMARY_DISPLAY_ID;
 
         Self {
             window: Some(window.clone()),
@@ -407,5 +414,16 @@ mod tests {
         // which always yields scale_factor = 1.0 → 160 dpi.
         let d = AndroidDisplay::headless(0, 0);
         assert_eq!(d.dpi(), 160);
+    }
+
+    #[test]
+    fn with_refresh_rate_hz_sets_refresh_interval() {
+        let d = AndroidDisplay::headless(1200, 2670).with_refresh_rate_hz(120.0);
+        let interval = PlatformDisplay::refresh_interval(&d).expect("120 Hz interval");
+        let ms = interval.as_secs_f64() * 1000.0;
+        assert!((ms - 8.3333).abs() < 0.01, "expected ~8.33 ms, got {ms}");
+
+        let invalid = AndroidDisplay::headless(1200, 2670).with_refresh_rate_hz(0.0);
+        assert_eq!(PlatformDisplay::refresh_interval(&invalid), None);
     }
 }
