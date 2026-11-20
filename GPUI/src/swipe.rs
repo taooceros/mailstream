@@ -81,6 +81,10 @@ struct Gesture {
     offset: f32,
     /// The side the gesture set off to (1 right, -1 left); the page never crosses back past 0.
     direction: f32,
+    /// Optional initial direction filter (`1.0` right only, `-1.0` left only, `0.0` either).
+    allowed_dir: f32,
+    /// Optional `(min, max)` clamp for `offset` (when `None`, clamps so `offset` never crosses 0).
+    bounds: Option<(f32, f32)>,
     travel: (f32, f32),
     samples: VecDeque<(Instant, f32)>,
     last: Instant,
@@ -93,6 +97,8 @@ impl Gesture {
             decision,
             offset: 0.0,
             direction: 1.0,
+            allowed_dir: 0.0,
+            bounds: None,
             travel: (0.0, 0.0),
             samples: VecDeque::new(),
             last: Instant::now(),
@@ -101,8 +107,16 @@ impl Gesture {
 
     /// The fingers touch or the button goes down; `can_start`: it may drag a page.
     fn start(&mut self, can_start: bool, now: Instant) {
+        self.start_bounded(can_start, 0.0, None, now);
+    }
+
+    /// Starts a gesture with an optional initial direction filter (`1.0` right, `-1.0` left,
+    /// `0.0` either) and optional `(min, max)` offset clamp.
+    fn start_bounded(&mut self, can_start: bool, allowed_dir: f32, bounds: Option<(f32, f32)>, now: Instant) {
         self.state = if can_start { State::Undecided } else { State::Ignoring };
         self.offset = 0.0;
+        self.allowed_dir = allowed_dir;
+        self.bounds = bounds;
         self.travel = (0.0, 0.0);
         self.samples.clear();
         self.last = now;
@@ -164,13 +178,15 @@ impl Gesture {
                 if self.travel.0.hypot(self.travel.1) <= self.decision {
                     return Step::Pass;
                 }
-                if self.travel.0.abs() <= self.travel.1.abs() * SIDEWAYS {
+                if self.travel.0.abs() <= self.travel.1.abs() * SIDEWAYS
+                    || (self.allowed_dir != 0.0 && self.travel.0 * self.allowed_dir <= 0.0)
+                {
                     self.state = State::Ignoring;
                     return Step::Pass;
                 }
                 self.state = State::Tracking;
                 self.direction = if self.travel.0 > 0.0 { 1.0 } else { -1.0 };
-                self.offset = self.travel.0;
+                self.offset = self.clamp_offset(self.travel.0);
                 self.last = now;
                 self.samples.clear();
                 self.samples.push_back((now, self.offset));
@@ -178,10 +194,17 @@ impl Gesture {
             }
             State::Tracking => {
                 self.last = now;
-                self.offset = self.direction * (self.direction * (self.offset + dx)).max(0.0);
+                self.offset = self.clamp_offset(self.offset + dx);
                 self.record_sample(now, self.offset);
                 Step::Drag(self.offset)
             }
+        }
+    }
+
+    fn clamp_offset(&self, offset: f32) -> f32 {
+        match self.bounds {
+            Some((min, max)) => offset.clamp(min, max),
+            None => self.direction * (self.direction * offset).max(0.0),
         }
     }
 
@@ -265,20 +288,46 @@ impl Default for BackSwipe {
 impl BackSwipe {
     /// `can_start`: whether a gesture beginning with this event may become a back swipe.
     pub fn feed(&self, event: &ScrollEvent, can_start: bool) -> Step {
+        self.feed_bounded(event, can_start, 0.0, None)
+    }
+
+    /// Like [`Self::feed`], with an optional initial direction filter (`1.0` right, `-1.0` left,
+    /// `0.0` either) and optional `(min, max)` offset clamp (used by the compact drawer, MS-439).
+    pub fn feed_bounded(
+        &self,
+        event: &ScrollEvent,
+        can_start: bool,
+        allowed_dir: f32,
+        bounds: Option<(f32, f32)>,
+    ) -> Step {
         // Mouse wheels scroll by lines; only trackpads send pixel deltas.
         let ScrollDelta::Pixels(delta) = event.delta else { return Step::Pass };
         let (raw_dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         // Fingers to the right, whichever way the user's scrolling direction is set.
         let dx = if self.preferences.natural { raw_dx } else { -raw_dx };
-        self.step(event.touch_phase, dx, dy, Instant::now(), can_start && self.preferences.enabled)
+        self.step_bounded(event.touch_phase, dx, dy, Instant::now(), can_start && self.preferences.enabled, allowed_dir, bounds)
     }
 
+    #[cfg(test)]
     fn step(&self, phase: TouchPhase, dx: f32, dy: f32, now: Instant, can_start: bool) -> Step {
+        self.step_bounded(phase, dx, dy, now, can_start, 0.0, None)
+    }
+
+    fn step_bounded(
+        &self,
+        phase: TouchPhase,
+        dx: f32,
+        dy: f32,
+        now: Instant,
+        can_start: bool,
+        allowed_dir: f32,
+        bounds: Option<(f32, f32)>,
+    ) -> Step {
         let mut gesture = self.gesture.borrow_mut();
         match phase {
             // `Started` also stands for "may begin", which carries no movement.
             TouchPhase::Started => {
-                gesture.start(can_start, now);
+                gesture.start_bounded(can_start, allowed_dir, bounds, now);
                 Step::Pass
             }
             TouchPhase::Cancelled => gesture.cancel(),
@@ -315,6 +364,12 @@ impl MouseDrag {
     /// A single left press on a page at `at`; `can_start`: the page is one a drag may close.
     pub fn press(&mut self, at: Point<Pixels>, can_start: bool) {
         self.press_at(at, can_start, Instant::now());
+    }
+
+    /// Like [`Self::press`], with an optional initial direction filter and offset clamp (MS-439).
+    pub fn press_bounded(&mut self, at: Point<Pixels>, can_start: bool, allowed_dir: f32, bounds: Option<(f32, f32)>) {
+        self.gesture.start_bounded(can_start, allowed_dir, bounds, Instant::now());
+        self.at = Some(at);
     }
 
     fn press_at(&mut self, at: Point<Pixels>, can_start: bool, now: Instant) {
@@ -443,6 +498,169 @@ pub fn settle(offset: f32, velocity: f32, width: f32) -> (bool, f32) {
         width
     };
     (back, target)
+}
+
+/// How the compact slide-over navigation drawer sits on screen (MS-439).
+///
+/// Positions are in logical points relative to the open resting edge (`0.0` = fully open,
+/// `-width` = fully closed off the left edge).
+#[derive(Clone, Copy, Debug, Default)]
+pub enum DrawerSlide {
+    #[default]
+    Closed,
+    Open,
+    /// Sliding in from `-width` to `0.0` since then.
+    Opening(Instant),
+    /// Sliding out from `0.0` to `-width` since then.
+    Closing(Instant),
+    /// Held under the finger/mouse at `offset` in `[-width, 0.0]`.
+    Drag(f32),
+    /// Springing from `from` to open (`0.0`) or closed (`-width`) with initial `velocity` (px/s).
+    Settle { from: f32, velocity: f32, start: Instant, opening: bool },
+}
+
+impl DrawerSlide {
+    /// Whether the drawer is mounted (anything other than completely `Closed`).
+    pub fn is_visible(&self) -> bool {
+        !matches!(self, DrawerSlide::Closed)
+    }
+
+    /// Logical open state (open, opening, dragging, or settling open).
+    pub fn is_open(&self) -> bool {
+        matches!(
+            self,
+            DrawerSlide::Open
+                | DrawerSlide::Opening(_)
+                | DrawerSlide::Drag(_)
+                | DrawerSlide::Settle { opening: true, .. }
+        )
+    }
+
+    /// Begins opening the drawer from its current position and velocity.
+    pub fn open(&mut self, width: f32) {
+        match *self {
+            DrawerSlide::Open | DrawerSlide::Opening(_) | DrawerSlide::Settle { opening: true, .. } => {}
+            DrawerSlide::Closed => *self = DrawerSlide::Opening(now()),
+            DrawerSlide::Closing(_) | DrawerSlide::Drag(_) | DrawerSlide::Settle { opening: false, .. } => {
+                let (pos, vel) = self.state(width);
+                *self = DrawerSlide::Settle { from: pos, velocity: vel, start: now(), opening: true };
+            }
+        }
+    }
+
+    /// Begins closing the drawer from its current position and velocity.
+    pub fn close(&mut self, width: f32) {
+        match *self {
+            DrawerSlide::Closed | DrawerSlide::Closing(_) | DrawerSlide::Settle { opening: false, .. } => {}
+            DrawerSlide::Open => *self = DrawerSlide::Closing(now()),
+            DrawerSlide::Opening(_) | DrawerSlide::Drag(_) | DrawerSlide::Settle { opening: true, .. } => {
+                let (pos, vel) = self.state(width);
+                *self = DrawerSlide::Settle { from: pos, velocity: vel, start: now(), opening: false };
+            }
+        }
+    }
+
+    fn place(&self, width: f32, elapsed: f32) -> (f32, f32, bool) {
+        let width = width.max(1.0);
+        match *self {
+            DrawerSlide::Closed => (-width, 0., true),
+            DrawerSlide::Open => (0., 0., true),
+            DrawerSlide::Drag(offset) => (offset.clamp(-width, 0.), 0., true),
+            DrawerSlide::Opening(_) => motion::DRAWER.state_at(-width, 0., 0., elapsed),
+            DrawerSlide::Closing(_) => motion::DRAWER.state_at(0., -width, 0., elapsed),
+            DrawerSlide::Settle { from, velocity, opening, .. } => {
+                let to = if opening { 0. } else { -width };
+                motion::DRAWER.state_at(from, to, velocity, elapsed)
+            }
+        }
+    }
+
+    /// Current `(offset, velocity)` without advancing the state machine.
+    pub fn state(&self, width: f32) -> (f32, f32) {
+        let elapsed = match *self {
+            DrawerSlide::Opening(start) | DrawerSlide::Closing(start) | DrawerSlide::Settle { start, .. } => since(start),
+            DrawerSlide::Closed | DrawerSlide::Open | DrawerSlide::Drag(_) => 0.,
+        };
+        let (pos, vel, _) = self.place(width, elapsed);
+        (pos, vel)
+    }
+
+    /// Current offset in `[-width, 0.0]` without advancing the state machine.
+    pub fn offset(&self, width: f32) -> f32 {
+        self.state(width).0
+    }
+
+    /// Advances the drawer animation for the current frame (`frame_clock`).
+    /// Returns `Some(offset)` in `[-width, 0.0]` while visible, or `None` once closed.
+    pub fn advance(&mut self, width: f32, window: &mut Window, cx: &App) -> Option<f32> {
+        let width = width.max(1.0);
+        let elapsed = match self {
+            DrawerSlide::Closed => return None,
+            DrawerSlide::Open => return Some(0.),
+            DrawerSlide::Drag(offset) => return Some((*offset).clamp(-width, 0.)),
+            DrawerSlide::Opening(start) | DrawerSlide::Closing(start) | DrawerSlide::Settle { start, .. } => {
+                frame_clock::elapsed(start, window, cx)
+            }
+        };
+        let (offset, _, arrived) = self.place(width, elapsed);
+        if !arrived {
+            window.request_animation_frame_at_display_rate();
+            return Some(offset.clamp(-width, 0.));
+        }
+        match *self {
+            DrawerSlide::Opening(_) | DrawerSlide::Settle { opening: true, .. } => {
+                *self = DrawerSlide::Open;
+                Some(0.)
+            }
+            DrawerSlide::Closing(_) | DrawerSlide::Settle { opening: false, .. } => {
+                *self = DrawerSlide::Closed;
+                None
+            }
+            DrawerSlide::Closed => None,
+            DrawerSlide::Open => Some(0.),
+            DrawerSlide::Drag(offset) => Some(offset.clamp(-width, 0.)),
+        }
+    }
+
+    /// Follows a gesture step for a drawer `width` wide that started at `base` (`started_open`).
+    /// Returns `true` when the gesture consumed the event.
+    pub fn follow(&mut self, step: Step, base: f32, width: f32, started_open: bool) -> bool {
+        let width = width.max(1.0);
+        *self = match step {
+            Step::Pass => return false,
+            Step::Consume => return true,
+            Step::Drag(delta) => DrawerSlide::Drag((base + delta).clamp(-width, 0.)),
+            Step::Release { offset: delta, velocity } => {
+                let pos = (base + delta).clamp(-width, 0.);
+                let opening = drawer_settle(pos, velocity, width, started_open);
+                DrawerSlide::Settle { from: pos, velocity, start: now(), opening }
+            }
+            Step::Cancel(delta) => {
+                let pos = (base + delta).clamp(-width, 0.);
+                DrawerSlide::Settle { from: pos, velocity: 0., start: now(), opening: started_open }
+            }
+        };
+        true
+    }
+}
+
+/// Decides whether releasing a dragged drawer at `offset` (`[-width, 0.0]`) with `velocity`
+/// (px/s, positive = right/open) settles open (`true`) or closed (`false`).
+pub fn drawer_settle(offset: f32, velocity: f32, width: f32, started_open: bool) -> bool {
+    let width = width.max(1.0);
+    let offset = offset.clamp(-width, 0.0);
+    let visible = width + offset;
+    if velocity > 400.0 && visible > 20.0 {
+        return true;
+    }
+    if velocity < -400.0 && -offset > 20.0 {
+        return false;
+    }
+    if started_open {
+        -offset <= width / 3.0
+    } else {
+        visible > width / 3.0
+    }
 }
 
 /// Hands `host` the scroll events over the element it is drawn as, in the capture phase, before
@@ -1132,5 +1350,90 @@ mod tests {
             rebuilds_after_catch, rebuilds_before_release,
             "catching active momentum must not synchronously rebuild the scroll layer"
         );
+    }
+
+    #[test]
+    fn drawer_settle_uses_third_threshold_and_flick_velocity() {
+        let w = 300.0;
+        // Started open: closes past 1/3 left or on leftward flick.
+        assert!(!drawer_settle(-120.0, 0.0, w, true));
+        assert!(drawer_settle(-80.0, 0.0, w, true));
+        assert!(!drawer_settle(-40.0, -600.0, w, true));
+        assert!(drawer_settle(-180.0, 600.0, w, true));
+        // Started closed: opens past 1/3 right or on rightward flick.
+        assert!(drawer_settle(-180.0, 0.0, w, false));
+        assert!(!drawer_settle(-220.0, 0.0, w, false));
+        assert!(drawer_settle(-260.0, 600.0, w, false));
+        assert!(!drawer_settle(-120.0, -600.0, w, false));
+    }
+
+    #[test]
+    fn drawer_slide_opens_closes_and_reverses_mid_flight() {
+        let w = 300.0;
+        let mut slide = DrawerSlide::Closed;
+        assert!(!slide.is_visible());
+        assert!(!slide.is_open());
+
+        slide.open(w);
+        assert!(slide.is_visible());
+        assert!(slide.is_open());
+
+        // At t=0 opening starts at -w; mid-way it is strictly between -w and 0; at longest it arrives at 0.
+        let (p0, _, a0) = slide.place(w, 0.0);
+        let (p_mid, v_mid, a_mid) = slide.place(w, 0.08);
+        let (p_end, _, a_end) = slide.place(w, motion::DRAWER.longest().as_secs_f32());
+        assert_eq!(p0, -w);
+        assert!(!a0);
+        assert!(p_mid > -w && p_mid < 0.0 && v_mid > 0.0 && !a_mid);
+        assert_eq!(p_end, 0.0);
+        assert!(a_end);
+
+        // Reversing mid-flight transitions into Settle closing and arrives at -w.
+        slide = DrawerSlide::Settle { from: p_mid, velocity: v_mid, start: Instant::now(), opening: false };
+        assert!(!slide.is_open());
+        assert!(slide.is_visible());
+        let (rev_end, _, rev_arrived) = slide.place(w, motion::DRAWER.longest().as_secs_f32());
+        assert_eq!(rev_end, -w);
+        assert!(rev_arrived);
+    }
+
+    #[test]
+    fn drawer_slide_follows_drag_release_and_cancel() {
+        let w = 300.0;
+        let mut slide = DrawerSlide::Open;
+        assert!(slide.follow(Step::Drag(-90.0), 0.0, w, true));
+        assert_eq!(slide.offset(w), -90.0);
+
+        // Clamps within [-w, 0].
+        assert!(slide.follow(Step::Drag(-400.0), 0.0, w, true));
+        assert_eq!(slide.offset(w), -w);
+
+        // Cancel returns to started_open (true).
+        assert!(slide.follow(Step::Cancel(-120.0), 0.0, w, true));
+        assert!(slide.is_open());
+
+        // Release past 1/3 settles closed.
+        assert!(slide.follow(Step::Release { offset: -140.0, velocity: -100.0 }, 0.0, w, true));
+        assert!(!slide.is_open());
+        assert!(slide.is_visible());
+    }
+
+    #[test]
+    fn bounded_swipe_filters_initial_direction_and_clamps_range() {
+        let swipe = BackSwipe::default();
+        let start = Instant::now();
+        let t = |i: u64| start + Duration::from_millis(16 * i);
+
+        // Left-only swipe (open drawer) ignores rightward movement.
+        swipe.step_bounded(TouchPhase::Started, 0.0, 0.0, t(0), true, -1.0, Some((-300.0, 0.0)));
+        let step = swipe.step_bounded(TouchPhase::Moved, 20.0, 0.0, t(1), true, -1.0, Some((-300.0, 0.0)));
+        assert!(matches!(step, Step::Pass));
+
+        // Right-only swipe (edge-open drawer) tracks rightward and clamps at +300.
+        swipe.step_bounded(TouchPhase::Started, 0.0, 0.0, t(2), true, 1.0, Some((0.0, 300.0)));
+        let step1 = swipe.step_bounded(TouchPhase::Moved, 40.0, 0.0, t(3), true, 1.0, Some((0.0, 300.0)));
+        let step2 = swipe.step_bounded(TouchPhase::Moved, 400.0, 0.0, t(4), true, 1.0, Some((0.0, 300.0)));
+        assert!(matches!(step1, Step::Drag(d) if (d - 40.0).abs() < 0.01));
+        assert!(matches!(step2, Step::Drag(d) if (d - 300.0).abs() < 0.01));
     }
 }

@@ -168,8 +168,14 @@ impl MailApp {
 
     /// Slide-over navigation drawer for compact viewports (MS-408, MS-417): matches desktop's
     /// warm `p.window` sidebar surface, `p.accent` icons, and warm `p.selection` row highlight.
-    pub(super) fn render_drawer(&self, viewport_width: f32, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let drawer_width = design::compact::DRAWER_WIDTH.min((viewport_width * 0.84).max(248.));
+    pub(super) fn render_drawer(
+        &self,
+        drawer_width: f32,
+        offset: f32,
+        p: &'static Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut rows: Vec<AnyElement> = Vec::new();
         for node in self.sidebar_nodes(cx) {
             let is_calendar = node.key.as_ref() == "calendar";
@@ -183,21 +189,27 @@ impl MailApp {
             1 => Some("1 account".into()),
             n => Some(format!("{n} accounts").into()),
         };
-        let scrim_alpha = if p.dark { 0.54 } else { 0.32 };
+        let progress = (1.0 + offset / drawer_width.max(1.0)).clamp(0.0, 1.0);
+        let scrim_alpha = (if p.dark { 0.54 } else { 0.32 }) * progress;
         div()
             .id("compact-drawer-backdrop")
             .absolute()
             .inset_0()
-            .flex()
+            .overflow_hidden()
             .bg(gpui::hsla(0., 0., 0., scrim_alpha))
             .occlude()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| {
+                this.press_drawer(event.position);
+            }))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_drawer(cx)))
             .child(
                 div()
                     .id("compact-drawer-panel")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(offset))
                     .w(px(drawer_width))
-                    .h_full()
-                    .flex_shrink_0()
                     .flex()
                     .flex_col()
                     .bg(p.window)
@@ -209,7 +221,10 @@ impl MailApp {
                     .border_color(p.island_rim)
                     .shadow(p.popover_shadow.clone())
                     .on_click(|_, _, cx| cx.stop_propagation())
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                        this.press_drawer(event.position);
+                        cx.stop_propagation();
+                    }))
                     .child(
                         div()
                             .flex_shrink_0()

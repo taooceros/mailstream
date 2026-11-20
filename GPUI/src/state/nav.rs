@@ -26,7 +26,7 @@ impl MailApp {
         });
         let same = self.source == source && self.query.is_none() && self.mail_in_view();
         self.leave_panes(cx);
-        self.drawer_open = false;
+        self.close_drawer(cx);
         self.compact_search = false;
         self.context_menu = None;
         self.tag_editor = None;
@@ -48,7 +48,7 @@ impl MailApp {
     /// Shows Google Chat: every account's spaces (None) or one account's.
     pub fn select_chat(&mut self, account: Option<SharedString>, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_panes(cx);
-        self.drawer_open = false;
+        self.close_drawer(cx);
         self.chat_view = Some(account.clone());
         self.context_menu = None;
         self.tag_editor = None;
@@ -65,7 +65,7 @@ impl MailApp {
         if self.chat_view.take().is_some() {
             self.chat.update(cx, |chat, cx| chat.hide(cx));
         }
-        self.drawer_open = false;
+        self.close_drawer(cx);
         self.calendar_view = true;
         self.context_menu = None;
         self.tag_editor = None;
@@ -472,15 +472,94 @@ impl MailApp {
     }
 
     pub fn open_drawer(&mut self, cx: &mut Context<Self>) {
-        self.drawer_open = true;
+        self.drawer_slide.open(self.drawer_width);
         cx.notify();
     }
 
     pub fn close_drawer(&mut self, cx: &mut Context<Self>) {
-        if self.drawer_open {
-            self.drawer_open = false;
+        if self.drawer_slide.is_open() {
+            self.drawer_slide.close(self.drawer_width);
             cx.notify();
         }
+    }
+
+    pub fn close_drawer_immediate(&mut self) {
+        self.drawer_slide = crate::swipe::DrawerSlide::Closed;
+    }
+
+    fn drawer_gesture_params(&self, at_x: Option<f32>) -> (bool, f32, Option<(f32, f32)>) {
+        let width = self.drawer_width.max(1.0);
+        if self.drawer_slide.is_visible() {
+            let base = self.drawer_slide.offset(width);
+            self.drawer_gesture_base.set(base);
+            self.drawer_gesture_started_open.set(self.drawer_slide.is_open());
+            let allowed_dir = if base >= -0.5 {
+                -1.0
+            } else if base <= -width + 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+            (true, allowed_dir, Some((-width - base, -base)))
+        } else if self.drawer_edge_open_allowed
+            && at_x.is_some_and(|x| x <= crate::design::compact::DRAWER_EDGE_SLOP)
+        {
+            self.drawer_gesture_base.set(-width);
+            self.drawer_gesture_started_open.set(false);
+            (true, 1.0, Some((0.0, width)))
+        } else {
+            (false, 0.0, None)
+        }
+    }
+
+    /// Scroll/touch swipe capture for the compact navigation drawer (MS-439): drags the open
+    /// drawer closed on a leftward swipe, or opens it from the left edge on a rightward swipe.
+    pub fn peek_drawer_swipe(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
+        let (can_start, allowed_dir, bounds) = if event.touch_phase == TouchPhase::Started {
+            let at_x = at.map(|p| f32::from(p.x));
+            if at.is_some() { self.drawer_gesture_params(at_x) } else { (false, 0.0, None) }
+        } else {
+            (false, 0.0, None)
+        };
+        self.drawer_swipe.feed_bounded(event, can_start, allowed_dir, bounds)
+    }
+
+    /// Applies a drawer swipe or drag step to `drawer_slide`.
+    pub fn follow_drawer(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+        let moves = !matches!(step, Step::Pass | Step::Consume);
+        let took = self.drawer_slide.follow(
+            step,
+            self.drawer_gesture_base.get(),
+            self.drawer_width,
+            self.drawer_gesture_started_open.get(),
+        );
+        if moves {
+            cx.notify();
+        }
+        took
+    }
+
+    /// Starts a potential mouse drag on the visible drawer panel or backdrop scrim.
+    pub fn press_drawer(&mut self, at: Point<Pixels>) {
+        let (can_start, allowed_dir, bounds) = self.drawer_gesture_params(Some(f32::from(at.x)));
+        self.drawer_drag.press_bounded(at, can_start, allowed_dir, bounds);
+    }
+
+    /// Starts a potential left-edge mouse drag to open the drawer when closed.
+    pub fn press_drawer_edge(&mut self, at: Point<Pixels>) {
+        if self.drawer_slide.is_visible() {
+            return;
+        }
+        let (can_start, allowed_dir, bounds) = self.drawer_gesture_params(Some(f32::from(at.x)));
+        if can_start {
+            self.drawer_drag.press_bounded(at, true, allowed_dir, bounds);
+        }
+    }
+
+    /// Feeds mouse movement/release to the drawer drag recognizer.
+    pub fn feed_drawer_drag(&mut self, pointer: Pointer, cx: &mut Context<Self>) -> bool {
+        let step = self.drawer_drag.feed(pointer);
+        self.follow_drawer(step, cx)
     }
 
     pub fn show_settings(
@@ -495,7 +574,7 @@ impl MailApp {
             cx.propagate();
             return;
         }
-        self.drawer_open = false;
+        self.close_drawer_immediate();
         self.context_menu = None;
         self.tag_editor = None;
         let view = match self.settings.clone() {
@@ -710,9 +789,8 @@ impl MailApp {
         {
             return;
         }
-        if self.drawer_open {
-            self.drawer_open = false;
-            cx.notify();
+        if self.drawer_slide.is_open() {
+            self.close_drawer(cx);
             return;
         }
         if self.clear_selection(cx) {

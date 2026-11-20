@@ -609,6 +609,8 @@ pub mod motion {
     pub const PAGE: Spring = Spring { response: 0.3 };
     /// The calendar's days paging on (← and →, or let go after a swipe).
     pub const PAGING: Spring = Spring { response: 0.22 };
+    /// The compact navigation drawer sliding in from the left edge and back out (MS-439).
+    pub const DRAWER: Spring = Spring { response: 0.28 };
 
     /// What a page covers sits this share of the page's width left of its place while the page is
     /// in, coming back as it slides off (iOS's push sits it about 0.3 back).
@@ -631,10 +633,17 @@ pub mod motion {
         /// `elapsed` seconds on, and whether it has arrived. It never passes `to`: thrown hard at
         /// it, it stops there.
         pub fn at(self, from: f32, to: f32, velocity: f32, elapsed: f32) -> (f32, bool) {
+            let (position, _, arrived) = self.state_at(from, to, velocity, elapsed);
+            (position, arrived)
+        }
+
+        /// Like [`Self::at`], also returning the instantaneous velocity (points per second) so
+        /// mid-flight interruptions carry momentum seamlessly into the new target.
+        pub fn state_at(self, from: f32, to: f32, velocity: f32, elapsed: f32) -> (f32, f32, bool) {
             let config = self.config();
             let state = config.step(SpringState { position: from, velocity }, to, elapsed.max(0.));
             let arrived = (state.position - to) * (from - to) <= 0. || config.is_settled(state, to, REST);
-            if arrived { (to, true) } else { (state.position, false) }
+            if arrived { (to, 0., true) } else { (state.position, state.velocity, false) }
         }
 
         /// The longest a move from rest takes, from anywhere to anywhere on the window.
@@ -781,6 +790,8 @@ pub mod compact {
     /// Bottom scroll clearance and toast offset so content clears the floating dock cleanly.
     pub const DOCK_CLEARANCE: f32 = 96.0;
     pub const DRAWER_WIDTH: f32 = 300.0;
+    /// Left-edge touch/drag zone width for opening the navigation drawer by swiping right (MS-439).
+    pub const DRAWER_EDGE_SLOP: f32 = 48.0;
     pub const DRAWER_ROW: f32 = 48.0;
     pub const ROW_HEIGHT: f32 = 86.0;
     pub const BUNDLE_ROW_HEIGHT: f32 = 70.0;

@@ -38,7 +38,7 @@ use crate::compose::{ComposeColumn, ReplyBox};
 use crate::engine::{MailError, engine};
 use crate::frame_rate::FrameRateMeter;
 use crate::model::{ConversationExt, RoleExt, ShownMessage};
-use crate::swipe::{BackSwipe, MouseDrag, Preferences, Slide};
+use crate::swipe::{BackSwipe, DrawerSlide, MouseDrag, Preferences, Slide};
 
 actions!(
     mail,
@@ -631,8 +631,20 @@ pub struct MailApp {
     pub sidebar_folded: bool,
     /// The user opened the sidebar while the column folded it.
     pub sidebar_beside_compose: bool,
-    /// Whether the slide-over navigation drawer is open in compact (small-screen) mode.
-    pub drawer_open: bool,
+    /// Animated slide-over navigation drawer state in compact (small-screen) mode (MS-439).
+    pub drawer_slide: DrawerSlide,
+    /// Last laid-out compact drawer width in logical points.
+    pub drawer_width: f32,
+    /// Whether a left-edge swipe may open the drawer on the current compact screen.
+    pub drawer_edge_open_allowed: bool,
+    /// Two-finger / Android touch swipe gesture for the compact navigation drawer.
+    pub drawer_swipe: BackSwipe,
+    /// Mouse drag gesture for the compact navigation drawer (panel, scrim, or left edge).
+    pub drawer_drag: MouseDrag,
+    /// Drawer offset (`[-drawer_width, 0.0]`) when the current drawer gesture started.
+    pub drawer_gesture_base: std::cell::Cell<f32>,
+    /// Whether the drawer was logically open when the current drawer gesture started.
+    pub drawer_gesture_started_open: std::cell::Cell<bool>,
     /// Whether the inline search bar is expanded in compact (small-screen) mode.
     pub compact_search: bool,
     /// Inline Settings overlay shown on compact viewports and single-window mobile hosts (Android).
@@ -782,7 +794,13 @@ impl MailApp {
             sidebar_open: !cfg!(target_os = "android"),
             sidebar_folded: false,
             sidebar_beside_compose: false,
-            drawer_open: false,
+            drawer_slide: DrawerSlide::Closed,
+            drawer_width: crate::design::compact::DRAWER_WIDTH,
+            drawer_edge_open_allowed: false,
+            drawer_swipe: BackSwipe::default(),
+            drawer_drag: MouseDrag::default(),
+            drawer_gesture_base: std::cell::Cell::new(-crate::design::compact::DRAWER_WIDTH),
+            drawer_gesture_started_open: std::cell::Cell::new(false),
             compact_search: false,
             settings: None,
             swipe: BackSwipe::default(),
@@ -820,7 +838,10 @@ impl MailApp {
         this.load_list(this.key(), false, cx);
         this.follow_engine(cx);
         this.load_layout_settings(cx);
-        this.background(cx, async { Preferences::read() }, |this, preferences, _| this.swipe.preferences = preferences);
+        this.background(cx, async { Preferences::read() }, |this, preferences, _| {
+            this.swipe.preferences = preferences;
+            this.drawer_swipe.preferences = preferences;
+        });
         this
     }
 

@@ -155,9 +155,28 @@ impl Render for MailApp {
             } else {
                 self.reader().is_none() && self.selection().is_none() && !self.compact_search && self.query.is_none()
             };
-        let show_fab = show_bottom_bar && !self.drawer_open && self.open_bundle().is_none();
+        let show_fab = show_bottom_bar && self.open_bundle().is_none();
         let page = if self.calendar_view { self.calendar.update(cx, |pane, cx| pane.render_page(window, cx)) } else { None };
         let video_lightbox = if self.chat_view.is_some() { self.chat.read(cx).video_lightbox() } else { None };
+        let drawer_width = design::compact::DRAWER_WIDTH.min((width * 0.84).max(248.));
+        self.drawer_width = drawer_width;
+        self.drawer_edge_open_allowed = show_bottom_bar
+            && self.layers.is_empty()
+            && self.context_menu.is_none()
+            && self.tag_editor.is_none()
+            && video_lightbox.is_none();
+        let drawer_offset = if compact {
+            self.drawer_slide.advance(drawer_width, window, cx)
+        } else {
+            self.close_drawer_immediate();
+            None
+        };
+        let (drawer_drag_under, drawer_drag_over) = if compact {
+            let (under, over) = swipe::mouse_capture(cx.entity(), Self::feed_drawer_drag);
+            (Some(under), Some(over))
+        } else {
+            (None, None)
+        };
         #[cfg(target_os = "macos")]
         let has_video_lightbox = video_lightbox.is_some();
         div()
@@ -212,6 +231,24 @@ impl Render for MailApp {
                 })
                 .absolute()
                 .size_0()
+            })
+            .children(drawer_drag_under)
+            .when(compact && drawer_offset.is_none() && self.drawer_edge_open_allowed, |d| {
+                let host = cx.entity();
+                d.child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, window, _| {
+                            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx: &mut App| {
+                                if phase == gpui::DispatchPhase::Capture && event.button == MouseButton::Left {
+                                    host.update(cx, |this, _| this.press_drawer_edge(event.position));
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_0(),
+                )
             })
             // The window between the islands moves it, as a title bar does.
             .when(!compact, |d| d.child(title_bar("window", window, cx).absolute().size_full()))
@@ -275,7 +312,11 @@ impl Render for MailApp {
                         .child(self.compose.clone()),
                 ))
             })
-            .when(compact && self.drawer_open, |d| d.child(self.render_drawer(width, p, window, cx)))
+            .when_some(drawer_offset, |d, offset| d.child(self.render_drawer(drawer_width, offset, p, window, cx)))
+            .when(compact, |d| {
+                d.child(swipe::scroll_capture(cx.entity(), Self::peek_drawer_swipe, Self::follow_drawer).absolute().inset_0())
+            })
+            .children(drawer_drag_over)
             .when_some(self.settings.clone(), |d, settings| {
                 d.child(
                     div()
