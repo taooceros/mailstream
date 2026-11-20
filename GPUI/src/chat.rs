@@ -15,7 +15,7 @@
 //! engine's `Chat` event and the open space's history on `ChatMessages`. Engine calls run on the
 //! background executor.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
@@ -29,17 +29,17 @@ use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, EventEmitter,
     FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement,
-    InteractiveText, IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement, Render, Resource,
-    ScrollEvent, ScrollStrategy, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage,
-    StyledText, Subscription, UniformListScrollHandle, Window, actions, canvas, div, img, list, px, relative,
-    uniform_list,
+    InteractiveText, IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent,
+    NavigationDirection, ObjectFit, ParentElement, Pixels, Point, Render, Resource, ScrollEvent, ScrollStrategy,
+    SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, Subscription,
+    TouchPhase, UniformListScrollHandle, Window, actions, canvas, div, img, list, px, relative, uniform_list,
 };
 
 use crate::avatars;
 use crate::controls::{
     ButtonKind, ControlSize, Tone, button, capsule, centered_note, compact_capsule, compact_icon_button, hairline,
     icon_button, island, list_header, list_row, mark_dot, notice, page_scrim, page_toolbar, pill, raised_capsule,
-    row_layout, search_field_for,
+    row_layout, scrim, search_field_for,
 };
 use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, log as log_metrics, radius, space, stroke, text};
 use crate::message_log;
@@ -48,6 +48,7 @@ use crate::engine::{MailError, engine};
 use crate::input::{self, wrap_selection};
 use crate::markup_highlight::{MarkupFlavor, markup_highlighter_factory};
 use crate::split;
+use crate::swipe::{self, BackSwipe, MouseDrag, Pointer, Preferences, Slide, Step};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::video::{self, ChatVideo, VideoLightbox};
 use crate::state::ReaderTop;
@@ -913,6 +914,15 @@ struct NewChatForm {
     failure: Option<SharedString>,
 }
 
+/// Which surface inside Chat a back-swipe, mouse drag, or slide animation targets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SwipeTarget {
+    /// The open space or new-chat form (closes back to `View::Spaces`).
+    Page,
+    /// The open thread inside the open space (closes back to the space).
+    Thread,
+}
+
 pub struct ChatPane {
     focus: FocusHandle,
     composer: Entity<EditorState>,
@@ -955,6 +965,13 @@ pub struct ChatPane {
     width: f32,
     list_width: f32,
     two_pane: bool,
+    /// Back-swipe (two-finger trackpad / Android touch) and mouse drag closing the open page or
+    /// thread, matching mail detail (`swipe.rs`, MS-435).
+    swipe: BackSwipe,
+    drag: MouseDrag,
+    slide: Slide,
+    gesture_target: RefCell<Option<SwipeTarget>>,
+    slide_target: Option<SwipeTarget>,
     /// How far the open space's log is scrolled, for its toolbar, and the height of its heading
     /// (the title and its pills) as last laid out.
     log_top: ReaderTop,
@@ -1027,6 +1044,11 @@ impl ChatPane {
             width: layout::MIN_LIST + layout::GAP + layout::MIN_DETAIL,
             list_width: layout::MIN_LIST,
             two_pane: true,
+            swipe: BackSwipe::default(),
+            drag: MouseDrag::default(),
+            slide: Slide::Rest,
+            gesture_target: RefCell::new(None),
+            slide_target: None,
             log_top: ReaderTop::Top,
             head_height: Rc::new(Cell::new(0.)),
             logs: HashMap::new(),
@@ -1042,6 +1064,7 @@ impl ChatPane {
             _subscriptions: subscriptions,
         };
         this.load_spaces(cx);
+        this.background(cx, async { Preferences::read() }, |this, preferences, _| this.swipe.preferences = preferences);
         this
     }
 
@@ -1073,6 +1096,8 @@ impl ChatPane {
         self.leave_space(cx);
         self.filter = account;
         self.view = View::Spaces;
+        self.slide = Slide::Rest;
+        self.slide_target = None;
         self.rebuild_visible();
         window.focus(&self.focus, cx);
         // Selecting Chat fetches every account's spaces now, as the native app does.
@@ -1085,6 +1110,8 @@ impl ChatPane {
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.leave_space(cx);
         self.view = View::Spaces;
+        self.slide = Slide::Rest;
+        self.slide_target = None;
     }
 
     /// Whether the sidebar lists Chat: an account uses it, or a Google account could connect it.
@@ -1367,14 +1394,21 @@ impl ChatPane {
     fn show_space(&mut self, key: Key, type_here: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.highlight = Some(key.clone());
         if matches!(&self.view, View::Space(open) if *open == key) {
+            if self.closing() && self.slide_target == Some(SwipeTarget::Page) {
+                self.slide = Slide::Rest;
+                self.slide_target = None;
+            }
             if type_here {
                 window.focus(&self.composer.focus_handle(cx), cx);
             }
             cx.notify();
             return;
         }
+        let opening = matches!(self.view, View::Spaces) || (self.closing() && self.slide_target == Some(SwipeTarget::Page));
         // The new-chat form gives way; a space open before is replaced by `chat_open`.
         self.view = View::Space(key.clone());
+        self.slide = if opening { Slide::opening() } else { Slide::Rest };
+        self.slide_target = opening.then_some(SwipeTarget::Page);
         self.hovered_message = None;
         self.log_top = ReaderTop::Top;
         // Downloads that failed are tried again.
@@ -1404,6 +1438,8 @@ impl ChatPane {
         self.close_video_lightbox(window, cx);
         self.leave_space(cx);
         self.view = View::Spaces;
+        self.slide = Slide::Rest;
+        self.slide_target = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -1411,11 +1447,17 @@ impl ChatPane {
     /// Opens `thread` of the open space beside its log (over it when the page is narrow), its
     /// composer taking the keys (MS-329).
     fn open_thread(&mut self, thread: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        let closing_thread = self.closing() && self.slide_target == Some(SwipeTarget::Thread);
         let View::Space(key) = &self.view else { return };
         let Some(log) = self.logs.get_mut(key) else { return };
+        let opening = log.thread.is_none() || closing_thread;
         if log.thread.as_ref().is_none_or(|view| view.id != thread) {
             log.open_thread(thread);
             self.thread_composer.update(cx, |input, cx| input.clean(window, cx));
+        }
+        if opening {
+            self.slide = Slide::opening();
+            self.slide_target = Some(SwipeTarget::Thread);
         }
         window.focus(&self.thread_composer.focus_handle(cx), cx);
         cx.notify();
@@ -1423,9 +1465,14 @@ impl ChatPane {
 
     /// Closes the thread open beside the open space's log, the space's composer taking the keys.
     fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         let View::Space(key) = &self.view else { return };
         if let Some(log) = self.logs.get_mut(key) {
             log.thread = None;
+        }
+        if self.slide_target == Some(SwipeTarget::Thread) {
+            self.slide = Slide::Rest;
+            self.slide_target = None;
         }
         window.focus(&self.composer.focus_handle(cx), cx);
         cx.notify();
@@ -1762,12 +1809,12 @@ impl ChatPane {
     /// reader); over the list it closes the space. In the thread's composer it closes the thread.
     fn composer_escape(&mut self, surface: Surface, window: &mut Window, cx: &mut Context<Self>) {
         if surface == Surface::Thread {
-            self.close_thread(window, cx);
+            self.slide_off(SwipeTarget::Thread, window, cx);
         } else if self.two_pane {
             window.focus(&self.focus, cx);
             cx.notify();
         } else {
-            self.close(window, cx);
+            self.slide_off(SwipeTarget::Page, window, cx);
         }
     }
 
@@ -1782,10 +1829,12 @@ impl ChatPane {
             .clone()
             .or_else(|| self.chat_accounts.iter().find(|a| a.can_start).map(|a| a.id.clone()))
             .or_else(|| self.accounts.first().map(|a| a.id.clone()));
+        let opening = matches!(self.view, View::Spaces) || (self.closing() && self.slide_target == Some(SwipeTarget::Page));
         self.leave_space(cx);
         self.form = NewChatForm { account, ..Default::default() };
         self.view = View::NewChat;
-        self.people_input.update(cx, |input, cx| input.clean(window, cx));
+        self.slide = if opening { Slide::opening() } else { Slide::Rest };
+        self.slide_target = opening.then_some(SwipeTarget::Page);
         window.focus(&self.people_input.focus_handle(cx), cx);
         self.load_partners(cx);
         cx.notify();
@@ -2003,11 +2052,179 @@ impl ChatPane {
     /// takes it.
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         window.cancel_touch_momentum();
+        self.finish_closing(window, cx);
+        if self.has_open_thread() {
+            self.slide_off(SwipeTarget::Thread, window, cx);
+            return;
+        }
         match self.view {
-            View::Space(_) | View::NewChat => self.close(window, cx),
+            View::Space(_) | View::NewChat => self.slide_off(SwipeTarget::Page, window, cx),
             View::Spaces if !self.query.is_empty() => self.cancel_search(&Escape, window, cx),
             View::Spaces => cx.propagate(),
         }
+    }
+
+    fn has_open_thread(&self) -> bool {
+        matches!(&self.view, View::Space(key) if self.logs.get(key).is_some_and(|log| log.thread.is_some()))
+    }
+
+    fn surface_live(&self, target: SwipeTarget) -> bool {
+        match target {
+            SwipeTarget::Thread => self.has_open_thread(),
+            SwipeTarget::Page => !matches!(self.view, View::Spaces) && (!self.has_open_thread() || self.thread_beside()),
+        }
+    }
+
+    fn target_at(&self, x: f32) -> Option<SwipeTarget> {
+        let has_page = !matches!(self.view, View::Spaces);
+        chat_gesture_target(has_page, self.has_open_thread(), self.two_pane, self.thread_beside(), self.width, self.list_width, x)
+    }
+
+    fn travel(&self, target: SwipeTarget) -> f32 {
+        match target {
+            SwipeTarget::Page => {
+                if self.two_pane {
+                    (self.width - self.list_width).max(1.)
+                } else {
+                    self.width.max(1.)
+                }
+            }
+            SwipeTarget::Thread => {
+                if self.thread_beside() {
+                    metrics::THREAD_WIDTH
+                } else if self.two_pane {
+                    (self.width - self.list_width - layout::GAP).max(1.)
+                } else {
+                    self.width.max(1.)
+                }
+            }
+        }
+    }
+
+    fn closing(&self) -> bool {
+        matches!(self.slide, Slide::Settle { back: true, .. })
+    }
+
+    fn finish_closing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.closing() {
+            return;
+        }
+        if let Some(target) = self.slide_target.take() {
+            self.slide = Slide::Rest;
+            match target {
+                SwipeTarget::Thread => self.close_thread(window, cx),
+                SwipeTarget::Page => self.close(window, cx),
+            }
+        }
+    }
+
+    fn finish_closing_state(&mut self, cx: &mut Context<Self>) {
+        if !self.closing() {
+            return;
+        }
+        if let Some(target) = self.slide_target.take() {
+            self.slide = Slide::Rest;
+            match target {
+                SwipeTarget::Thread => {
+                    if let View::Space(key) = &self.view
+                        && let Some(log) = self.logs.get_mut(key)
+                    {
+                        log.thread = None;
+                    }
+                }
+                SwipeTarget::Page => {
+                    self.leave_space(cx);
+                    self.view = View::Spaces;
+                }
+            }
+        }
+    }
+
+    fn slide_off(&mut self, target: SwipeTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let travel = self.travel(target);
+        if travel <= 0.0 {
+            match target {
+                SwipeTarget::Thread => self.close_thread(window, cx),
+                SwipeTarget::Page => self.close(window, cx),
+            }
+            return;
+        }
+        let from = if self.slide_target == Some(target) { self.slide.offset(travel) } else { 0. };
+        self.slide_target = Some(target);
+        self.slide = Slide::settle(from, travel, true);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn slide_offset(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<(SwipeTarget, f32)> {
+        let target = self.slide_target?;
+        if !self.surface_live(target) {
+            self.slide = Slide::Rest;
+            self.slide_target = None;
+            return None;
+        }
+        let travel = self.travel(target);
+        match self.slide.advance(travel, window, cx) {
+            Some(offset) => Some((target, offset)),
+            None => {
+                self.slide_target = None;
+                match target {
+                    SwipeTarget::Thread => self.close_thread(window, cx),
+                    SwipeTarget::Page => self.close(window, cx),
+                }
+                None
+            }
+        }
+    }
+
+    fn peek_swipe(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
+        if event.touch_phase == TouchPhase::Started {
+            *self.gesture_target.borrow_mut() =
+                (!self.has_video_lightbox()).then(|| at.and_then(|at| self.target_at(f32::from(at.x)))).flatten();
+        }
+        let can_start = self.gesture_target.borrow().is_some() && !self.has_video_lightbox();
+        self.swipe.feed(event, can_start)
+    }
+
+    fn press_surface(&mut self, target: SwipeTarget, at: Point<Pixels>) {
+        let live = !self.has_video_lightbox() && self.surface_live(target);
+        *self.gesture_target.borrow_mut() = live.then_some(target);
+        self.drag.press(at, live);
+    }
+
+    fn press_surface_listener(
+        target: SwipeTarget,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, event: &MouseDownEvent, _, _| {
+            if event.click_count == 1 {
+                this.press_surface(target, event.position);
+            }
+        })
+    }
+
+    fn feed_drag(&mut self, pointer: Pointer, cx: &mut Context<Self>) -> bool {
+        let step = self.drag.feed(pointer);
+        self.follow(step, cx)
+    }
+
+    fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+        let moves = !matches!(step, Step::Pass | Step::Consume);
+        if matches!(step, Step::Drag(_)) {
+            let target = *self.gesture_target.borrow();
+            if self.slide_target != target {
+                self.finish_closing_state(cx);
+                self.slide_target = target;
+            }
+        }
+        let Some(target) = self.slide_target.filter(|&target| self.surface_live(target)) else {
+            return !matches!(step, Step::Pass);
+        };
+        let took = self.slide.follow(step, self.travel(target));
+        if moves {
+            cx.notify();
+        }
+        took
     }
 
     /// ↑/↓ on the list: the highlight moves; with a space open, the one highlighted opens in its
@@ -2068,20 +2285,63 @@ impl ChatPane {
 
 // MARK: - Rendering
 
+fn chat_gesture_target(
+    has_page: bool,
+    has_thread: bool,
+    two_pane: bool,
+    thread_beside: bool,
+    width: f32,
+    list_width: f32,
+    x: f32,
+) -> Option<SwipeTarget> {
+    if !has_page {
+        return None;
+    }
+    let page_left = if two_pane { list_width + layout::GAP } else { 0. };
+    if x < page_left {
+        return None;
+    }
+    if has_thread {
+        if !thread_beside {
+            return Some(SwipeTarget::Thread);
+        }
+        let thread_left = width - metrics::THREAD_WIDTH;
+        if x >= thread_left {
+            return Some(SwipeTarget::Thread);
+        }
+        if x >= thread_left - layout::GAP {
+            return None;
+        }
+    }
+    Some(SwipeTarget::Page)
+}
+
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let sliding = self.slide_offset(window, cx);
+        let page_shift = match sliding {
+            Some((SwipeTarget::Page, offset)) => offset,
+            _ => 0.,
+        };
+        let thread_shift = match sliding {
+            Some((SwipeTarget::Thread, offset)) => offset,
+            _ => 0.,
+        };
         let list = self.render_list_island(p, window, cx);
         let page = match &self.view {
             View::Spaces => None,
             View::Space(key) => {
                 let key = key.clone();
-                Some(self.render_space(&key, p, window, cx))
+                Some(self.render_space(&key, thread_shift, p, window, cx))
             }
             View::NewChat => Some(self.render_form(p, window, cx)),
         };
-        let (two_pane, list_width) = (self.two_pane, self.list_width);
-        div()
+        let (two_pane, list_width, width) = (self.two_pane, self.list_width, self.width);
+        let swipe = swipe::scroll_capture(cx.entity(), Self::peek_swipe, Self::follow).absolute().inset_0();
+        let (drag_under, drag_over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
+        let body = div()
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::back))
@@ -2090,22 +2350,61 @@ impl Render for ChatPane {
             .on_action(cx.listener(Self::open_highlighted))
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::refresh))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| this.back(&Back, window, cx)),
+            )
             .relative()
             .size_full()
             .font_family(design::ui_font())
-            .text_size(px(design::type_scale(f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH).body))
+            .text_size(px(design::type_scale(compact).body))
             .text_color(p.text)
             .map(|d| match page {
-                // Beside the list, which is as wide as mail's; the gap between them moves its edge
-                // (`split.rs`).
-                Some(page) if two_pane => d
-                    .child(list.absolute().left_0().top_0().bottom_0().w(px(list_width)))
-                    .child(split::list_handle("chat-split").left(px(list_width + layout::GAP / 2.)))
-                    .child(div().absolute().top_0().bottom_0().right_0().left(px(list_width + layout::GAP)).child(page)),
-                // Over the list, which stays beneath it.
-                Some(page) => d.child(list.size_full()).child(div().absolute().top_0().left_0().size_full().child(page)),
+                // Beside the list, which widens back to full width as the page slides off, as mail's
+                // reader does (`ui/mod.rs`).
+                Some(page) if two_pane => {
+                    let travel = (width - list_width).max(1.);
+                    let (cur_list_width, page_left) = if page_shift >= 0. {
+                        let split = (1. - page_shift / travel).clamp(0., 1.);
+                        let lw = width + (list_width - width) * split;
+                        (lw, lw + layout::GAP)
+                    } else {
+                        (list_width, list_width + layout::GAP + page_shift)
+                    };
+                    d.when(page_shift != 0., |d| d.overflow_hidden())
+                        .child(list.absolute().left_0().top_0().bottom_0().w(px(cur_list_width)))
+                        .when(page_shift == 0., |d| {
+                            d.child(split::list_handle("chat-split").left(px(cur_list_width + layout::GAP / 2.)))
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(page_left))
+                                .w(px((width - list_width - layout::GAP).max(0.)))
+                                .child(page),
+                        )
+                }
+                // Over the list, which sits back and darkens beneath it as the page slides.
+                Some(page) => {
+                    let travel = self.travel(SwipeTarget::Page);
+                    let (beneath, dim) = design::motion::beneath(1. - page_shift.abs() / travel.max(1.), travel, p.dark);
+                    let scrim_radius = if compact { 0. } else { radius::PANE };
+                    d.when(beneath != 0. || page_shift != 0., |d| d.overflow_hidden())
+                        .child(div().absolute().top_0().bottom_0().w_full().left(px(beneath)).child(list.size_full()))
+                        .when(dim > 0., |d| d.child(scrim(dim, scrim_radius)))
+                        .child(div().absolute().top_0().bottom_0().w_full().left(px(page_shift)).child(page))
+                }
                 None => d.child(list.size_full()),
-            })
+            });
+        div()
+            .relative()
+            .size_full()
+            .child(drag_under.absolute().size_0())
+            .child(body)
+            .child(swipe)
+            .child(drag_over.absolute().size_0())
     }
 }
 
@@ -2313,7 +2612,7 @@ impl ChatPane {
     /// toolbar (✕ beside the list, ‹ over it), which shows the title once the log's heading has
     /// scrolled under it; the composer below. An open thread's island sits beside it when the page
     /// has room, else over it (MS-329).
-    fn render_space(&self, key: &Key, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_space(&self, key: &Key, thread_shift: f32, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let title = self.space_title(key);
         let log: AnyElement = match self.logs.get(key) {
             Some(log) => {
@@ -2334,11 +2633,12 @@ impl ChatPane {
         cx.on_next_frame(window, |this, _, cx| this.note_log_top(cx));
         let (glyph, tip) = if self.two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
         let close = icon_button("chat-close", glyph, tip, true, p.glyph)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx)));
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.slide_off(SwipeTarget::Page, window, cx)));
         let toolbar_title = (self.log_top == ReaderTop::PastTitle).then(|| title.clone());
         let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let space = (if compact { div().relative().overflow_hidden().bg(p.background) } else { island(p.background, p) })
             .occlude()
+            .on_mouse_down(MouseButton::Left, Self::press_surface_listener(SwipeTarget::Page, cx))
             .size_full()
             .flex()
             .flex_col()
@@ -2352,8 +2652,11 @@ impl ChatPane {
                     }))
                     .child(log)
                     .when(self.log_top != ReaderTop::Top, |d| d.child(page_scrim(p)))
-                    .child(page_toolbar("chat-toolbar", close, toolbar_title, p, window, cx).when_some(
-                        self.partner_address(key),
+                    .child(
+                        page_toolbar("chat-toolbar", close, toolbar_title, p, window, cx)
+                            .on_mouse_down(MouseButton::Left, Self::press_surface_listener(SwipeTarget::Page, cx))
+                            .when_some(
+                                self.partner_address(key),
                         |bar, address| {
                             let mail = icon_button("chat-mail", Icon::Mail, format!("Mail with {title}"), true, p.glyph)
                                 .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(MailWith(address.clone()))));
@@ -2370,11 +2673,22 @@ impl ChatPane {
                 .size_full()
                 .flex()
                 .gap(px(layout::GAP))
+                .when(thread_shift != 0., |d| d.overflow_hidden())
                 .child(div().flex_1().min_w_0().h_full().child(space))
-                .child(div().flex_shrink_0().w(px(metrics::THREAD_WIDTH)).h_full().child(thread))
+                .child(div().relative().flex_shrink_0().w(px(metrics::THREAD_WIDTH)).h_full().left(px(thread_shift)).child(thread))
                 .into_any_element()
         } else {
-            div().relative().size_full().child(space).child(div().absolute().top_0().left_0().size_full().child(thread)).into_any_element()
+            let travel = self.travel(SwipeTarget::Thread);
+            let (beneath, dim) = design::motion::beneath(1. - thread_shift.abs() / travel.max(1.), travel, p.dark);
+            let scrim_radius = if compact { 0. } else { radius::PANE };
+            div()
+                .relative()
+                .size_full()
+                .when(beneath != 0. || thread_shift != 0., |d| d.overflow_hidden())
+                .child(div().absolute().top_0().bottom_0().w_full().left(px(beneath)).child(space))
+                .when(dim > 0., |d| d.child(scrim(dim, scrim_radius)))
+                .child(div().absolute().top_0().bottom_0().w_full().left(px(thread_shift)).child(thread))
+                .into_any_element()
         }
     }
 
@@ -2393,10 +2707,11 @@ impl ChatPane {
         .size_full();
         let (glyph, tip) = if beside { (Icon::Close, "Close thread (Esc)") } else { (Icon::Back, "Back to the conversation (Esc)") };
         let close = icon_button("chat-thread-close", glyph, tip, true, p.glyph)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_thread(window, cx)));
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.slide_off(SwipeTarget::Thread, window, cx)));
         let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         (if compact { div().relative().overflow_hidden().bg(p.background) } else { island(p.background, p) })
             .occlude()
+            .on_mouse_down(MouseButton::Left, Self::press_surface_listener(SwipeTarget::Thread, cx))
             .size_full()
             .flex()
             .flex_col()
@@ -2408,7 +2723,10 @@ impl ChatPane {
                     .child(entries)
                     // The page's own surface under the toolbar's band until something scrolls there.
                     .child(page_scrim(p))
-                    .child(page_toolbar("chat-thread-toolbar", close, Some("Thread".into()), p, window, cx)),
+                    .child(
+                        page_toolbar("chat-thread-toolbar", close, Some("Thread".into()), p, window, cx)
+                            .on_mouse_down(MouseButton::Left, Self::press_surface_listener(SwipeTarget::Thread, cx)),
+                    ),
             )
             .child(self.render_composer(Surface::Thread, compact, "Reply in thread".into(), p, cx))
             .into_any_element()
@@ -3046,9 +3364,11 @@ impl ChatPane {
             .child("Start");
         let (glyph, tip) = if self.two_pane { (Icon::Close, "Close (Esc)") } else { (Icon::Back, "Back (Esc)") };
         let close = icon_button("chat-form-close", glyph, tip, true, p.glyph)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx)));
-        island(p.background, p)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.slide_off(SwipeTarget::Page, window, cx)));
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        (if compact { div().relative().overflow_hidden().bg(p.background) } else { island(p.background, p) })
             .occlude()
+            .on_mouse_down(MouseButton::Left, Self::press_surface_listener(SwipeTarget::Page, cx))
             .size_full()
             .child(
                 div().size_full().flex().justify_center().pt(px(layout::HEADER_HEIGHT + space::S16)).child(
@@ -3084,7 +3404,10 @@ impl ChatPane {
                         ),
                 ),
             )
-            .child(page_toolbar("chat-form-toolbar", close, None, p, window, cx))
+            .child(
+                page_toolbar("chat-form-toolbar", close, None, p, window, cx)
+                    .on_mouse_down(MouseButton::Left, Self::press_surface_listener(SwipeTarget::Page, cx)),
+            )
             .into_any_element()
     }
 }
@@ -3476,6 +3799,133 @@ mod tests {
         assert!(wide.size.width <= col.size.width * log_metrics::SHARE, "wide body exceeded column share: {wide:?} vs {col:?}");
         assert!(short.size.width < px(200.), "short own message should hug content, not stretch: {short:?}");
         assert!((short.right() - wide.right()).abs() < px(1.5), "own messages should align at right edge: {short:?} vs {wide:?}");
+    }
+
+    #[test]
+    fn gesture_target_picks_the_surface_under_the_pointer() {
+        // No page open.
+        assert_eq!(chat_gesture_target(false, false, false, false, 400., 400., 120.), None);
+        // Compact / single-pane: page covers whole width.
+        assert_eq!(chat_gesture_target(true, false, false, false, 400., 400., 50.), Some(SwipeTarget::Page));
+        // Compact with thread covering space: thread takes the gesture.
+        assert_eq!(chat_gesture_target(true, true, false, false, 400., 400., 50.), Some(SwipeTarget::Thread));
+        // Two-pane (list 0..340, gap 340..352, page 352..900): over list or gap does nothing.
+        assert_eq!(chat_gesture_target(true, false, true, false, 900., 340., 120.), None);
+        assert_eq!(chat_gesture_target(true, false, true, false, 900., 340., 345.), None);
+        assert_eq!(chat_gesture_target(true, false, true, false, 900., 340., 500.), Some(SwipeTarget::Page));
+        // Two-pane with thread beside space on right (thread starts at width - THREAD_WIDTH).
+        let width = 1200.;
+        let thread_left = width - metrics::THREAD_WIDTH;
+        assert_eq!(chat_gesture_target(true, true, true, true, width, 340., 500.), Some(SwipeTarget::Page));
+        assert_eq!(chat_gesture_target(true, true, true, true, width, 340., thread_left - 4.), None);
+        assert_eq!(chat_gesture_target(true, true, true, true, width, 340., thread_left + 10.), Some(SwipeTarget::Thread));
+    }
+
+    #[gpui::test]
+    fn compact_swipe_back_exits_open_chat_space_and_thread(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui::init(cx);
+            design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+        });
+        let (pane, cx) = cx.add_window_view(|window, cx| ChatPane::new(window, cx));
+        let key = Key { account: "sam@example.com".into(), space: "spaces/demo".into() };
+        pane.update(cx, |chat, cx| {
+            chat.set_split(390., 390., false, cx);
+            chat.view = View::Space(key.clone());
+            chat.logs.insert(key.clone(), Log::new());
+            chat.logs.get_mut(&key).unwrap().open_thread("threads/1".into());
+        });
+        cx.run_until_parked();
+
+        let swipe = |cx: &mut gpui::VisualTestContext,
+                     pane: &Entity<ChatPane>,
+                     dx: f32,
+                     dy: f32,
+                     mid_check: &dyn Fn(&ChatPane)| {
+            let at = gpui::point(px(195.), px(240.));
+            let event = |touch_phase, x: f32, y: f32| ScrollEvent {
+                position: at,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(x), px(y))),
+                modifiers: gpui::Modifiers::default(),
+                touch_phase,
+                ..Default::default()
+            };
+            let feed = |cx: &mut gpui::VisualTestContext, ev: ScrollEvent| {
+                let step = pane.read_with(cx, |chat, _| chat.peek_swipe(&ev, Some(at)));
+                if !matches!(step, Step::Pass | Step::Consume) {
+                    pane.update(cx, |chat, cx| {
+                        chat.follow(step, cx);
+                    });
+                }
+            };
+            feed(cx, event(TouchPhase::Started, 0., 0.));
+            for _ in 0..8 {
+                feed(cx, event(TouchPhase::Moved, dx / 8., dy / 8.));
+            }
+            pane.read_with(cx, |chat, _| mid_check(chat));
+            feed(cx, event(TouchPhase::Ended, 0., 0.));
+            let _ = cx.refresh();
+            std::thread::sleep(Duration::from_millis(10));
+            pane.update(cx, |chat, cx| {
+                if let Slide::Settle { start, .. } = &mut chat.slide {
+                    *start -= Duration::from_secs(2);
+                    cx.notify();
+                }
+            });
+            let _ = cx.refresh();
+        };
+
+        // Vertical scroll must not start a back-swipe.
+        swipe(cx, &pane, 2., 180., &|chat| {
+            assert!(!matches!(chat.slide, Slide::Drag(_)), "vertical scroll must not drag");
+        });
+        pane.read_with(cx, |chat, _| {
+            assert!(chat.has_open_thread(), "vertical scroll should keep thread open");
+            assert!(matches!(chat.view, View::Space(_)), "vertical scroll should keep space open");
+        });
+
+        // Horizontal left-swipe with thread open closes only the thread (past 1/3 of 390 = 130).
+        swipe(cx, &pane, -180., 0., &|chat| {
+            assert_eq!(chat.slide_target, Some(SwipeTarget::Thread));
+            assert!(matches!(chat.slide, Slide::Drag(off) if (off + 180.).abs() < 1.));
+        });
+        pane.read_with(cx, |chat, _| {
+            assert!(!chat.has_open_thread(), "thread should close once swipe-back settles");
+            assert!(matches!(chat.view, View::Space(_)), "space should remain open after closing thread");
+        });
+
+        // Short horizontal swipe springs back without exiting the space.
+        swipe(cx, &pane, 40., 0., &|chat| {
+            assert_eq!(chat.slide_target, Some(SwipeTarget::Page));
+            assert!(matches!(chat.slide, Slide::Drag(off) if (off - 40.).abs() < 1.));
+        });
+        pane.read_with(cx, |chat, _| {
+            assert!(matches!(chat.view, View::Space(_)), "short swipe must spring back and keep space open");
+        });
+
+        // Horizontal left-swipe past threshold exits the open space back to View::Spaces.
+        swipe(cx, &pane, -180., 0., &|chat| {
+            assert_eq!(chat.slide_target, Some(SwipeTarget::Page));
+            assert!(matches!(chat.slide, Slide::Drag(off) if (off + 180.).abs() < 1.));
+        });
+        pane.read_with(cx, |chat, _| {
+            assert!(matches!(chat.view, View::Spaces), "left swipe-back should exit Chat space to space list");
+        });
+
+        // Horizontal right-swipe past threshold also exits the open space back to View::Spaces.
+        pane.update(cx, |chat, cx| {
+            chat.view = View::Space(key.clone());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        swipe(cx, &pane, 180., 0., &|chat| {
+            assert_eq!(chat.slide_target, Some(SwipeTarget::Page));
+            assert!(matches!(chat.slide, Slide::Drag(off) if (off - 180.).abs() < 1.));
+        });
+        pane.read_with(cx, |chat, _| {
+            assert!(matches!(chat.view, View::Spaces), "right swipe-back should exit Chat space to space list");
+        });
     }
 }
 
