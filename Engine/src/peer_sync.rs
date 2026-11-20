@@ -797,6 +797,12 @@ impl PeerSync {
         Ok(Stored { endpoint_id, namespace: file.namespace, paused: file.paused })
     }
 
+    /// Reads this device's persisted endpoint id without opening sync or reading `sync.json`.
+    pub fn stored_endpoint_id(support_directory: &Path) -> Option<String> {
+        let directory = support_directory.join(FOLDER);
+        read_secret_key(&directory).ok().flatten().map(|key| key.public().to_string())
+    }
+
     /// Whether another process has sync open on `support_directory`; asks the lock only, so
     /// call it while this process hasn't opened sync there.
     pub fn busy(support_directory: &Path) -> bool {

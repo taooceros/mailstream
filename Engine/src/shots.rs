@@ -550,10 +550,13 @@ fn now_unix() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64()
 }
 
+/// The device endpoint ID reported for this device in screenshot mode.
+pub(crate) const THIS_DEVICE_ID: &str = "shot7e4d9a1c8b2f0e6a3d5c";
+
 impl DeviceSyncMock {
     fn status(&self) -> DeviceSyncStatus {
         let now = now_unix();
-        let this_id = "shot7e4d9a1c8b2f0e6a3d5c".to_string();
+        let this_id = THIS_DEVICE_ID.to_string();
         let mut devices = Vec::new();
         if self.grouped {
             devices.push(SyncDevice {

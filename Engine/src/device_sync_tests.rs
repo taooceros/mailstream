@@ -109,6 +109,8 @@ fn paired_engines_sync_whitelisted_settings_and_remote_content() {
     call(&engine_a, "config.set", json!({ "key": "autoRead.enabled", "value": "true" })).unwrap();
     call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "7" })).unwrap();
     call(&engine_a, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+    call(&engine_a, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "selected" })).unwrap();
+    call(&engine_a, "config.add", json!({ "key": "aiTagging.devices", "values": ["dev-alpha", "dev-beta"] })).unwrap();
     call(&engine_a, "config.add", json!({ "key": "aiTagging.localOnlyAccounts", "values": ["me@gmail.com"] })).unwrap();
 
     until("B to receive all whitelisted settings from A", || {
@@ -116,6 +118,8 @@ fn paired_engines_sync_whitelisted_settings_and_remote_content() {
             && setting_value(&engine_b, "autoRead.enabled") == json!(true)
             && setting_value(&engine_b, "autoRead.days") == json!(7)
             && setting_value(&engine_b, "aiTagging.enabled") == json!(false)
+            && setting_value(&engine_b, "aiTagging.devicesMode") == json!("selected")
+            && setting_value(&engine_b, "aiTagging.devices") == json!(["dev-alpha", "dev-beta"])
             && setting_value(&engine_b, "aiTagging.localOnlyAccounts") == json!(["me@gmail.com"])
     });
     let mut saw_settings_event = false;

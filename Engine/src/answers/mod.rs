@@ -71,10 +71,22 @@ pub struct Status {
     pub ai_tagging: TaggingStatus,
 }
 
-/// The AI tagger: whether it is on, and what it is doing or why it stopped.
+fn default_true() -> bool {
+    true
+}
+
+/// The AI tagger: whether it is on, whether this device runs it, and what it is doing or why it
+/// stopped.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
 pub struct TaggingStatus {
     pub enabled: bool,
+    /// Whether this device runs AI tagging (`aiTagging.enabled` and allowed by
+    /// `aiTagging.devicesMode` / `aiTagging.devices`). False when other devices are selected;
+    /// tags still display and sync with the server.
+    #[serde(default = "default_true")]
+    #[uniffi(default = true)]
+    pub active_here: bool,
     /// A line for people (progress or the last failure); nil while idle.
     pub status: Option<String>,
     /// `status` is the last run's failure (omp or Apple Intelligence unavailable, a failed run);
@@ -198,6 +210,8 @@ pub enum SettingValue {
     Text { text: String },
     /// Lowercased email addresses, sorted and unique.
     Addresses { addresses: Vec<String> },
+    /// Lowercased non-empty tokens (e.g. device endpoint IDs), sorted and unique.
+    Strings { values: Vec<String> },
 }
 
 impl SettingValue {
@@ -208,6 +222,7 @@ impl SettingValue {
             Self::Number { .. } => "integer",
             Self::Text { .. } => "string",
             Self::Addresses { .. } => "array of email addresses",
+            Self::Strings { .. } => "array of strings",
         }
     }
 
@@ -217,6 +232,7 @@ impl SettingValue {
             "boolean" => Self::Flag { enabled: value.as_bool()? },
             "integer" => Self::Number { value: value.as_i64()? },
             "string" => Self::Text { text: value.as_str()?.into() },
+            "array of strings" => Self::Strings { values: serde_json::from_value(value.clone()).ok()? },
             _ => Self::Addresses { addresses: serde_json::from_value(value.clone()).ok()? },
         })
     }
@@ -227,6 +243,7 @@ impl SettingValue {
             Self::Number { value } => Value::from(*value),
             Self::Text { text } => Value::from(text.as_str()),
             Self::Addresses { addresses } => Value::from(addresses.clone()),
+            Self::Strings { values } => Value::from(values.clone()),
         }
     }
 
@@ -237,6 +254,7 @@ impl SettingValue {
             Self::Number { value } => value.to_string(),
             Self::Text { text } => text.clone(),
             Self::Addresses { addresses } => serde_json::to_string(addresses).expect("strings encode"),
+            Self::Strings { values } => serde_json::to_string(values).expect("strings encode"),
         }
     }
 }

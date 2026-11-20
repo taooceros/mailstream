@@ -110,6 +110,9 @@ impl ConversationTag {
 
 /// Why tag edits and retagging are refused while tagging is off.
 pub const OFF_MESSAGE: &str = "AI tagging is off (aiTagging.enabled).";
+/// Why retagging is refused on a device not selected to run AI tagging.
+pub const NOT_TAGGER_MESSAGE: &str =
+    "This device is not selected for AI tagging (aiTagging.devicesMode / aiTagging.devices); run Re-tag on a selected tagging device.";
 
 /// Settings whose change deserves another try at once: a fixed omp or model, another backend.
 const RETRY_SETTINGS: [Setting; 5] = [
@@ -149,6 +152,8 @@ struct State {
     /// `status` is the last run's failure.
     failed: bool,
     enabled: bool,
+    /// `enabled` and this device is allowed by `aiTagging.devicesMode` / `aiTagging.devices`.
+    active_here: bool,
     /// The `RETRY_SETTINGS` values last seen.
     retry_values: Vec<Value>,
     /// Keys the model was asked about but skipped; automatic passes leave them alone.
@@ -208,8 +213,10 @@ impl Tagging {
     ) -> Arc<Self> {
         let tools = Arc::new(tool_environment.map_or_else(Tools::new, Tools::fixed));
         let tagger = Tagger::new(tools.clone(), cache.root.clone(), apple_tagger);
+        let enabled = settings.value(Setting::AiTaggingEnabled) == Value::Bool(true);
         let state = State {
-            enabled: settings.value(Setting::AiTaggingEnabled) == Value::Bool(true),
+            enabled,
+            active_here: enabled && allows_this_device(&settings),
             retry_values: RETRY_SETTINGS.iter().map(|setting| settings.value(*setting)).collect(),
             sync_value: settings.value(Setting::AiTaggingLocalOnlyAccounts),
             ..State::default()
@@ -229,7 +236,7 @@ impl Tagging {
         });
         let weak: Weak<Self> = Arc::downgrade(&tagging);
         events.listen(move |event| {
-            if event == "settings"
+            if (event == "settings" || event == "deviceSync")
                 && let Some(tagging) = weak.upgrade()
             {
                 tagging.settings_changed();
@@ -253,7 +260,7 @@ impl Tagging {
             return;
         }
         let _ = self.pusher.set(Box::new(pusher));
-        if self.state().enabled {
+        if self.state().active_here {
             self.tools.start();
         }
         let weak = Arc::downgrade(self);
@@ -306,6 +313,12 @@ impl Tagging {
         self.state().enabled
     }
 
+    /// Whether this device runs AI tagging (`aiTagging.enabled` and allowed by
+    /// `aiTagging.devicesMode` / `aiTagging.devices`).
+    pub fn is_active_here(&self) -> bool {
+        self.state().active_here
+    }
+
     /// What tagging is doing or why it stopped; None while idle.
     pub fn status(&self) -> Option<String> {
         self.state().status.clone()
@@ -356,6 +369,7 @@ impl Tagging {
 
     fn settings_changed(self: &Arc<Self>) {
         let enabled = self.settings.value(Setting::AiTaggingEnabled) == Value::Bool(true);
+        let active_here = enabled && allows_this_device(&self.settings);
         let values: Vec<Value> = RETRY_SETTINGS.iter().map(|setting| self.settings.value(*setting)).collect();
         let sync_value = self.settings.value(Setting::AiTaggingLocalOnlyAccounts);
         let (retry, sync) = {
@@ -366,7 +380,7 @@ impl Tagging {
             state.sync_value = sync_value;
             (changed, sync)
         };
-        self.apply(enabled);
+        self.apply(enabled, active_here);
         if retry {
             self.retry();
         } else if sync && self.is_enabled() {
@@ -381,35 +395,49 @@ impl Tagging {
         value.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_lowercase).collect()
     }
 
-    fn apply(self: &Arc<Self>, enabled: bool) {
+    fn apply(self: &Arc<Self>, enabled: bool, active_here: bool) {
         let mut state = self.state();
-        if state.enabled == enabled {
+        if state.enabled == enabled && state.active_here == active_here {
             return;
         }
+        let was_enabled = state.enabled;
+        let was_active = state.active_here;
         state.enabled = enabled;
+        state.active_here = active_here;
         state.attempted.clear();
         state.backoff_until = None;
         if let Some(debounce) = state.debounce.take() {
             debounce.abort();
         }
-        if enabled {
-            drop(state);
-            self.tools.start();
-            self.request();
-        } else {
+        if !enabled {
+            state.retagging = false;
             Self::cancel(&mut state);
             self.set_status(&mut state, None, false);
+            return;
         }
+        if was_active && !active_here {
+            state.retagging = false;
+            Self::cancel(&mut state);
+            self.set_status(&mut state, None, false);
+            drop(state);
+            self.request();
+            return;
+        }
+        drop(state);
+        if active_here && (!was_enabled || !was_active) {
+            self.tools.start();
+        }
+        self.request();
     }
 
     fn retry(self: &Arc<Self>) {
-        let enabled = {
+        let active = {
             let mut state = self.state();
             state.attempted.clear();
             state.backoff_until = None;
-            state.enabled
+            state.active_here
         };
-        if enabled {
+        if active {
             self.request();
         }
     }
@@ -472,14 +500,20 @@ impl Tagging {
     /// Syncs the tags with the server, then tags the newest untagged candidates in batches, one
     /// omp process at a time, and puts the new tags on the server.
     async fn pass(&self) {
-        let (enabled, backoff) = {
-            let state = self.state();
-            (state.enabled, state.backoff_until)
-        };
-        if !enabled {
+        if !self.state().enabled {
             return;
         }
         self.sync_server().await;
+        let (enabled, active_here, backoff) = {
+            let state = self.state();
+            (state.enabled, state.active_here, state.backoff_until)
+        };
+        if !enabled || !active_here {
+            let mut state = self.state();
+            state.retagging = false;
+            self.set_status(&mut state, None, false);
+            return;
+        }
         if backoff.is_some_and(|until| until > Instant::now()) {
             return;
         }
@@ -879,12 +913,41 @@ impl Tagging {
                 if !self.is_enabled() {
                     return Err(EngineError::new("disabled", OFF_MESSAGE));
                 }
+                if !self.is_active_here() {
+                    return Err(EngineError::new("disabled", NOT_TAGGER_MESSAGE));
+                }
                 self.retag_all();
                 Ok(json!({ "started": true }))
             }
             _ => unreachable!("{command} is a tagging command"),
         }
     }
+}
+
+fn local_device_id(settings: &Settings) -> Option<String> {
+    #[cfg(feature = "shots")]
+    if crate::shots::running() {
+        return Some(crate::shots::THIS_DEVICE_ID.to_string());
+    }
+    crate::peer_sync::PeerSync::stored_endpoint_id(settings.file().directory())
+}
+
+/// Whether this device is permitted to run AI tagging according to `aiTagging.devicesMode` and
+/// `aiTagging.devices`.
+fn allows_this_device(settings: &Settings) -> bool {
+    if settings.value(Setting::AiTaggingDevicesMode).as_str() != Some("selected") {
+        return true;
+    }
+    let Some(me) = local_device_id(settings) else {
+        return false;
+    };
+    settings
+        .value(Setting::AiTaggingDevices)
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|id| id.eq_ignore_ascii_case(&me))
 }
 
 /// A topic label as kept: trimmed, at most `omp::MAX_LABEL_LENGTH` characters; None when empty.

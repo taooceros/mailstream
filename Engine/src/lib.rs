@@ -726,6 +726,7 @@ impl Core {
             },
             ai_tagging: answers::TaggingStatus {
                 enabled: tagging.is_enabled(),
+                active_here: tagging.is_active_here(),
                 status: tagging.status(),
                 failed: tagging.failed(),
             },

@@ -6,6 +6,8 @@ import Foundation
 /// an agent or an editor.
 nonisolated enum Setting: String, CaseIterable, Sendable {
     case aiTaggingEnabled = "aiTagging.enabled"
+    case aiTaggingDevicesMode = "aiTagging.devicesMode"
+    case aiTaggingDevices = "aiTagging.devices"
     case aiTaggingBackend = "aiTagging.backend"
     case aiTaggingModel = "aiTagging.model"
     case aiTaggingOmpPath = "aiTagging.ompPath"
@@ -34,6 +36,8 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case choice([String])
         /// Lowercased email addresses, kept sorted and unique.
         case addresses
+        /// Lowercased non-empty tokens without whitespace (e.g. device IDs), kept sorted and unique.
+        case strings
     }
 
     /// What the key holds, its default and its description: the one place a new setting is
@@ -43,6 +47,12 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .aiTaggingEnabled:
             (.bool, true,
              "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action.")
+        case .aiTaggingDevicesMode:
+            (.choice(["all", "selected"]), "all",
+             "Which paired devices run AI tagging: all lets every device tag; selected runs AI tagging only on the devices in aiTagging.devices (other devices still show and sync tags from the server). Synced across paired devices when Device sync is on.")
+        case .aiTaggingDevices:
+            (.strings, [],
+             "Paired device IDs allowed to run AI tagging when aiTagging.devicesMode is selected. Empty means no device runs AI tagging automatically while tags still display and sync. Synced across paired devices when Device sync is on.")
         case .aiTaggingBackend:
             (.choice(["omp", "apple"]), "omp",
              "Who tags: omp runs the model aiTagging.model names; apple runs Apple Intelligence's on-device model (macOS 26 or later, Apple Intelligence on).")
@@ -121,6 +131,15 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
                 throw ControlError.invalidSetting("\(rawValue): \"\(bad)\" is not an email address.")
             }
             return .strings(Array(Set(addresses)).sorted())
+        case .strings:
+            guard let items = value.array, let strings = value.strings, strings.count == items.count else {
+                throw ControlError.invalidSetting("\(rawValue) must be an array of strings.")
+            }
+            let tokens = strings.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            if let bad = tokens.first(where: { $0.isEmpty || $0.contains(where: \.isWhitespace) }) {
+                throw ControlError.invalidSetting("\(rawValue): \"\(bad)\" is not a valid ID.")
+            }
+            return .strings(Array(Set(tokens)).sorted())
         }
     }
 
@@ -139,7 +158,7 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
             return try validate(.int(int))
         case .string, .choice:
             return try validate(.string(text))
-        case .addresses:
+        case .addresses, .strings:
             if trimmed.hasPrefix("["), let parsed = try? JSON.decode(Data(trimmed.utf8)) { return try validate(parsed) }
             let parts = trimmed.split(separator: ",").map { String($0) }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
             return try validate(.strings(parts))
@@ -162,6 +181,10 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
         case .addresses:
             out["type"] = "array"
             out["items"] = ["type": "string", "format": "email"]
+            out["uniqueItems"] = true
+        case .strings:
+            out["type"] = "array"
+            out["items"] = ["type": "string"]
             out["uniqueItems"] = true
         }
         return .object(out)
@@ -286,7 +309,11 @@ nonisolated extension CommandID.Local {
             return setting.entry()
         case .configAdd, .configRemove:
             let setting = try setting()
-            guard case .addresses = setting.kind else { throw ControlError.usage("\(setting.rawValue) is not a list setting.") }
+            guard case .addresses = setting.kind else {
+                guard case .strings = setting.kind else {
+                    throw ControlError.usage("\(setting.rawValue) is not a list setting.")
+                }
+            }
             let words = (args["values"]?.strings ?? []).flatMap { $0.split(separator: ",").map(String.init) }
             let given = try setting.validate(.strings(words)).strings ?? []
             let current = setting.value(in: SettingsFile.read().values).strings ?? []
@@ -322,6 +349,7 @@ nonisolated extension Setting {
             out["type"] = "string"
             out["choices"] = .strings(words)
         case .addresses: out["type"] = "array of email addresses"
+        case .strings: out["type"] = "array of strings"
         }
         return .object(out)
     }

@@ -195,6 +195,8 @@ const SECTIONS: &[(&str, &[&str])] = &[
 const FLUTTER_ONLY: &str = "flutter.";
 
 const AI_TAGGING: &str = "aiTagging.enabled";
+const TAGGING_DEVICES_MODE: &str = "aiTagging.devicesMode";
+const TAGGING_DEVICES: &str = "aiTagging.devices";
 const LOCAL_ONLY_ACCOUNTS: &str = "aiTagging.localOnlyAccounts";
 const AUTO_READ: &str = "autoRead.enabled";
 const AUTO_READ_DAYS: &str = "autoRead.days";
@@ -207,6 +209,8 @@ const ADD: &str = "+add";
 pub(crate) fn title(key: &str) -> &str {
     match key {
         "aiTagging.enabled" => "Sort and flag mail with AI",
+        "aiTagging.devicesMode" => "Tagging devices",
+        "aiTagging.devices" => "Selected tagging devices",
         "aiTagging.backend" => "Tagged by",
         "aiTagging.model" => "Model",
         "aiTagging.ompPath" => "omp executable",
@@ -231,6 +235,8 @@ pub(crate) fn title(key: &str) -> &str {
 fn choice_title(word: &str) -> &str {
     match word {
         "apple" => "Apple Intelligence",
+        "all" => "All devices",
+        "selected" => "Selected devices",
         other => other,
     }
 }
@@ -241,7 +247,7 @@ fn in_section(key: &str, prefixes: &[&str]) -> bool {
 
 /// Shown in some section of this window.
 fn shown(key: &str) -> bool {
-    !key.starts_with(FLUTTER_ONLY)
+    !key.starts_with(FLUTTER_ONLY) && key != TAGGING_DEVICES
 }
 
 // MARK: - The window
@@ -510,7 +516,7 @@ impl Settings {
         if batch.contains(&Event::Accounts) {
             self.load_accounts(cx);
         }
-        if batch.iter().any(|e| matches!(e, Event::Settings | Event::Accounts | Event::Sync | Event::Problems)) {
+        if batch.iter().any(|e| matches!(e, Event::Settings | Event::Accounts | Event::Sync | Event::Problems | Event::DeviceSync)) {
             self.load_status(cx);
         }
         if batch.contains(&Event::DeviceSync) {
@@ -1661,7 +1667,7 @@ impl Settings {
             let mut rows: Vec<AnyElement> = settings
                 .settings
                 .iter()
-                .filter(|entry| in_section(&entry.key, prefixes))
+                .filter(|entry| shown(&entry.key) && in_section(&entry.key, prefixes))
                 .map(|entry| self.render_entry(entry, mobile, p, window, cx))
                 .collect();
             let tagging = prefixes.contains(&"aiTagging.");
@@ -1706,6 +1712,9 @@ impl Settings {
     }
 
     fn render_entry(&self, entry: &SettingEntry, mobile: bool, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if entry.key == TAGGING_DEVICES_MODE {
+            return self.render_tagging_devices(entry, mobile, p, window, cx);
+        }
         if entry.key == LOCAL_ONLY_ACCOUNTS {
             return self.render_sync_accounts(entry, p, cx);
         }
@@ -1754,7 +1763,7 @@ impl Settings {
             SettingValue::Text { .. } => {
                 self.render_field(&key, if compact { 200. } else { 220. }, None, p, window, cx)
             }
-            SettingValue::Addresses { .. } => None,
+            SettingValue::Addresses { .. } | SettingValue::Strings { .. } => None,
         };
         let reset_key = key.clone();
         let reset_btn = entry.changed.then(|| {
@@ -1987,22 +1996,222 @@ impl Settings {
             .into_any_element()
     }
 
+    /// Whether this device currently runs AI tagging automatically (`aiTagging.enabled` and
+    /// included by `aiTagging.devicesMode` / `aiTagging.devices`).
+    fn tagging_active_here(&self) -> bool {
+        if self.flag(AI_TAGGING) != Some(true) {
+            return false;
+        }
+        let mode = match self.entry(TAGGING_DEVICES_MODE).map(|entry| &entry.value) {
+            Some(SettingValue::Text { text }) => text.as_str(),
+            _ => "all",
+        };
+        if mode != "selected" {
+            return true;
+        }
+        let selected: &[String] = match self.entry(TAGGING_DEVICES).map(|entry| &entry.value) {
+            Some(SettingValue::Strings { values }) => values,
+            _ => &[],
+        };
+        if let Some(me) = self.device_sync.as_ref().and_then(|s| s.endpoint_id.as_deref()) {
+            return selected.iter().any(|id| id.eq_ignore_ascii_case(me));
+        }
+        self.status.as_ref().is_some_and(|status| status.tagging.active_here)
+    }
+
+    /// `aiTagging.devicesMode` and `aiTagging.devices` together: choose whether all paired
+    /// devices run AI tagging or only selected devices (multi-select; unselected devices still
+    /// display and sync tags from the server).
+    fn render_tagging_devices(
+        &self,
+        entry: &SettingEntry,
+        mobile: bool,
+        p: &'static Palette,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let mode = match &entry.value {
+            SettingValue::Text { text } => text.as_str(),
+            _ => "all",
+        };
+        let selected: Vec<String> = match self.entry(TAGGING_DEVICES).map(|entry| &entry.value) {
+            Some(SettingValue::Strings { values }) => values.clone(),
+            _ => Vec::new(),
+        };
+        let mode_buttons = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(4.))
+            .children(entry.choices.iter().map(|word| {
+                let chosen = word == mode;
+                let word = word.clone();
+                button(
+                    ElementId::Name(format!("{TAGGING_DEVICES_MODE}={word}").into()),
+                    choice_title(&word).to_owned(),
+                    if chosen { ButtonKind::Primary } else { ButtonKind::Secondary },
+                    ControlSize::small(mobile),
+                    true,
+                    p,
+                )
+                .when(!chosen, |b| {
+                    b.on_click(cx.listener(move |this, _, _, cx| {
+                        this.write(TAGGING_DEVICES_MODE.into(), Some(SettingValue::Text { text: word.clone() }), cx)
+                    }))
+                })
+            }));
+        let reset_btn = entry.changed.then(|| {
+            button(
+                ElementId::Name(format!("reset-{TAGGING_DEVICES_MODE}").into()),
+                "Reset",
+                ButtonKind::Plain(p.accent),
+                ControlSize::small(mobile),
+                true,
+                p,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.write(TAGGING_DEVICES_MODE.into(), None, cx)))
+        });
+        let header_row = if compact {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(setting_label(entry, None, mobile, p))
+                .child(div().flex().items_center().gap(px(8.)).child(mode_buttons).children(reset_btn))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(setting_label(entry, None, mobile, p))
+                .child(mode_buttons)
+                .child(div().w(px(52.)).flex_shrink_0().flex().justify_end().children(reset_btn))
+        };
+
+        let device_list = (mode == "selected").then(|| {
+            let status = self.device_sync.as_ref();
+            let me = status.and_then(|s| s.endpoint_id.as_deref());
+            let mut rows: Vec<(String, String)> = Vec::new();
+            if let Some(status) = status {
+                let mut known: Vec<&SyncDevice> = status.devices.iter().collect();
+                known.sort_by(|a, b| {
+                    let a_me = me.is_some_and(|id| id.eq_ignore_ascii_case(&a.id));
+                    let b_me = me.is_some_and(|id| id.eq_ignore_ascii_case(&b.id));
+                    b_me.cmp(&a_me)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+                for device in known {
+                    let id = device.id.to_lowercase();
+                    let is_me = me.is_some_and(|m| m.eq_ignore_ascii_case(&id));
+                    let label = if is_me {
+                        format!("{} (This device)  ·  {}", device.name, platform_label(&device.platform))
+                    } else {
+                        format!("{}  ·  {}", device.name, platform_label(&device.platform))
+                    };
+                    rows.push((id, label));
+                }
+            }
+            if let Some(my_id) = me {
+                let my_lower = my_id.to_lowercase();
+                if !rows.iter().any(|(id, _)| *id == my_lower) {
+                    rows.push((
+                        my_lower,
+                        format!("This device  ·  {}  ·  ID {}", platform_label(std::env::consts::OS), short_id(my_id)),
+                    ));
+                }
+            }
+            for saved in &selected {
+                let lower = saved.to_lowercase();
+                if !rows.iter().any(|(id, _)| *id == lower) {
+                    rows.push((lower, format!("Device {}  ·  not in current sync list", short_id(saved))));
+                }
+            }
+
+            let sync_hint: Option<&'static str> = match status {
+                None => Some("Loading paired devices…"),
+                Some(status) if status.namespace.is_none() => {
+                    Some("Enable Device sync below to see and pick your paired devices.")
+                }
+                Some(status) if status.paused => {
+                    Some("Device sync is paused — turn it on below to see all paired devices.")
+                }
+                Some(_) => None,
+            };
+            let empty_hint = selected.is_empty().then_some(
+                "No devices selected. Automatic AI tagging is paused on all devices; existing and server tags still display and sync.",
+            );
+
+            div()
+                .pt(px(6.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .children(rows.into_iter().map(|(id, label)| {
+                    let on = selected.iter().any(|item| item.eq_ignore_ascii_case(&id));
+                    let next: Vec<String> = if on {
+                        selected.iter().filter(|item| !item.eq_ignore_ascii_case(&id)).cloned().collect()
+                    } else {
+                        selected.iter().cloned().chain([id.clone()]).collect()
+                    };
+                    div()
+                        .pt(px(6.))
+                        .when(!compact, |d| d.pr(px(64.)))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(div().flex_1().min_w_0().truncate().child(label))
+                        .child(
+                            switch(ElementId::Name(format!("tagger-{id}").into()), on).on_click(cx.listener(
+                                move |this, _: &bool, _, cx| {
+                                    this.write(
+                                        TAGGING_DEVICES.into(),
+                                        Some(SettingValue::Strings { values: next.clone() }),
+                                        cx,
+                                    )
+                                },
+                            )),
+                        )
+                }))
+                .children(empty_hint.map(|text| {
+                    div().pt(px(4.)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child(text)
+                }))
+                .children(sync_hint.map(|text| {
+                    div().pt(px(2.)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child(text)
+                }))
+        });
+
+        div()
+            .px(px(14.))
+            .py(px(10.))
+            .flex()
+            .flex_col()
+            .child(header_row)
+            .children(device_list)
+            .children(self.render_error(TAGGING_DEVICES_MODE, p))
+            .children(self.render_error(TAGGING_DEVICES, p))
+            .into_any_element()
+    }
+
     /// GPUI's own row in AI tagging: tag every conversation again.
     fn render_retag(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
-        let enabled = self.flag(AI_TAGGING) == Some(true) && !self.retag_started;
+        let ai_on = self.flag(AI_TAGGING) == Some(true);
+        let active_here = self.tagging_active_here();
+        let enabled = ai_on && active_here && !self.retag_started;
+        let note = if self.retag_started {
+            "Re-tagging started."
+        } else if ai_on && !active_here {
+            "This device is not selected for AI tagging. Run Re-tag on a selected tagging device."
+        } else {
+            "Tag every conversation again, replacing the tags the model gave before."
+        };
         div()
             .flex()
             .items_center()
             .gap(px(12.))
             .px(px(14.))
             .py(px(10.))
-            .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                if self.retag_started {
-                    "Re-tagging started."
-                } else {
-                    "Tag every conversation again, replacing the tags the model gave before."
-                },
-            ))
+            .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(note))
             .child(
                 button("retag", "Re-tag All Conversations", ButtonKind::Secondary, ControlSize::Regular, enabled, p)
                     .when(enabled, |b| b.on_click(cx.listener(|this, _, _, cx| this.retag(cx)))),
@@ -2151,6 +2360,9 @@ impl Settings {
         };
         let tagging = match &status.tagging {
             mailstream::TaggingStatus { enabled: false, .. } => "Off".to_string(),
+            mailstream::TaggingStatus { active_here: false, .. } => {
+                "Synced only (tagged by selected devices)".to_string()
+            }
             mailstream::TaggingStatus { status: None, .. } => "On".to_string(),
             mailstream::TaggingStatus { status: Some(line), .. } => line.clone(),
         };
@@ -2766,6 +2978,7 @@ fn platform_label(platform: &str) -> &str {
         "macos" => "macOS",
         "linux" => "Linux",
         "windows" => "Windows",
+        "android" => "Android",
         other => other,
     }
 }

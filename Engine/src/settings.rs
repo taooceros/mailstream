@@ -21,6 +21,8 @@ const RETIRED: [&str; 1] = ["aiTagging.syncAccounts"];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Setting {
     AiTaggingEnabled,
+    AiTaggingDevicesMode,
+    AiTaggingDevices,
     AiTaggingBackend,
     AiTaggingModel,
     AiTaggingOmpPath,
@@ -51,14 +53,18 @@ enum Kind {
     Choice(&'static [&'static str]),
     /// Lowercased email addresses, kept sorted and unique.
     Addresses,
+    /// Lowercased non-empty tokens without whitespace (e.g. device IDs), kept sorted and unique.
+    Strings,
 }
 
 /// The valid values settings.json sets, by setting.
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 20] = [
+    pub const ALL: [Setting; 22] = [
         Self::AiTaggingEnabled,
+        Self::AiTaggingDevicesMode,
+        Self::AiTaggingDevices,
         Self::AiTaggingBackend,
         Self::AiTaggingModel,
         Self::AiTaggingOmpPath,
@@ -83,6 +89,8 @@ impl Setting {
     pub fn key(self) -> &'static str {
         match self {
             Self::AiTaggingEnabled => "aiTagging.enabled",
+            Self::AiTaggingDevicesMode => "aiTagging.devicesMode",
+            Self::AiTaggingDevices => "aiTagging.devices",
             Self::AiTaggingBackend => "aiTagging.backend",
             Self::AiTaggingModel => "aiTagging.model",
             Self::AiTaggingOmpPath => "aiTagging.ompPath",
@@ -112,6 +120,16 @@ impl Setting {
                 Kind::Bool,
                 json!(true),
                 "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action. Synced across paired devices when Device sync is on.",
+            ),
+            Self::AiTaggingDevicesMode => (
+                Kind::Choice(&["all", "selected"]),
+                json!("all"),
+                "Which paired devices run AI tagging: all lets every device tag; selected runs AI tagging only on the devices in aiTagging.devices (other devices still show and sync tags from the server). Synced across paired devices when Device sync is on.",
+            ),
+            Self::AiTaggingDevices => (
+                Kind::Strings,
+                json!([]),
+                "Paired device IDs allowed to run AI tagging when aiTagging.devicesMode is selected. Empty means no device runs AI tagging automatically while tags still display and sync. Synced across paired devices when Device sync is on.",
             ),
             Self::AiTaggingBackend => (
                 Kind::Choice(&["omp", "apple"]),
@@ -266,6 +284,20 @@ impl Setting {
                 addresses.dedup();
                 Ok(json!(addresses))
             }
+            Kind::Strings => {
+                let strings: Option<Vec<&str>> =
+                    value.as_array().and_then(|items| items.iter().map(Value::as_str).collect());
+                let strings = strings.ok_or_else(|| {
+                    EngineError::invalid_setting(format!("{key} must be an array of strings."))
+                })?;
+                let mut items: Vec<String> = strings.iter().map(|text| text.trim().to_lowercase()).collect();
+                if let Some(bad) = items.iter().find(|item| item.is_empty() || item.contains(char::is_whitespace)) {
+                    return Err(EngineError::invalid_setting(format!("{key}: \"{bad}\" is not a valid ID.")));
+                }
+                items.sort();
+                items.dedup();
+                Ok(json!(items))
+            }
         }
     }
 
@@ -285,7 +317,7 @@ impl Setting {
                 self.validate(&json!(int))
             }
             Kind::Text | Kind::Choice(_) => self.validate(&json!(text)),
-            Kind::Addresses => {
+            Kind::Addresses | Kind::Strings => {
                 if trimmed.starts_with('[')
                     && let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
                 {
@@ -324,6 +356,11 @@ impl Setting {
                 out.insert("items".into(), json!({ "type": "string", "format": "email" }));
                 out.insert("uniqueItems".into(), json!(true));
             }
+            Kind::Strings => {
+                out.insert("type".into(), json!("array"));
+                out.insert("items".into(), json!({ "type": "string" }));
+                out.insert("uniqueItems".into(), json!(true));
+            }
         }
         Value::Object(out)
     }
@@ -349,7 +386,8 @@ impl Setting {
             Kind::Bool => "boolean",
             Kind::Int(..) => "integer",
             Kind::Text | Kind::Choice(_) => "string",
-            Kind::Addresses => "array",
+            Kind::Addresses => "array of email addresses",
+            Kind::Strings => "array of strings",
         };
         let typed = |value: &Value| SettingValue::of(name, value).expect("settings hold values of their kind");
         let (minimum, maximum) = match kind {
@@ -416,6 +454,10 @@ impl SettingsFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
 
     /// The file's object as written; empty when there is no file.
@@ -633,7 +675,7 @@ impl Settings {
             "config.reset" => self.write_setting(setting()?, None)?,
             "config.add" | "config.remove" => {
                 let setting = setting()?;
-                if !matches!(setting.kind(), Kind::Addresses) {
+                if !matches!(setting.kind(), Kind::Addresses | Kind::Strings) {
                     return Err(EngineError::usage(format!("{} is not a list setting.", setting.key())));
                 }
                 let words: Vec<&str> = args
@@ -713,6 +755,17 @@ mod tests {
             senders.validate(&json!(["a@b.c", 1])).err().unwrap().message,
             "remoteContent.trustedSenders must be an array of email addresses."
         );
+        assert_eq!(Setting::AiTaggingDevicesMode.parse(" Selected ").unwrap(), json!("selected"));
+        assert_eq!(
+            Setting::AiTaggingDevicesMode.validate(&json!("none")).err().unwrap().message,
+            "aiTagging.devicesMode must be one of all, selected."
+        );
+        assert_eq!(Setting::AiTaggingDevices.parse("DevB, deva,,DEVB").unwrap(), json!(["deva", "devb"]));
+        assert_eq!(Setting::AiTaggingDevices.parse("").unwrap(), json!([]));
+        assert_eq!(
+            Setting::AiTaggingDevices.validate(&json!(["bad id"])).err().unwrap().message,
+            "aiTagging.devices: \"bad id\" is not a valid ID."
+        );
         let error = Setting::find("poll").err().unwrap();
         assert_eq!(
             error,
@@ -770,16 +823,30 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 20);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 22);
         assert_eq!(
             list["settings"][1],
+            json!({
+                "key": "aiTagging.devicesMode", "value": "all", "default": "all", "changed": false,
+                "summary": Setting::AiTaggingDevicesMode.descriptor().2, "type": "string", "choices": ["all", "selected"],
+            })
+        );
+        assert_eq!(
+            list["settings"][2],
+            json!({
+                "key": "aiTagging.devices", "value": [], "default": [], "changed": false,
+                "summary": Setting::AiTaggingDevices.descriptor().2, "type": "array of strings",
+            })
+        );
+        assert_eq!(
+            list["settings"][3],
             json!({
                 "key": "aiTagging.backend", "value": "omp", "default": "omp", "changed": false,
                 "summary": Setting::AiTaggingBackend.descriptor().2, "type": "string", "choices": ["omp", "apple"],
             })
         );
         assert_eq!(
-            list["settings"][4],
+            list["settings"][6],
             json!({
                 "key": "aiTagging.batchSize", "value": 20, "default": 20, "changed": false,
                 "summary": "Conversations sent to the model per run.", "type": "integer", "minimum": 1, "maximum": 100,
@@ -789,6 +856,8 @@ mod tests {
         let schema = run(&settings, "config.schema", json!({})).unwrap();
         assert_eq!(schema["properties"]["remoteContent.trustedSenders"]["items"]["format"], json!("email"));
         assert_eq!(schema["properties"]["aiTagging.backend"]["enum"], json!(["omp", "apple"]));
+        assert_eq!(schema["properties"]["aiTagging.devicesMode"]["enum"], json!(["all", "selected"]));
+        assert_eq!(schema["properties"]["aiTagging.devices"]["items"]["type"], json!("string"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

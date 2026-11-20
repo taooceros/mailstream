@@ -693,3 +693,115 @@ fn keeps_manual_category_and_topics_when_a_reply_arrives() {
     drop(engine);
     cleanup(&config);
 }
+
+#[test]
+fn selected_tagging_devices_only_run_model_on_chosen_peers() {
+    use crate::Engine;
+    use crate::peer_sync::Network;
+    use crate::testkit::{mail_account, server_config, sign_in_all};
+    use iroh::address_lookup::MemoryLookup;
+
+    let gmail = Arc::new(Mutex::new(Gmail {
+        labels: BTreeMap::new(),
+        messages: (0..5).map(|n| (format!("i{n}"), BTreeSet::from(["INBOX".to_string()]))).collect(),
+        history: Vec::new(),
+        made: 0,
+    }));
+    let fake = server(gmail.clone());
+    let lookup = MemoryLookup::new();
+
+    let start = |omp: fn(&std::path::Path) -> std::path::PathBuf| {
+        let mut config = server_config(&fake);
+        config.device_sync = Some(Network::Loopback(lookup.clone()));
+        sign_in_all(&config, &[mail_account("me@gmail.com", "google")]);
+        let engine = Engine::start(config.clone());
+        let dir = config.support_directory.parent().unwrap().join("omp");
+        std::fs::create_dir_all(&dir).unwrap();
+        call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
+        call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp(&dir).display().to_string() })).unwrap();
+        wait_until("the inbox", || {
+            call(&engine, "mail.list", json!({ "limit": 100, "cached": true }))
+                .is_ok_and(|listed| listed["conversations"].as_array().unwrap().len() == 5)
+        });
+        (engine, config, dir)
+    };
+
+    let (laptop, laptop_config, laptop_omp) = start(fake_omp);
+    let (phone, phone_config, phone_omp) = start(offline_omp);
+
+    // Pair laptop and phone in a sync group.
+    let enabled_laptop = call(&laptop, "sync.enable", json!({})).unwrap();
+    let laptop_id = enabled_laptop["endpointId"].as_str().unwrap().to_string();
+    let ticket = call(&laptop, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    let joined_phone = call(&phone, "sync.join", json!({ "ticket": ticket })).unwrap();
+    let phone_id = joined_phone["endpointId"].as_str().unwrap().to_string();
+    wait_until("both devices see 2 peers", || {
+        call(&laptop, "sync.status", json!({})).unwrap()["devices"].as_array().unwrap().len() == 2
+            && call(&phone, "sync.status", json!({})).unwrap()["devices"].as_array().unwrap().len() == 2
+    });
+
+    // Select only the laptop to run AI tagging, then enable AI tagging across the group.
+    call(&laptop, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "selected" })).unwrap();
+    call(&laptop, "config.set", json!({ "key": "aiTagging.devices", "value": laptop_id })).unwrap();
+    wait_until("phone receives device selection", || {
+        call(&phone, "config.get", json!({ "key": "aiTagging.devicesMode" })).unwrap()["value"] == json!("selected")
+            && call(&phone, "config.get", json!({ "key": "aiTagging.devices" })).unwrap()["value"] == json!([laptop_id])
+    });
+    call(&laptop, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
+
+    // Laptop runs omp and pushes tags; phone stays activeHere=false, never invokes omp, shows no error,
+    // and still displays tags synced from the server.
+    wait_until("laptop tags land on server", || gmail.lock().unwrap().names("i4").contains("Notifications"));
+    wait_until("phone receives enabled=true while inactive here", || {
+        call(&phone, "status", json!({})).unwrap()["aiTagging"]
+            == json!({ "enabled": true, "activeHere": false, "status": null, "failed": false })
+    });
+    call(&phone, "refresh", json!({})).unwrap();
+    let same = |n: usize| (tag(&phone, n), topics(&phone, n)) == (tag(&laptop, n), topics(&laptop, n));
+    wait_until("phone adopts laptop tags from Gmail", || [0, 1, 3, 4].into_iter().all(same));
+    assert_eq!(counts(&laptop_omp), [5]);
+    assert!(counts(&phone_omp).is_empty(), "unselected device must not run omp");
+    assert_eq!(
+        call(&phone, "status", json!({})).unwrap()["aiTagging"],
+        json!({ "enabled": true, "activeHere": false, "status": null, "failed": false })
+    );
+
+    // Unselected phone can still manually edit tags and sync them to Gmail, but cannot run mail.retag.
+    let err = call(&phone, "mail.retag", json!({})).unwrap_err();
+    assert_eq!((err.code.as_str(), err.message.as_str()), ("disabled", crate::tagging::NOT_TAGGER_MESSAGE));
+    call(&phone, "mail.tag", json!({ "ids": ["me@gmail.com|i0@x"], "category": "invitation", "add-labels": ["Trip"] })).unwrap();
+    wait_until("phone manual edit reaches server", || gmail.lock().unwrap().names("i0").contains("Mailstream/Trip"));
+
+    // Multi-select: adding phone makes both activeHere=true (phone hits its offline omp and fails);
+    // removing phone clears its failure immediately without touching its displayed tags.
+    call(&laptop, "config.add", json!({ "key": "aiTagging.devices", "values": [phone_id.clone()] })).unwrap();
+    wait_until("phone becomes active and fails on offline omp", || {
+        let st = call(&phone, "status", json!({})).unwrap()["aiTagging"].clone();
+        st["activeHere"] == json!(true) && st["failed"] == json!(true)
+    });
+    call(&laptop, "config.remove", json!({ "key": "aiTagging.devices", "values": [phone_id] })).unwrap();
+    wait_until("phone failure clears once unselected", || {
+        call(&phone, "status", json!({})).unwrap()["aiTagging"]
+            == json!({ "enabled": true, "activeHere": false, "status": null, "failed": false })
+    });
+    assert_eq!(tag(&phone, 0).0, "invitation");
+
+    // Empty selection in selected mode: neither device runs AI tagging, tags stay visible.
+    call(&laptop, "config.set", json!({ "key": "aiTagging.devices", "value": "" })).unwrap();
+    wait_until("laptop becomes inactive with empty selection", || {
+        call(&laptop, "status", json!({})).unwrap()["aiTagging"]
+            == json!({ "enabled": true, "activeHere": false, "status": null, "failed": false })
+    });
+    assert_eq!(call(&laptop, "mail.retag", json!({})).unwrap_err().code, "disabled");
+    assert_eq!(tag(&laptop, 4).0, "notification");
+
+    // Switching back to "all" re-activates both devices.
+    call(&laptop, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
+    wait_until("laptop active again under all", || {
+        call(&laptop, "status", json!({})).unwrap()["aiTagging"]["activeHere"] == json!(true)
+    });
+
+    drop((laptop, phone));
+    cleanup(&laptop_config);
+    cleanup(&phone_config);
+}

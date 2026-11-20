@@ -220,7 +220,7 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     assert_eq!(tag(json!({ "ids": [id(0)], "category": "people" })).unwrap()["failed"][0]["message"], "AI tagging is off (aiTagging.enabled).");
     assert_eq!(
         call(&engine, "status", json!({})).unwrap()["aiTagging"],
-        json!({ "enabled": false, "status": null, "failed": false })
+        json!({ "enabled": false, "activeHere": false, "status": null, "failed": false })
     );
 
     // A failing omp: the pass stops with its last error line, announced as a problem, and waits
@@ -233,7 +233,7 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     let failures = || std::fs::read_to_string(dir.join("failures")).unwrap_or_default().lines().count();
     wait_until("the failure", || {
         call(&engine, "status", json!({})).unwrap()["aiTagging"]
-            == json!({ "enabled": true, "status": "AI tagging failed: Error: quota exceeded", "failed": true })
+            == json!({ "enabled": true, "activeHere": true, "status": "AI tagging failed: Error: quota exceeded", "failed": true })
     });
     assert_eq!(failures(), 1);
     wait_until("the problem", || events.lock().unwrap().contains(&"problems"));
@@ -251,7 +251,7 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     call(&engine, "config.set", json!({ "key": "aiTagging.backend", "value": "apple" })).unwrap();
     wait_until("Apple Intelligence's failure", || {
         call(&engine, "status", json!({})).unwrap()["aiTagging"]
-            == json!({ "enabled": true, "status": format!("AI tagging failed: {off}"), "failed": true })
+            == json!({ "enabled": true, "activeHere": true, "status": format!("AI tagging failed: {off}"), "failed": true })
     });
     assert_eq!(std::fs::read_to_string(dir.join("apple")).unwrap().lines().count(), 1);
     assert_eq!(failures(), 2);
@@ -262,7 +262,8 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     wait_until("tagging with Apple Intelligence", || counts(&dir).len() >= 10);
     assert_eq!(counts(&dir)[7..10], [20, 20, 5]);
     wait_until("the problem clears", || {
-        call(&engine, "status", json!({})).unwrap()["aiTagging"] == json!({ "enabled": true, "status": null, "failed": false })
+        call(&engine, "status", json!({})).unwrap()["aiTagging"]
+            == json!({ "enabled": true, "activeHere": true, "status": null, "failed": false })
     });
     wait_until("the problem gone", || events.lock().unwrap().contains(&"problems"));
     assert_eq!(failures(), 2);
@@ -348,7 +349,7 @@ fn reports_status() {
     keys.sort();
     assert_eq!(keys, ["lastError", "lastRefresh", "loading", "pushConnected"]);
     assert_eq!(sync["pushConnected"], json!(false));
-    assert_eq!(status["aiTagging"], json!({ "enabled": false, "status": null, "failed": false }));
+    assert_eq!(status["aiTagging"], json!({ "enabled": false, "activeHere": false, "status": null, "failed": false }));
     drop(engine);
     cleanup(&config);
 }

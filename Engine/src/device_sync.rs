@@ -41,10 +41,12 @@ const IDLE_CHECK: Duration = Duration::from_secs(30);
 /// `remoteContent.trustedSenders` is synced per address under `v1/trusted/<email>`.
 /// Machine-local keys (`aiTagging.backend`/`model`/`ompPath`/`batchSize`/`passLimit`/
 /// `backoffSeconds`, `sync.*`, `chat.pollSeconds`, `gpui.*`, `flutter.*`) stay local.
-const SCALAR_SETTINGS: [Setting; 4] = [
+const SCALAR_SETTINGS: [Setting; 6] = [
     Setting::AutoReadEnabled,
     Setting::AutoReadDays,
     Setting::AiTaggingEnabled,
+    Setting::AiTaggingDevicesMode,
+    Setting::AiTaggingDevices,
     Setting::AiTaggingLocalOnlyAccounts,
 ];
 
