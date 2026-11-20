@@ -1,11 +1,52 @@
 #!/usr/bin/env bash
-# Cross-compiles Mailstream's Android PoC (`aarch64-linux-android`) and packages a debug-signed
+# Cross-compiles Mailstream's Android PoC (`aarch64-linux-android`) and packages a signed
 # arm64-v8a APK using only Android NDK + SDK build-tools (no Gradle required).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 POC="$ROOT/AndroidPoc"
 PROFILE="${1:-release}"
+
+# Resolve signing config up front so missing keystore fails before a long cargo build.
+# Default: shared out-of-repo keystore (~/.config/mailstream/android-signing.{jks,env}, chmod 600)
+# so Mac and Linux produce identical APK signatures. Set ANDROID_USE_DEBUG_KEYSTORE=1 to opt in
+# to a local-only debug keystore (for external contributors or ad-hoc local testing).
+USE_DEBUG_KEYSTORE="${ANDROID_USE_DEBUG_KEYSTORE:-0}"
+if [[ "$USE_DEBUG_KEYSTORE" == "1" ]]; then
+  KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
+  KEY_ALIAS="androiddebugkey"
+  KEYSTORE_PASS="android"
+  KEY_PASS="android"
+else
+  _env_ks="${ANDROID_KEYSTORE:-}"
+  _env_alias="${ANDROID_KEY_ALIAS:-}"
+  _env_ks_pass="${ANDROID_KEYSTORE_PASS:-}"
+  _env_key_pass="${ANDROID_KEY_PASS:-}"
+  SIGNING_DIR="${MAILSTREAM_ANDROID_SIGNING_DIR:-$HOME/.config/mailstream}"
+  SIGNING_ENV="${ANDROID_SIGNING_ENV:-$SIGNING_DIR/android-signing.env}"
+  if [[ -f "$SIGNING_ENV" ]]; then
+    # shellcheck disable=SC1090
+    source "$SIGNING_ENV"
+  fi
+  KEYSTORE="${_env_ks:-${ANDROID_KEYSTORE:-$SIGNING_DIR/android-signing.jks}}"
+  KEY_ALIAS="${_env_alias:-${ANDROID_KEY_ALIAS:-mailstream-android}}"
+  KEYSTORE_PASS="${_env_ks_pass:-${ANDROID_KEYSTORE_PASS:-}}"
+  KEY_PASS="${_env_key_pass:-${ANDROID_KEY_PASS:-$KEYSTORE_PASS}}"
+  if [[ ! -f "$KEYSTORE" || -z "$KEYSTORE_PASS" || -z "$KEY_ALIAS" ]]; then
+    cat >&2 <<EOF
+error: missing shared Android signing configuration.
+  expected keystore: $KEYSTORE
+  expected env file: $SIGNING_ENV (defining ANDROID_KEYSTORE_PASS, ANDROID_KEY_PASS, ANDROID_KEY_ALIAS)
+
+Sync the shared keystore from Linear onto this machine:
+  python3 AndroidPoc/sync-signing-key.py --doc-id <LINEAR_DOC_ID>
+
+Or, for a local-only build without the shared team key (incompatible with cross-machine updates):
+  ANDROID_USE_DEBUG_KEYSTORE=1 AndroidPoc/build-apk.sh $PROFILE
+EOF
+    exit 1
+  fi
+fi
 
 sdk_roots() {
   for dir in \
@@ -140,8 +181,7 @@ PY
 echo "==> Aligning APK with zipalign"
 "$BUILD_TOOLS/zipalign" -f -p 4 "$OUT_DIR/unaligned.apk" "$OUT_DIR/aligned.apk"
 
-KEYSTORE="${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
-if [[ ! -f "$KEYSTORE" ]]; then
+if [[ "$USE_DEBUG_KEYSTORE" == "1" && ! -f "$KEYSTORE" ]]; then
   mkdir -p "$(dirname "$KEYSTORE")"
   keytool -genkeypair -v \
     -keystore "$KEYSTORE" \
@@ -155,17 +195,18 @@ if [[ ! -f "$KEYSTORE" ]]; then
 fi
 
 FINAL_APK="$OUT_DIR/mailstream-android-poc-arm64-$PROFILE.apk"
-echo "==> Signing APK with apksigner"
-"$BUILD_TOOLS/apksigner" sign \
-  --ks "$KEYSTORE" \
-  --ks-pass pass:android \
-  --key-pass pass:android \
-  --ks-key-alias androiddebugkey \
-  --out "$FINAL_APK" \
-  "$OUT_DIR/aligned.apk"
+echo "==> Signing APK with apksigner (alias: $KEY_ALIAS, keystore: $KEYSTORE)"
+MAILSTREAM_KS_PASS="$KEYSTORE_PASS" MAILSTREAM_KEY_PASS="$KEY_PASS" \
+  "$BUILD_TOOLS/apksigner" sign \
+    --ks "$KEYSTORE" \
+    --ks-pass env:MAILSTREAM_KS_PASS \
+    --key-pass env:MAILSTREAM_KEY_PASS \
+    --ks-key-alias "$KEY_ALIAS" \
+    --out "$FINAL_APK" \
+    "$OUT_DIR/aligned.apk"
 
 echo "==> Verifying APK"
-"$BUILD_TOOLS/apksigner" verify --verbose "$FINAL_APK"
+"$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$FINAL_APK"
 "$BUILD_TOOLS/zipalign" -c -v 4 "$FINAL_APK" | tail -n 5
 "$BUILD_TOOLS/aapt2" dump badging "$FINAL_APK" | head -n 12
 ls -lh "$SO" "$FINAL_APK"

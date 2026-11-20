@@ -19,3 +19,8 @@ devenv.local.nix
 # Python bytecode caches (scripts/ run with python3; MS-222)
 __pycache__/
 *.pyc
+
+# Android signing keystores and credentials (never commit to this public repo)
+*.jks
+*.keystore
+android-signing.env
