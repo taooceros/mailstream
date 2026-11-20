@@ -1055,6 +1055,8 @@ mod tests {
 pub mod settings {
     pub const WIDTH: f32 = 560.0;
     pub const HEIGHT: f32 = 620.0;
+    pub const LIST_WIDTH: f32 = 540.0;
+    pub const LIST_HEIGHT: f32 = 600.0;
     pub const PADDING: f32 = 24.0;
     /// The account color dot.
     pub const DOT: f32 = 10.0;

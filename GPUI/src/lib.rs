@@ -37,6 +37,7 @@ mod markup_highlight;
 mod message_log;
 mod model;
 mod settings;
+mod settings_list;
 mod split;
 pub mod state;
 mod swipe;

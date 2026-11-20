@@ -24,17 +24,20 @@ use gpui::{
     WindowBounds, WindowOptions, actions, div, px, size,
 };
 use mailstream::{
-    Account, AutoReadLog, AutoReadReason, Category, Change, DeviceSyncStatus, Event, EventListener, OAuthClientInfo,
-    Provider, SettingEntry, SettingValue, SyncDevice, SyncTicket,
+    Account, AutoReadLog, Change, DeviceSyncStatus, Event, EventListener, OAuthClientInfo, Provider, SettingEntry,
+    SettingValue, SyncDevice, SyncTicket,
 };
 
-use crate::controls::{ButtonKind, ControlSize, Tone, button, capsule, field_frame, hairline, icon_button, notice, pill, switch, tag};
+use crate::controls::{
+    ButtonKind, ControlSize, Tone, button, capsule, field_frame, hairline, icon_button, icon_label_button, notice, pill,
+    switch, tag,
+};
 use crate::design::{self, Palette, layout, radius, settings as metrics, space, stroke, text};
 use crate::engine::{MailError, engine};
 use crate::icons::{Icon, icon};
 use crate::input;
 use crate::model::{AccountExt, ProviderExt};
-
+use crate::settings_list::{self, SettingsListKind, SettingsListView};
 actions!(settings, [ShowSettings, CloseSettings]);
 
 pub const CONTEXT: &str = "Settings";
@@ -125,6 +128,7 @@ fn follow_engine(cx: &mut App) {
             if let Some(settings) = open {
                 settings.update(cx, |settings, cx| settings.follow_engine(&batch, cx)).ok();
             }
+            settings_list::notify_open_lists(&batch, cx);
         }
     })
     .detach();
@@ -198,11 +202,9 @@ const AUTO_READ_DAYS: &str = "autoRead.days";
 const AUTO_READ_LOG: &str = "autoRead.log";
 /// Suffix of the field that adds to an address setting, in `Settings::fields`.
 const ADD: &str = "+add";
-/// Rows of the auto-read log shown; the rest stay in the engine's log (`mailstream mail autoread`).
-const AUTO_READ_ROWS: usize = 50;
 
 /// Short names for the keys (Flutter's `_titles`); the engine's description sits under each.
-fn title(key: &str) -> &str {
+pub(crate) fn title(key: &str) -> &str {
     match key {
         "aiTagging.enabled" => "Sort and flag mail with AI",
         "aiTagging.backend" => "Tagged by",
@@ -358,6 +360,8 @@ pub(crate) struct Settings {
     attempt: u64,
     retag_started: bool,
     note: Option<Note>,
+    /// In compact / Android inline mode, the full-list sub-page currently open over Settings (MS-422).
+    subpage: Option<Entity<SettingsListView>>,
     _appearance: Subscription,
 }
 
@@ -407,6 +411,7 @@ impl Settings {
             attempt: 0,
             retag_started: false,
             note: None,
+            subpage: None,
             _appearance: cx.observe_window_appearance(window, |_, window, cx| {
                 design::sync_kit_theme(window.appearance(), cx);
                 cx.notify()
@@ -420,9 +425,60 @@ impl Settings {
         this
     }
 
-    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.subpage.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn close_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.subpage = None;
         if let Some(on_close) = self.on_close.clone() {
             on_close(window, cx);
+        } else {
+            window.remove_window();
+        }
+    }
+
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.go_back(window, cx) {
+            return;
+        }
+        self.close_all(window, cx);
+    }
+
+    fn open_list(&mut self, kind: SettingsListKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.on_close.is_some() || cfg!(target_os = "android") {
+            let settings = cx.entity().downgrade();
+            let back_settings = settings.clone();
+            let close_settings = settings;
+            let on_changed = self.on_changed.clone();
+            let view = cx.new(|cx| {
+                SettingsListView::new_inline(
+                    kind,
+                    on_changed,
+                    Rc::new(move |window, cx| {
+                        back_settings.update(cx, |this, cx| {
+                            this.go_back(window, cx);
+                        }).ok();
+                    }),
+                    Rc::new(move |window, cx| {
+                        close_settings.update(cx, |this, cx| this.close_all(window, cx)).ok();
+                    }),
+                    window,
+                    cx,
+                )
+            });
+            let focus = view.read(cx).focus.clone();
+            self.subpage = Some(view);
+            window.focus(&focus, cx);
+            cx.notify();
+        } else {
+            settings_list::open_list_window(kind, self.on_changed.clone(), cx);
         }
     }
 
@@ -457,6 +513,9 @@ impl Settings {
         }
         if batch.contains(&Event::DeviceSync) {
             self.load_device_sync(cx);
+        }
+        if let Some(subpage) = &self.subpage {
+            subpage.update(cx, |view, cx| view.follow_engine(batch, cx));
         }
     }
 
@@ -640,8 +699,7 @@ impl Settings {
         let Some(input) = self.fields.get(key).map(|field| field.input.clone()) else { return };
         let typed = input.read(cx).value().trim().to_string();
         if let Some(setting) = key.strip_suffix(ADD) {
-            let added: Vec<String> =
-                typed.split(|c: char| c == ',' || c.is_whitespace()).filter(|a| !a.is_empty()).map(str::to_owned).collect();
+            let added = settings_list::parse_added_addresses(&typed);
             let Some(SettingValue::Addresses { mut addresses }) = self.entry(setting).map(|e| e.value.clone()) else {
                 return;
             };
@@ -1157,6 +1215,9 @@ impl Settings {
 
 impl Render for Settings {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(subpage) = self.subpage.clone() {
+            return div().size_full().child(subpage);
+        }
         self.sync_fields(window, cx);
         self.ensure_join_input(window, cx);
         self.ensure_cloud_input(window, cx);
@@ -1228,7 +1289,7 @@ impl Render for Settings {
                         .child(
                             capsule(p).child(
                                 icon_button("settings-close", Icon::Close, "Close Settings", true, p.glyph)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_all(window, cx))),
                             ),
                         ),
                 )
@@ -1615,7 +1676,7 @@ impl Settings {
                     .child(heading(*title, p))
                     .children(problem.map(|problem| notice(Tone::Error, None, problem, false, p)))
                     .children(group(rows, p))
-                    .when(prefixes.contains(&"autoRead."), |d| d.children(self.render_auto_read(p, cx)))
+                    .when(prefixes.contains(&"autoRead."), |d| d.children(self.render_auto_read(p, window, cx)))
                     .into_any_element(),
             );
         }
@@ -1769,8 +1830,9 @@ impl Settings {
         )
     }
 
-    /// An address setting's addresses as pills, each removable, and a field that adds more
-    /// (comma-separated).
+    /// An address setting's addresses as pills, previewing at most [`settings_list::PREVIEW_LIMIT`]
+    /// (5) inline with a button to open the full searchable list window / sub-page when there are
+    /// more, plus a field that adds more (comma-separated).
     fn render_addresses(
         &self,
         key: &str,
@@ -1780,29 +1842,79 @@ impl Settings {
         cx: &mut Context<Self>,
     ) -> Div {
         let add_key = format!("{key}{ADD}");
+        let (shown, hidden) = settings_list::preview_slice(addresses);
+        let total = addresses.len();
+        let inline = self.on_close.is_some() || cfg!(target_os = "android");
+        let open_key = key.to_owned();
+        let open_icon = if inline { Icon::Disclosure } else { Icon::OpenInWindow };
+
         div()
             .pt(px(8.))
             .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(px(6.))
-            .children(addresses.iter().map(|address| {
-                let next: Vec<String> = addresses.iter().filter(|a| *a != address).cloned().collect();
-                let key = key.to_owned();
-                pill(address.clone(), None, p).child(
+            .flex_col()
+            .gap(px(8.))
+            .when(!shown.is_empty(), |d| {
+                d.child(
                     div()
-                        .id(ElementId::Name(format!("remove-{key}-{address}").into()))
-                        .cursor_pointer()
-                        .child(icon(Icon::Close, 12., p.muted))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.write(key.clone(), Some(SettingValue::Addresses { addresses: next.clone() }), cx)
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .children(shown.iter().map(|address| {
+                            let next: Vec<String> = addresses.iter().filter(|a| *a != address).cloned().collect();
+                            let key = key.to_owned();
+                            pill(address.clone(), None, p).child(
+                                div()
+                                    .id(ElementId::Name(format!("remove-{key}-{address}").into()))
+                                    .cursor_pointer()
+                                    .child(icon(Icon::Close, 12., p.muted))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.write(key.clone(), Some(SettingValue::Addresses { addresses: next.clone() }), cx)
+                                    })),
+                            )
                         })),
                 )
-            }))
-            .children(self.render_field(&add_key, 220., None, p, window, cx))
+            })
+            .when(hidden > 0, |d| {
+                let key_for_click = open_key.clone();
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_size(px(text::FOOTNOTE))
+                                .text_color(p.muted)
+                                .child(format!("Showing {} of {total} (+{hidden} more)", shown.len())),
+                        )
+                        .child(
+                            icon_label_button(
+                                ElementId::Name(format!("view-all-{open_key}").into()),
+                                Some(open_icon),
+                                format!("View All ({total})"),
+                                ButtonKind::Secondary,
+                                ControlSize::Small,
+                                true,
+                                p,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_list(SettingsListKind::Addresses { key: key_for_click.clone() }, window, cx)
+                            })),
+                        ),
+                )
+            })
             .child(
-                button(ElementId::Name(format!("add-{key}").into()), "Add", ButtonKind::Secondary, ControlSize::Small, true, p)
-                    .on_click(cx.listener(move |this, _, window, cx| this.commit_field(&add_key, window, cx))),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .children(self.render_field(&add_key, 220., None, p, window, cx))
+                    .child(
+                        button(ElementId::Name(format!("add-{key}").into()), "Add", ButtonKind::Secondary, ControlSize::Small, true, p)
+                            .on_click(cx.listener(move |this, _, window, cx| this.commit_field(&add_key, window, cx))),
+                    ),
             )
     }
 
@@ -1891,19 +2003,23 @@ impl Settings {
             .into_any_element()
     }
 
-    /// What auto-read marked read and nobody undid, newest first, each with Mark Unread, and Mark
-    /// All Unread above them; a line saying nothing was marked while it is on and has done nothing.
-    fn render_auto_read(&self, p: &'static Palette, cx: &mut Context<Self>) -> Option<Div> {
+    /// What auto-read marked read and nobody undid, newest first: previews at most the 5 latest
+    /// rows inline with per-row Mark Unread, and offers "View All (N)" to open the full searchable
+    /// list window (or in-window sub-page in compact / Android mode).
+    fn render_auto_read(&self, p: &'static Palette, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
         let log = self.auto_read.as_ref()?;
         let enabled = self.flag(AUTO_READ).unwrap_or(false);
         if log.entries.is_empty() && !enabled {
             return None;
         }
+        let inline = self.on_close.is_some() || cfg!(target_os = "android");
+        let narrow = inline && f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let days = match self.entry(AUTO_READ_DAYS).map(|entry| &entry.value) {
             Some(SettingValue::Number { value }) => *value,
             _ => log.days,
         };
         let count = log.entries.len();
+        let (shown, hidden) = settings_list::preview_slice(&log.entries);
         let summary = if count == 0 {
             format!("Nothing yet. Unread notifications and newsletters older than {days} days show here once marked read.")
         } else {
@@ -1913,55 +2029,38 @@ impl Settings {
             )
         };
         let all: Vec<String> = log.entries.iter().map(|entry| entry.id.clone()).collect();
+        let title_block = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child("Recently marked read")
+            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(summary));
+        let mark_all_btn = (count > 0).then(|| {
+            button("auto-read-all", "Mark All Unread", ButtonKind::Secondary, ControlSize::Regular, true, p)
+                .on_click(cx.listener(move |this, _, _, cx| this.undo_auto_read(all.clone(), cx)))
+        });
+        let header_top = if narrow {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(title_block)
+                .when_some(mark_all_btn, |d, btn| d.child(div().flex().justify_end().child(btn)))
+        } else {
+            div().flex().items_center().gap(px(12.)).child(title_block).children(mark_all_btn)
+        };
         let header = div()
             .px(px(14.))
             .py(px(10.))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child("Recently marked read")
-                            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(summary)),
-                    )
-                    .when(count > 0, |d| {
-                        d.child(
-                            button("auto-read-all", "Mark All Unread", ButtonKind::Secondary, ControlSize::Regular, true, p)
-                                .on_click(cx.listener(move |this, _, _, cx| this.undo_auto_read(all.clone(), cx))),
-                        )
-                    }),
-            )
+            .child(header_top)
             .children(self.render_error(AUTO_READ_LOG, p))
             .into_any_element();
-        let rows = log.entries.iter().take(AUTO_READ_ROWS).enumerate().map(|(index, entry)| {
-            let marked = Some(mailstream::list_date(Some(entry.at.clone())))
-                .filter(|date| !date.is_empty())
-                .map(|date| format!("marked {date}"));
-            let detail = [
-                Some(if entry.category == Category::Newsletter { "Newsletter" } else { "Notification" }.to_owned()),
-                Some(
-                    if entry.reason == AutoReadReason::Superseded {
-                        "a newer one from the same sender arrived"
-                    } else {
-                        "unread too long"
-                    }
-                    .to_owned(),
-                ),
-                marked,
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("  ·  ");
+        let rows = shown.iter().enumerate().map(|(index, entry)| {
+            let detail = settings_list::format_auto_read_detail(entry);
             let id = entry.id.clone();
             div()
                 .px(px(14.))
@@ -1996,7 +2095,36 @@ impl Settings {
                 )
                 .into_any_element()
         });
-        group(std::iter::once(header).chain(rows).collect(), p)
+        let footer = (hidden > 0).then(|| {
+            let open_icon = if inline { Icon::Disclosure } else { Icon::OpenInWindow };
+            div()
+                .px(px(14.))
+                .py(px(8.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .text_size(px(text::FOOTNOTE))
+                        .text_color(p.muted)
+                        .child(format!("Showing {} latest of {count}", shown.len())),
+                )
+                .child(
+                    icon_label_button(
+                        "auto-read-view-all",
+                        Some(open_icon),
+                        format!("View All ({count})"),
+                        ButtonKind::Secondary,
+                        ControlSize::Small,
+                        true,
+                        p,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.open_list(SettingsListKind::AutoRead, window, cx))),
+                )
+                .into_any_element()
+        });
+        group(std::iter::once(header).chain(rows).chain(footer).collect(), p)
     }
 
     fn render_error(&self, key: &str, p: &Palette) -> Option<Div> {
@@ -2564,12 +2692,12 @@ fn heading(title: impl Into<SharedString>, p: &Palette) -> Div {
     div().pt(px(8.)).px(px(4.)).font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child(title.into())
 }
 
-fn card(p: &Palette) -> Div {
+pub(crate) fn card(p: &Palette) -> Div {
     div().flex().flex_col().rounded(px(radius::CARD)).border(px(stroke::HAIRLINE)).border_color(p.line).bg(p.fill)
 }
 
 /// Rows in a card divided by hairlines (Flutter's `_Group`); nothing when there are none.
-fn group(rows: Vec<AnyElement>, p: &Palette) -> Option<Div> {
+pub(crate) fn group(rows: Vec<AnyElement>, p: &Palette) -> Option<Div> {
     (!rows.is_empty()).then(|| {
         card(p).children(
             rows.into_iter().enumerate().map(|(index, row)| div().when(index > 0, |d| d.border_t_1().border_color(p.line)).child(row)),
@@ -2594,7 +2722,7 @@ fn setting_label(entry: &SettingEntry, range: Option<String>, p: &Palette) -> Di
         .child(div().text_size(px(text::CAPTION)).text_color(p.faint).child(key))
 }
 
-fn note(text: impl Into<SharedString>, p: &Palette) -> Div {
+pub(crate) fn note(text: impl Into<SharedString>, p: &Palette) -> Div {
     div().py(px(12.)).text_size(px(text::FOOTNOTE)).text_color(p.muted).child(text.into())
 }
 

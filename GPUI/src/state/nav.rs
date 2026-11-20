@@ -688,6 +688,11 @@ impl MailApp {
 
     /// Esc: ends a selection (MS-305), else the top layer goes, else the search.
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(settings) = &self.settings
+            && settings.update(cx, |s, cx| s.go_back(window, cx))
+        {
+            return;
+        }
         if self.close_settings(window, cx) {
             return;
         }

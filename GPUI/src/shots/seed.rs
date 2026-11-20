@@ -201,8 +201,22 @@ pub fn write(support: &Path, caches: &Path, grants: Grants) {
     std::fs::create_dir_all(support).expect("the data folder");
     write_accounts(support, grants);
     // Tagging stays on, or the list shows no tags; every conversation has one already, and this
-    // `omp` doesn't exist, so a run never tags anything with the person's own.
-    let settings = json!({ "aiTagging.ompPath": "/nonexistent/shots-omp" });
+    // `omp` doesn't exist, so a run never tags anything with the person's own. Trusted senders
+    // (none of them the Design Digest sender, so MS-364's remote banner stays held back) and the
+    // auto-read log carry more than 5 items so Settings shows its 5-item preview and full-list view.
+    let settings = json!({
+        "aiTagging.ompPath": "/nonexistent/shots-omp",
+        "remoteContent.trustedSenders": [
+            "alerts@status-page.example",
+            "billing@cloudhost.example",
+            "builds@ci-runner.example",
+            "digest@engineering-weekly.example",
+            "events@meetup-local.example",
+            "invoices@accounting.example",
+            "news@rust-notes.example",
+            "receipts@books-shop.example",
+        ],
+    });
     std::fs::write(support.join("settings.json"), serde_json::to_string_pretty(&settings).unwrap()).expect("settings.json");
     let mail = mail();
     mailstream_engine::avatars::web::serve_for_shots(DIGEST_BANNER, png_bytes(&digest_banner()));
@@ -211,6 +225,7 @@ pub fn write(support: &Path, caches: &Path, grants: Grants) {
     runtime.block_on(async {
         let cache = MailCache::new(support.join("mail.db"), caches.to_path_buf());
         write_mail(&cache, &mail);
+        write_auto_read(&cache);
         write_chat(&cache);
         write_calendar(&cache);
         cache.flush().await;
@@ -998,6 +1013,41 @@ fn write_calendar(cache: &MailCache) {
         },
     });
     cache.save_calendar(&parse(outlook), OUTLOOK);
+}
+
+/// Synthetic auto-read history (MS-422): 8 entries newest first so Settings previews the 5 latest
+/// and offers the full searchable window / sub-page.
+fn write_auto_read(cache: &MailCache) {
+    let base = now();
+    let rows = [
+        ("ar-1", "GitHub", "[taooceros/mailstream] Nightly build summary", "notification", "age", 2. * 3600.),
+        ("ar-2", "Rust Notes", "Issue #118: Async traits and zero-copy parsing", "newsletter", "superseded", 5. * 3600.),
+        ("ar-3", "CloudHost Status", "Scheduled maintenance completed in us-west", "notification", "age", 14. * 3600.),
+        ("ar-4", "Engineering Weekly", "How teams keep build caches fast at scale", "newsletter", "superseded", 26. * 3600.),
+        ("ar-5", "Linear", "Weekly digest: 4 issues moved to Done", "notification", "age", 38. * 3600.),
+        ("ar-6", "Books Shop", "Order #4821 shipped — tracking inside", "notification", "age", 54. * 3600.),
+        ("ar-7", "Meetup Local", "Systems Programming Social — photos posted", "newsletter", "age", 72. * 3600.),
+        ("ar-8", "CI Runner", "Artifact storage usage report for October", "notification", "age", 96. * 3600.),
+    ];
+    let entries: Vec<Value> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, sender, subject, category, reason, age_secs))| {
+            json!({
+                "id": format!("google:{GMAIL}:{id}"),
+                "key": format!("google:{GMAIL}:{id}"),
+                "account": GMAIL,
+                "sender": sender,
+                "subject": subject,
+                "category": category,
+                "reason": reason,
+                "at": base - age_secs,
+                "batch": (rows.len() - i) as u64,
+            })
+        })
+        .collect();
+    let handled: Vec<String> = entries.iter().filter_map(|e| e["key"].as_str().map(str::to_owned)).collect();
+    cache.save_auto_read(&json!({ "handled": handled, "entries": entries }));
 }
 
 /// The local day `days` from today, as `2026-11-14`.
