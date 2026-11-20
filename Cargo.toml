@@ -21,7 +21,9 @@ resolver = "3"
 # with Mailstream patches in `src/cosmic_text_system.rs`: drawing variable fonts at the weight
 # cosmic-text shaped them at (MS-230, MS-205), generic OpenType color-glyph detection and COLR v1
 # / color glyph rasterization via `vello_cpu` + `skrifa`, custom `FontSystem` construction, and
-# CSS generic family fallback resolution (`sans-serif`/`serif`/`monospace`, MS-434).
+# CSS generic family fallback resolution (`sans-serif`/`serif`/`monospace`, MS-434); plus Android
+# Vulkan-first instance creation with GLES fallback, persistent Vulkan `PipelineCache` support,
+# and background/trim GPU cache eviction (`wgpu_context.rs`, `wgpu_renderer.rs`, MS-441).
 # `GPUI/vendor/gpui-fast` is GPUI Fast's core 0.1.14 with two additions to `src/window.rs` (MS-293,
 # marked "Mailstream patch"): `Window::frame_signal_at`, when the platform asked for the frame being
 # drawn, which the animations' clock (`GPUI/src/swipe.rs`) steps by, and
@@ -106,12 +108,73 @@ taffy = { path = "GPUI/vendor/taffy" }
 [profile.dev.package."*"]
 opt-level = 2
 
-# Size-optimized Android release profile for `AndroidPoc/build-apk.sh` (leaves desktop `release`
-# with full speed and unwinding).
+# Android release profile for `AndroidPoc/build-apk.sh` (leaves desktop `release` with full speed
+# and unwinding). Uses `opt-level = "s"` globally (compact cold code while keeping LLVM ARM64 NEON
+# vectorization enabled, unlike `"z"`) and elevates CPU-hot rendering, layout, text, HTML, image,
+# crypto and database crates to `opt-level = 3` (MS-441).
 [profile.android-release]
 inherits = "release"
-opt-level = "z"
+opt-level = "s"
 lto = "thin"
 codegen-units = 1
-strip = true
+strip = "symbols"
 panic = "abort"
+
+[profile.android-release.package.gpui-fast]
+opt-level = 3
+[profile.android-release.package.gpui-fast-wgpu]
+opt-level = 3
+[profile.android-release.package.gpui-mobile]
+opt-level = 3
+[profile.android-release.package.mailstream-gpui]
+opt-level = 3
+[profile.android-release.package.vello_cpu]
+opt-level = 3
+[profile.android-release.package.vello_common]
+opt-level = 3
+[profile.android-release.package.swash]
+opt-level = 3
+[profile.android-release.package.cosmic-text]
+opt-level = 3
+[profile.android-release.package.rustybuzz]
+opt-level = 3
+[profile.android-release.package.skrifa]
+opt-level = 3
+[profile.android-release.package.read-fonts]
+opt-level = 3
+[profile.android-release.package.taffy]
+opt-level = 3
+[profile.android-release.package.stylo]
+opt-level = 3
+[profile.android-release.package.blitz-dom]
+opt-level = 3
+[profile.android-release.package.blitz-paint]
+opt-level = 3
+[profile.android-release.package.parley]
+opt-level = 3
+[profile.android-release.package.harfrust]
+opt-level = 3
+[profile.android-release.package.image]
+opt-level = 3
+[profile.android-release.package.png]
+opt-level = 3
+[profile.android-release.package.zune-jpeg]
+opt-level = 3
+[profile.android-release.package.flate2]
+opt-level = 3
+[profile.android-release.package.miniz_oxide]
+opt-level = 3
+[profile.android-release.package.turso]
+opt-level = 3
+[profile.android-release.package.turso_core]
+opt-level = 3
+[profile.android-release.package.ring]
+opt-level = 3
+[profile.android-release.package.aes-gcm]
+opt-level = 3
+[profile.android-release.package.blake3]
+opt-level = 3
+[profile.android-release.package.kurbo]
+opt-level = 3
+[profile.android-release.package.tiny-skia]
+opt-level = 3

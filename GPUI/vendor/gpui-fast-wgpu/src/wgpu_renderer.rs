@@ -307,45 +307,64 @@ impl WgpuRenderer {
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
 
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            // Fall back to the display handle already provided via InstanceDescriptor::display.
-            raw_display_handle: None,
-            raw_window_handle: window_handle.as_raw(),
-        };
-
-        // Use the existing context's instance if available, otherwise create a new one.
-        // The surface must be created with the same instance that will be used for
-        // adapter selection, otherwise wgpu will panic.
-        let instance = gpu_context
-            .borrow()
-            .as_ref()
-            .map(|ctx| ctx.instance.clone())
-            .unwrap_or_else(|| WgpuContext::instance(Some(Box::new(window.clone()))));
-
-        // Safety: The caller guarantees that the window handle is valid for the
-        // lifetime of this renderer. In practice, the RawWindow struct is created
-        // from the native window handles and the surface is dropped before the window.
-        let surface = unsafe {
-            instance
-                .create_surface_unsafe(target)
-                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
+        let raw_window_handle = window_handle.as_raw();
+        let make_surface = |instance: &wgpu::Instance| -> anyhow::Result<wgpu::Surface<'static>> {
+            let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+                // Fall back to the display handle already provided via InstanceDescriptor::display.
+                raw_display_handle: None,
+                raw_window_handle,
+            };
+            // Safety: The caller guarantees that the window handle is valid for the
+            // lifetime of this renderer. In practice, the RawWindow struct is created
+            // from the native window handles and the surface is dropped before the window.
+            unsafe {
+                instance
+                    .create_surface_unsafe(target)
+                    .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))
+            }
         };
 
         let mut ctx_ref = gpu_context.borrow_mut();
         let surface_configured = ctx_ref.is_none();
-        let context = match ctx_ref.as_mut() {
-            Some(context) => {
-                context.check_compatible_with_surface(&surface)?;
-                context
-            }
-            None => ctx_ref.insert(WgpuContext::new(
-                instance,
-                &surface,
-                &config,
-                compositor_gpu,
-            )?),
+        let (surface, context) = if let Some(context) = ctx_ref.as_mut() {
+            let surface = make_surface(&context.instance)?;
+            context.check_compatible_with_surface(&surface)?;
+            (surface, context)
+        } else if cfg!(target_os = "android") {
+            // Mailstream patch (MS-441): try Vulkan first on Android to skip EGL/GLES
+            // library loading and dummy context probing on modern Vulkan devices, falling
+            // back to GLES only if Vulkan is unavailable.
+            let vulkan_attempt = (|| -> anyhow::Result<(wgpu::Surface<'static>, WgpuContext)> {
+                let instance = WgpuContext::instance_with_backends(
+                    Some(Box::new(window.clone())),
+                    wgpu::Backends::VULKAN,
+                );
+                let surface = make_surface(&instance)?;
+                let context = WgpuContext::new(instance, &surface, &config, compositor_gpu)?;
+                Ok((surface, context))
+            })();
+            let (surface, new_context) = match vulkan_attempt {
+                Ok(ok) => ok,
+                Err(vulkan_err) => {
+                    log::warn!(
+                        "Vulkan initialization failed on Android ({vulkan_err:#}); falling back to GLES"
+                    );
+                    let instance = WgpuContext::instance_with_backends(
+                        Some(Box::new(window.clone())),
+                        wgpu::Backends::GL,
+                    );
+                    let surface = make_surface(&instance)?;
+                    let context = WgpuContext::new(instance, &surface, &config, compositor_gpu)?;
+                    (surface, context)
+                }
+            };
+            (surface, ctx_ref.insert(new_context))
+        } else {
+            let instance = WgpuContext::instance(Some(Box::new(window.clone())));
+            let surface = make_surface(&instance)?;
+            let new_context = WgpuContext::new(instance, &surface, &config, compositor_gpu)?;
+            (surface, ctx_ref.insert(new_context))
         };
-
         let atlas = Arc::new(WgpuAtlas::from_context(context));
 
         Self::new_internal(
@@ -705,6 +724,7 @@ impl WgpuRendererCore {
         path_sample_count: u32,
         dual_source_blending: bool,
         uses_webgl_instance_data: bool,
+        pipeline_cache: Option<&wgpu::PipelineCache>,
     ) -> WgpuPipelines {
         // Diagnostic guard: verify the device actually has
         // DUAL_SOURCE_BLENDING. We have a crash report (ZED-5G1) where a
@@ -811,7 +831,7 @@ impl WgpuRendererCore {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache: pipeline_cache,
             })
         };
 
@@ -1114,6 +1134,7 @@ impl WgpuRenderer {
             core.rendering_params.path_sample_count,
             core.dual_source_blending,
             core.uses_webgl_instance_data,
+            None,
         );
 
         if let RendererState::Ready { surface, core } = &self.state {
@@ -1260,6 +1281,11 @@ impl WgpuRendererCore {
         let dual_source_blending =
             context.supports_dual_source_blending() && !uses_webgl_instance_data;
         let bind_group_layouts = Self::create_bind_group_layouts(&device, uses_webgl_instance_data);
+        #[cfg(not(target_family = "wasm"))]
+        let pipeline_cache = context.load_pipeline_cache();
+        #[cfg(target_family = "wasm")]
+        let pipeline_cache: Option<(wgpu::PipelineCache, std::path::PathBuf, Option<Vec<u8>>)> =
+            None;
         let pipelines = Self::create_pipelines(
             &device,
             &bind_group_layouts,
@@ -1268,7 +1294,12 @@ impl WgpuRendererCore {
             rendering_params.path_sample_count,
             dual_source_blending,
             uses_webgl_instance_data,
+            pipeline_cache.as_ref().map(|(cache, _, _)| cache),
         );
+        #[cfg(not(target_family = "wasm"))]
+        if let Some((cache, path, previous)) = pipeline_cache {
+            WgpuContext::persist_pipeline_cache(cache, path, previous);
+        }
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -2153,9 +2184,28 @@ impl WgpuRenderer {
             }
             state @ (RendererState::Unconfigured { .. } | RendererState::Released) => state,
         };
-        // Drop intermediate textures since they reference the old surface size.
+        // Drop intermediate textures and offscreen scroll layer tiles immediately on background
+        // (MS-441) so Android's LMK sees lower background GPU memory; `replace_surface` clears
+        // the tile cache on resume anyway.
         if let Some(core) = self.core_mut() {
             core.resources.invalidate_intermediate_textures();
+            crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
+        }
+    }
+
+    /// Releases cached GPU memory in response to OS memory-trim signals (Mailstream patch, MS-441).
+    ///
+    /// Always evicts offscreen scroll layer tiles and intermediate path textures. When
+    /// `clear_atlas` is true (e.g. `TRIM_MEMORY_RUNNING_LOW` / `TRIM_MEMORY_BACKGROUND` /
+    /// `LowMemory`), also clears the sprite atlas and marks the renderer for a full redraw.
+    pub fn trim_memory(&mut self, clear_atlas: bool) {
+        if let Some(core) = self.core_mut() {
+            core.resources.invalidate_intermediate_textures();
+            crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
+        }
+        if clear_atlas {
+            self.atlas.clear();
+            self.needs_redraw = true;
         }
     }
 

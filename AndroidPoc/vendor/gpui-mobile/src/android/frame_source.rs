@@ -337,25 +337,29 @@ pub(crate) fn take_frame() -> bool {
     with_pacer(|pacer| pacer.take_frame(Instant::now())).unwrap_or(false)
 }
 
-/// How long the loop may block on its looper: zero with a frame due, up to
-/// the next delayed dispatcher task or the fallback frame otherwise, and
-/// never more than [`IDLE_POLL_CAP`]. `can_draw` is whether the loop would
-/// take a frame right now; while the window is inactive a due frame stays
-/// owed but must not keep the loop awake.
-pub(crate) fn poll_timeout(next_delayed_task: Option<Instant>, can_draw: bool) -> Duration {
+/// How long the loop may block on its looper: `Some(Duration::ZERO)` with a frame due, up to
+/// the next delayed dispatcher task or the fallback frame otherwise, and `None` (wait
+/// indefinitely until an event or `ALooper_wake` arrives) while the window is inactive with no
+/// delayed tasks pending. `can_draw` is whether the loop would take a frame right now; while
+/// the window is inactive a due frame stays owed but must not keep the loop awake.
+pub(crate) fn poll_timeout(
+    next_delayed_task: Option<Instant>,
+    can_draw: bool,
+) -> Option<Duration> {
     let now = Instant::now();
-    let mut timeout = IDLE_POLL_CAP;
+    let mut timeout: Option<Duration> = if can_draw { Some(IDLE_POLL_CAP) } else { None };
     if let Some(due) = next_delayed_task {
-        timeout = timeout.min(due.saturating_duration_since(now));
+        let until = due.saturating_duration_since(now);
+        timeout = Some(timeout.map_or(until, |cur| cur.min(until)));
     }
     if can_draw {
         if let Some(Some(frame)) = with_pacer(|pacer| pacer.poll_timeout(now)) {
-            timeout = timeout.min(frame);
+            timeout = Some(timeout.map_or(frame, |cur| cur.min(frame)));
         }
     }
     // The loops hand this to `ALooper_pollOnce` in whole milliseconds; round
     // up so a sub-millisecond remainder does not become a zero-timeout spin.
-    Duration::from_millis(timeout.as_micros().div_ceil(1000) as u64)
+    timeout.map(|dur| Duration::from_millis(dur.as_micros().div_ceil(1000) as u64))
 }
 
 /// Wakes the loop from any thread so it notices work that arrived outside

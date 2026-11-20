@@ -269,11 +269,12 @@ fn render_thread(launch: Launch) {
         // Sleep on the looper until a command, a dispatcher task or the vsync
         // callback for a wanted frame arrives; the timeout only covers delayed
         // dispatcher tasks and the clock fallback without a choreographer.
-        let timeout = super::frame_source::poll_timeout(platform.next_delayed_due(), can_draw);
+        let timeout_ms = super::frame_source::poll_timeout(platform.next_delayed_due(), can_draw)
+            .map_or(-1, |dur| dur.as_millis().min(i32::MAX as u128) as i32);
         // SAFETY: called only from the thread that owns this looper.
         unsafe {
             ndk_sys::ALooper_pollOnce(
-                timeout.as_millis().min(i32::MAX as u128) as i32,
+                timeout_ms,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),

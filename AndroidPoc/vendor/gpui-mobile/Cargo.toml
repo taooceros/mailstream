@@ -50,13 +50,13 @@ microphone = []
 media_session = []
 
 [lib]
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 # ── shared deps (all platforms) ──────────────────────────────────────────────
 
 [dependencies]
 anyhow       = "1"
-log          = { version = "0.4", features = ["kv_unstable_serde", "serde"] }
+log          = "0.4"
 parking_lot  = "0.12"
 futures      = "0.3"
 raw-window-handle = "0.6"

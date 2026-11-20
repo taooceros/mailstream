@@ -47,7 +47,7 @@
 use std::{
     ffi::c_void,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         Arc, OnceLock,
     },
     time::Duration,
@@ -86,6 +86,7 @@ static TERM_WINDOW_PENDING: AtomicBool = AtomicBool::new(false);
 static INIT_WINDOW_PENDING: AtomicBool = AtomicBool::new(false);
 static WINDOW_RESIZED_PENDING: AtomicBool = AtomicBool::new(false);
 static CONFIG_CHANGED_PENDING: AtomicBool = AtomicBool::new(false);
+static TRIM_MEMORY_PENDING: AtomicI32 = AtomicI32::new(0);
 
 use android_activity::{AndroidApp, MainEvent, PollEvent};
 
@@ -593,6 +594,66 @@ pub fn request_config_refresh() {
     super::frame_source::wake();
 }
 
+/// Request a deferred GPU/cache memory trim on the native render thread (safe to call from
+/// `Activity.onTrimMemory(int)` on the Java UI thread or `MainEvent::LowMemory`).
+pub fn request_trim_memory(level: i32) {
+    if level <= 0 {
+        return;
+    }
+    TRIM_MEMORY_PENDING.fetch_max(level, Ordering::AcqRel);
+    super::frame_source::wake();
+}
+
+/// Configures the directory where `gpui-fast-wgpu` persists its Vulkan `PipelineCache`.
+pub fn set_pipeline_cache_dir(dir: std::path::PathBuf) {
+    gpui_wgpu::set_pipeline_cache_dir(dir);
+}
+
+/// Query Android's app cache directory (`Context.getCacheDir().getAbsolutePath()`) via JNI.
+pub fn query_cache_dir_via_jni() -> Option<std::path::PathBuf> {
+    with_env(|env| {
+        let act = activity(env)?;
+        let cache_file = match env
+            .call_method(
+                &act,
+                jni::jni_str!("getCacheDir"),
+                jni::jni_sig!("()Ljava/io/File;"),
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            Ok(f) if !f.is_null() => f,
+            _ => {
+                env.exception_clear();
+                return Ok(None);
+            }
+        };
+        let path_obj = match env
+            .call_method(
+                &cache_file,
+                jni::jni_str!("getAbsolutePath"),
+                jni::jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            Ok(s) if !s.is_null() => s,
+            _ => {
+                env.exception_clear();
+                return Ok(None);
+            }
+        };
+        let path = get_string(env, &path_obj);
+        if path.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(std::path::PathBuf::from(path)))
+        }
+    })
+    .ok()
+    .flatten()
+}
+
 thread_local! {
     static TOUCH_RESAMPLER: std::cell::RefCell<crate::touch_resampler::TouchResampler> =
         std::cell::RefCell::new(crate::touch_resampler::TouchResampler::new());
@@ -903,23 +964,10 @@ pub fn run_event_loop(app: &AndroidApp) {
     // Vsync pacing lives on this thread's looper.
     super::frame_source::install();
     let mut iteration: u64 = 0;
-    let mut last_heartbeat = std::time::Instant::now();
     let mut app_is_active = false;
 
     loop {
         iteration += 1;
-
-        // Log a heartbeat every 5 seconds so we can tell if the loop is alive.
-        let now = std::time::Instant::now();
-        if now.duration_since(last_heartbeat) >= Duration::from_secs(5) {
-            log::info!(
-                "run_event_loop: heartbeat — iteration={}, init_done={}, active={}",
-                iteration,
-                INIT_WINDOW_DONE.load(Ordering::Relaxed),
-                app_is_active,
-            );
-            last_heartbeat = now;
-        }
 
         // Check if quit was requested.
         if let Some(platform) = PLATFORM.get() {
@@ -944,7 +992,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                 .and_then(|platform| platform.next_delayed_due()),
             INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active,
         );
-        app.poll_events(Some(timeout), |event| match event {
+        app.poll_events(timeout, |event| match event {
             PollEvent::Main(main_event) => {
                 handle_main_event(app, main_event);
             }
@@ -1113,6 +1161,26 @@ pub fn run_event_loop(app: &AndroidApp) {
             resume_platform_views();
         }
 
+        // 7. TrimMemory / LowMemory — evict cached GPU tile/atlas memory under OS pressure.
+        let trim_level = TRIM_MEMORY_PENDING.swap(0, Ordering::AcqRel);
+        if trim_level > 0 {
+            // Android ComponentCallbacks2 levels:
+            //   RUNNING_MODERATE = 5, RUNNING_LOW = 10, RUNNING_CRITICAL = 15,
+            //   UI_HIDDEN = 20, BACKGROUND = 40, MODERATE = 60, COMPLETE = 80.
+            let clear_atlas =
+                trim_level >= 40 || trim_level == 10 || trim_level == 15;
+            log::info!(
+                "deferred: TrimMemory level={} (clear_atlas={})",
+                trim_level,
+                clear_atlas
+            );
+            if let Some(platform) = PLATFORM.get() {
+                if let Some(win) = platform.primary_window() {
+                    win.trim_memory(clear_atlas);
+                }
+            }
+        }
+
         // Track active/focused state.
         if let Some(platform) = PLATFORM.get() {
             if let Some(win) = platform.primary_window() {
@@ -1201,6 +1269,9 @@ pub fn run_event_loop(app: &AndroidApp) {
 
 /// Pause all platform views when the app goes to background.
 fn pause_platform_views() {
+    if crate::platform_view::PlatformViewRegistry::global().active_view_count() == 0 {
+        return;
+    }
     let _ = with_env(|env| {
         if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
             let _ = env.call_static_method(
@@ -1217,6 +1288,9 @@ fn pause_platform_views() {
 
 /// Resume all platform views when the app returns to foreground.
 fn resume_platform_views() {
+    if crate::platform_view::PlatformViewRegistry::global().active_view_count() == 0 {
+        return;
+    }
     let _ = with_env(|env| {
         if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
             let _ = env.call_static_method(
@@ -1233,6 +1307,9 @@ fn resume_platform_views() {
 
 /// Dispose all platform views during app shutdown.
 fn dispose_all_platform_views() {
+    if crate::platform_view::PlatformViewRegistry::global().active_view_count() == 0 {
+        return;
+    }
     let _ = with_env(|env| {
         if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
             let _ = env.call_static_method(
@@ -1307,7 +1384,9 @@ fn handle_main_event(_app: &AndroidApp, event: MainEvent<'_>) {
         }
 
         MainEvent::LowMemory => {
-            log::warn!("MainEvent::LowMemory — consider releasing cached resources");
+            log::warn!("MainEvent::LowMemory — scheduling aggressive GPU cache trim");
+            // Matches Android ComponentCallbacks2.TRIM_MEMORY_COMPLETE (80).
+            TRIM_MEMORY_PENDING.fetch_max(80, Ordering::AcqRel);
         }
 
         MainEvent::Destroy => {

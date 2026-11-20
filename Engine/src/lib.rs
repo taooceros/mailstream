@@ -315,11 +315,17 @@ impl Engine {
     /// store (it paints from mail.db and loads every account's mailboxes and inboxes), polling,
     /// push and the chat store (it paints from mail.db and polls every account's chat spaces).
     pub fn start(config: Config) -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .thread_name("mailstream-engine")
-            .enable_all()
-            .build()
-            .expect("the engine's runtime starts");
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.thread_name("mailstream-engine").enable_all();
+        #[cfg(target_os = "android")]
+        {
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .clamp(2, 4);
+            builder.worker_threads(workers).max_blocking_threads(16);
+        }
+        let runtime = builder.build().expect("the engine's runtime starts");
         let directory = &config.support_directory;
         let _ = std::fs::create_dir_all(directory);
         let accounts = Arc::new(Accounts::new(directory));
@@ -451,7 +457,17 @@ impl Engine {
     /// listeners when what it says changed. The directory is watched, so saves that replace the
     /// file are followed too.
     fn follow_settings(core: &Arc<Core>) -> Option<notify::RecommendedWatcher> {
-        watch_settings(core.settings.clone(), core.events.clone())
+        // Android has no external CLI/daemon editing settings.json inside the app sandbox, and
+        // `run_local_settings` already reloads and emits `"settings"` directly.
+        #[cfg(target_os = "android")]
+        {
+            let _ = core;
+            None
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            watch_settings(core.settings.clone(), core.events.clone())
+        }
     }
 
     /// Runs one command; the future may be awaited on any executor.

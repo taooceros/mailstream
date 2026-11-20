@@ -18,6 +18,7 @@ mod android_entry {
     static INSET_LEFT: AtomicU32 = AtomicU32::new(0);
     static INSET_RIGHT: AtomicU32 = AtomicU32::new(0);
     static FONT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
+    static DISPLAY_DENSITY: AtomicU32 = AtomicU32::new(0);
     #[unsafe(no_mangle)]
     pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeInsets(
         _env: *mut std::ffi::c_void,
@@ -29,16 +30,23 @@ mod android_entry {
         density: f32,
     ) {
         let scale = if density > 0.0 { density } else { 1.0 };
-        INSET_TOP.store((top.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
-        INSET_BOTTOM.store((bottom.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
-        INSET_LEFT.store((left.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
-        INSET_RIGHT.store((right.max(0) as f32 / scale).to_bits(), Ordering::Relaxed);
+        let t = (top.max(0) as f32 / scale).to_bits();
+        let b = (bottom.max(0) as f32 / scale).to_bits();
+        let l = (left.max(0) as f32 / scale).to_bits();
+        let r = (right.max(0) as f32 / scale).to_bits();
+        let changed = INSET_TOP.swap(t, Ordering::Relaxed) != t
+            || INSET_BOTTOM.swap(b, Ordering::Relaxed) != b
+            || INSET_LEFT.swap(l, Ordering::Relaxed) != l
+            || INSET_RIGHT.swap(r, Ordering::Relaxed) != r;
+        if !changed {
+            return;
+        }
         log::info!(
-            "mailstream-android-poc: safe area insets logical top={:.1} bottom={:.1} left={:.1} right={:.1}",
-            top.max(0) as f32 / scale,
-            bottom.max(0) as f32 / scale,
-            left.max(0) as f32 / scale,
-            right.max(0) as f32 / scale,
+            "mailstream-android: safe area insets logical top={:.1} bottom={:.1} left={:.1} right={:.1}",
+            f32::from_bits(t),
+            f32::from_bits(b),
+            f32::from_bits(l),
+            f32::from_bits(r),
         );
         // Wake the render thread safely from the Java UI thread without touching GPUI directly.
         jni::request_config_refresh();
@@ -56,13 +64,32 @@ mod android_entry {
         } else {
             1.0
         };
-        FONT_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+        let density_bits = if density.is_finite() && density > 0.0 {
+            density.to_bits()
+        } else {
+            0
+        };
+        let font_bits = scale.to_bits();
+        let changed = DISPLAY_DENSITY.swap(density_bits, Ordering::Relaxed) != density_bits
+            || FONT_SCALE.swap(font_bits, Ordering::Relaxed) != font_bits;
+        if !changed {
+            return;
+        }
         log::info!(
-            "mailstream-android-poc: display metrics density={:.3} font_scale={:.3}",
+            "mailstream-android: display metrics density={:.3} font_scale={:.3}",
             density,
             scale,
         );
         jni::request_config_refresh();
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeTrimMemory(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        level: i32,
+    ) {
+        jni::request_trim_memory(level);
     }
 
     fn android_font_scale() -> f32 {
@@ -82,12 +109,13 @@ mod android_entry {
         }
     }
 
-    fn configure_android_engine(support_dir: PathBuf) {
+    fn configure_android_engine(support_dir: PathBuf, cache_dir: PathBuf) {
         let mut config = Config::for_this_app().in_directory(support_dir);
+        config.cache_directory = cache_dir;
         config.control_socket = false;
         config.oauth.open_url = std::sync::Arc::new(|url| {
             if let Err(err) = gpui_mobile::packages::url_launcher::launch_url(url) {
-                log::warn!("mailstream-android-poc: open_url failed: {err}");
+                log::warn!("mailstream-android: open_url failed: {err}");
             }
         });
         let _ = mailstream::configure_engine(config);
@@ -117,24 +145,38 @@ mod android_entry {
     /// Entry point when hosted via `android-activity` (`NativeActivity` / `GpuiActivity`).
     #[unsafe(no_mangle)]
     fn android_main(app: android_activity::AndroidApp) {
+        let filter = android_logger::FilterBuilder::new()
+            .filter_level(log::LevelFilter::Warn)
+            .filter_module("mailstream_android_poc", log::LevelFilter::Info)
+            .filter_module("mailstream_gpui", log::LevelFilter::Info)
+            .filter_module("mailstream_android_fonts", log::LevelFilter::Info)
+            .filter_module("mailstream", log::LevelFilter::Info)
+            .filter_module("mailstream_engine", log::LevelFilter::Info)
+            .filter_module("gpui_mobile", log::LevelFilter::Info)
+            .filter_module("gpui_wgpu", log::LevelFilter::Info)
+            .build();
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Info)
-                .with_tag("mailstream-gpui-poc"),
+                .with_filter(filter)
+                .with_tag("mailstream"),
         );
         jni::install_panic_hook();
-        log::info!("mailstream-android-poc: android_main entered");
+        log::info!("mailstream-android: android_main entered");
+
+        let _platform = jni::init_platform(&app);
+        let Some(shared) = jni::shared_platform() else {
+            log::error!("mailstream-android: shared_platform() returned None");
+            return;
+        };
 
         let support_dir = app
             .internal_data_path()
             .unwrap_or_else(|| PathBuf::from("/data/local/tmp/mailstream-poc"));
-        configure_android_engine(support_dir);
-
-        let _platform = jni::init_platform(&app);
-        let Some(shared) = jni::shared_platform() else {
-            log::error!("mailstream-android-poc: shared_platform() returned None");
-            return;
-        };
+        let cache_dir = jni::query_cache_dir_via_jni()
+            .unwrap_or_else(|| support_dir.join("cache"));
+        jni::set_pipeline_cache_dir(cache_dir.join("wgpu-pipeline-cache"));
+        configure_android_engine(support_dir, cache_dir);
 
         Application::with_platform(shared.into_rc())
             .with_assets(mailstream_gpui::Assets)
@@ -148,7 +190,9 @@ mod android_entry {
     /// across Activity recreations.
     #[allow(dead_code)]
     pub fn start_hosted(support_dir: PathBuf) {
-        configure_android_engine(support_dir);
+        let cache_dir = support_dir.join("cache");
+        jni::set_pipeline_cache_dir(cache_dir.join("wgpu-pipeline-cache"));
+        configure_android_engine(support_dir, cache_dir);
         host::start_with_assets(mailstream_gpui::Assets, |cx| {
             launch_mailstream_ui(cx);
         });

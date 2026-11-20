@@ -725,6 +725,19 @@ pub fn configure_engine(config: mailstream_engine::Config) -> Result<(), mailstr
     CUSTOM_CONFIG.set(config)
 }
 
+/// Cache directory configured for this process, falling back to the engine's default cache folder.
+#[cfg(any(feature = "blitz", test))]
+pub(crate) fn configured_cache_directory() -> std::path::PathBuf {
+    resolve_cache_directory(CUSTOM_CONFIG.get())
+}
+
+#[cfg(any(feature = "blitz", test))]
+fn resolve_cache_directory(custom: Option<&mailstream_engine::Config>) -> std::path::PathBuf {
+    custom
+        .map(|config| config.cache_directory.clone())
+        .unwrap_or_else(mailstream_engine::cache_directory)
+}
+
 /// The process's engine, started on first use.
 static ENGINE: LazyLock<mailstream_engine::Engine> = LazyLock::new(|| {
     mailstream_engine::Engine::start(
@@ -759,4 +772,24 @@ fn draft_arguments(draft: CalendarDraft) -> Value {
         "title": draft.title, "start": draft.start, "end": draft.end, "all-day": draft.all_day.then_some(true),
         "location": draft.location, "notes": draft.notes, "attendees": draft.attendees,
     })
+}
+
+#[cfg(test)]
+mod cache_dir_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_cache_directory_prefers_custom_config() {
+        let mut config = mailstream_engine::Config::for_this_app();
+        config.cache_directory = PathBuf::from("/data/user/0/dev.mailstream.gpui.poc/cache");
+        assert_eq!(
+            resolve_cache_directory(Some(&config)),
+            PathBuf::from("/data/user/0/dev.mailstream.gpui.poc/cache")
+        );
+        assert_eq!(
+            resolve_cache_directory(None),
+            mailstream_engine::cache_directory()
+        );
+    }
 }

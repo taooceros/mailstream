@@ -7,10 +7,22 @@ use anyhow::Context as _;
 #[cfg(not(target_family = "wasm"))]
 use gpui_util::ResultExt;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::TextureFormat;
 
+// Mailstream patch (MS-441): optional directory for persisting Vulkan `PipelineCache` blobs
+// across cold starts (especially impactful on Android where GPU drivers leave caching to apps).
+#[cfg(not(target_family = "wasm"))]
+static PIPELINE_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Configures the directory where Vulkan pipeline caches are loaded from and persisted to.
+/// Safe to call once early during startup (before the first `WgpuRenderer` is created).
+#[cfg(not(target_family = "wasm"))]
+pub fn set_pipeline_cache_dir(dir: PathBuf) {
+    let _ = PIPELINE_CACHE_DIR.set(dir);
+}
 #[derive(Clone)]
 pub struct WgpuContext {
     pub(crate) fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore,
@@ -443,7 +455,13 @@ impl WgpuContext {
                 Subpixel text antialiasing will be disabled."
             );
         }
-
+        // Mailstream patch (MS-441): enable Vulkan pipeline cache when a cache directory is configured.
+        #[cfg(not(target_family = "wasm"))]
+        if PIPELINE_CACHE_DIR.get().is_some()
+            && adapter.features().contains(wgpu::Features::PIPELINE_CACHE)
+        {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
         #[cfg(target_family = "wasm")]
         let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
@@ -482,13 +500,93 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+        Self::instance_with_backends(display, wgpu::Backends::VULKAN | wgpu::Backends::GL)
+    }
+
+    // Mailstream patch (MS-441): allow Android to try Vulkan first without initializing EGL/GLES.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn instance_with_backends(
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+        backends: wgpu::Backends,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display,
         })
+    }
+
+    // Mailstream patch (MS-441): load a persisted Vulkan pipeline cache when configured and supported.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn load_pipeline_cache(
+        &self,
+    ) -> Option<(wgpu::PipelineCache, PathBuf, Option<Vec<u8>>)> {
+        const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+        let dir = PIPELINE_CACHE_DIR.get()?;
+        if !self.device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            return None;
+        }
+        let key = wgpu::util::pipeline_cache_key(&self.adapter.get_info())?;
+        let path = dir.join(format!("{key}.bin"));
+        let initial = std::fs::metadata(&path)
+            .ok()
+            .filter(|meta| meta.is_file() && meta.len() > 0 && meta.len() <= MAX_CACHE_BYTES)
+            .and_then(|_| std::fs::read(&path).ok());
+        let initial_len = initial.as_ref().map_or(0, Vec::len);
+        // SAFETY: `initial` is only ever bytes previously produced by `PipelineCache::get_data`
+        // under the matching `pipeline_cache_key`, and `fallback: true` guarantees safe recovery
+        // if the driver version changed or the cache is corrupt.
+        let cache = unsafe {
+            self.device
+                .create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                    label: Some("gpui_pipeline_cache"),
+                    data: initial.as_deref(),
+                    fallback: true,
+                })
+        };
+        log::info!(
+            "wgpu pipeline cache ready ({}, loaded {} bytes)",
+            path.display(),
+            initial_len
+        );
+        Some((cache, path, initial))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn persist_pipeline_cache(
+        cache: wgpu::PipelineCache,
+        path: PathBuf,
+        previous: Option<Vec<u8>>,
+    ) {
+        let _ = std::thread::Builder::new()
+            .name("gpui-pipeline-cache".into())
+            .spawn(move || {
+                let Some(data) = cache.get_data() else {
+                    return;
+                };
+                if data.is_empty() || previous.as_deref() == Some(data.as_slice()) {
+                    return;
+                }
+                if let Some(parent) = path.parent() {
+                    if let Err(err) = std::fs::create_dir_all(parent) {
+                        log::warn!("failed to create pipeline cache dir {}: {err}", parent.display());
+                        return;
+                    }
+                }
+                let tmp = path.with_extension("bin.tmp");
+                if let Err(err) = std::fs::write(&tmp, &data) {
+                    log::warn!("failed to write pipeline cache {}: {err}", tmp.display());
+                    return;
+                }
+                if let Err(err) = std::fs::rename(&tmp, &path) {
+                    let _ = std::fs::remove_file(&tmp);
+                    log::warn!("failed to persist pipeline cache {}: {err}", path.display());
+                } else {
+                    log::info!("persisted wgpu pipeline cache ({} bytes)", data.len());
+                }
+            });
     }
 
     pub fn check_compatible_with_surface(&self, surface: &wgpu::Surface<'_>) -> anyhow::Result<()> {

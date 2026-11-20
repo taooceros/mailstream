@@ -116,6 +116,13 @@ export CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android${API_LEVEL}-c
 export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$AR_aarch64_linux_android"
+# Android 15+ 16 KB ELF page alignment + linker dead-code section GC (MS-441).
+ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384 -C link-arg=-Wl,--gc-sections"
+if [[ -n "${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-}" ]]; then
+  export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS $ANDROID_RUSTFLAGS"
+else
+  export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="$ANDROID_RUSTFLAGS"
+fi
 
 # Keep cargo build output outside ovnfs checkouts.
 if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
@@ -151,7 +158,11 @@ javac --release 11 -classpath "$ANDROID_JAR" -d "$OUT_DIR/classes" \
   "$POC/android/src/dev/gpui/mobile/GpuiClipboard.java"
 
 echo "==> Dexing classes with d8"
-"$BUILD_TOOLS/d8" --min-api "$API_LEVEL" --lib "$ANDROID_JAR" --output "$OUT_DIR/stage" \
+D8_FLAGS=(--min-api "$API_LEVEL" --lib "$ANDROID_JAR" --output "$OUT_DIR/stage")
+if [[ "$PROFILE" == "release" ]]; then
+  D8_FLAGS+=(--release)
+fi
+"$BUILD_TOOLS/d8" "${D8_FLAGS[@]}" \
   $(find "$OUT_DIR/classes" -name '*.class')
 
 echo "==> Compiling Android resources with aapt2"
@@ -162,10 +173,10 @@ echo "==> Linking AndroidManifest.xml and resources with aapt2"
 "$BUILD_TOOLS/aapt2" link \
   -I "$ANDROID_JAR" \
   --manifest "$POC/android/AndroidManifest.xml" \
-  -R "$OUT_DIR/res/resources.zip" \
   --min-sdk-version "$API_LEVEL" \
   --target-sdk-version 35 \
-  -o "$OUT_DIR/unaligned.apk"
+  -o "$OUT_DIR/unaligned.apk" \
+  "$OUT_DIR/res/resources.zip"
 
 cp "$SO" "$OUT_DIR/stage/lib/arm64-v8a/libmailstream_android_poc.so"
 
@@ -179,12 +190,13 @@ with zipfile.ZipFile(apk_path, "a", compression=zipfile.ZIP_DEFLATED) as zf:
     for p in sorted(stage.rglob("*")):
         if p.is_file():
             arc = p.relative_to(stage).as_posix()
-            # Keep .so deflated (extractNativeLibs=true) for smaller APK size.
-            zf.write(p, arc, compress_type=zipfile.ZIP_DEFLATED)
+            # Store native .so uncompressed (extractNativeLibs=false) for direct 16 KB page-aligned mmap.
+            compression = zipfile.ZIP_STORED if arc.endswith(".so") else zipfile.ZIP_DEFLATED
+            zf.write(p, arc, compress_type=compression)
 PY
 
-echo "==> Aligning APK with zipalign"
-"$BUILD_TOOLS/zipalign" -f -p 4 "$OUT_DIR/unaligned.apk" "$OUT_DIR/aligned.apk"
+echo "==> Aligning APK with zipalign (16 KB page alignment for .so)"
+"$BUILD_TOOLS/zipalign" -f -P 16 4 "$OUT_DIR/unaligned.apk" "$OUT_DIR/aligned.apk"
 
 if [[ "$USE_DEBUG_KEYSTORE" == "1" && ! -f "$KEYSTORE" ]]; then
   mkdir -p "$(dirname "$KEYSTORE")"
@@ -212,6 +224,7 @@ MAILSTREAM_KS_PASS="$KEYSTORE_PASS" MAILSTREAM_KEY_PASS="$KEY_PASS" \
 
 echo "==> Verifying APK"
 "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$FINAL_APK"
-"$BUILD_TOOLS/zipalign" -c -v 4 "$FINAL_APK" | tail -n 5
+"$BUILD_TOOLS/zipalign" -c -P 16 -v 4 "$FINAL_APK" | tail -n 5
+"$TOOLCHAIN/llvm-readelf" -l "$SO" | grep -E 'LOAD' | head -n 6
 "$BUILD_TOOLS/aapt2" dump badging "$FINAL_APK" | awk 'NR<=16'
 ls -lh "$SO" "$FINAL_APK"

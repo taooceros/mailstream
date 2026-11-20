@@ -181,10 +181,12 @@ impl AndroidDispatcher {
             "AndroidDispatcher::new() must be called on the Android main thread"
         );
 
+        // Cap GPUI's background pool on mobile so an 8-core phone does not spawn 8 mostly-idle
+        // worker threads alongside the engine's tokio runtime (MS-441).
         let pool_threads = std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(4)
-            .max(2);
+            .unwrap_or(2)
+            .clamp(2, 4);
 
         let main_queue = Arc::new(Mutex::new(MainQueue {
             tasks: VecDeque::new(),

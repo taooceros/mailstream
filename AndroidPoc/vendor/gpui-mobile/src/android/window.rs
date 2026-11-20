@@ -391,7 +391,11 @@ impl AndroidWindow {
             height,
             scale_factor,
             safe_area_insets: SafeAreaInsets::default(),
-            appearance: WindowAppearance::Light,
+            appearance: if super::jni::query_night_mode_via_jni() {
+                WindowAppearance::Dark
+            } else {
+                WindowAppearance::Light
+            },
             is_active: true,
             transparent,
             surface_window_addr,
@@ -623,6 +627,22 @@ impl AndroidWindow {
         // window and all its GPUI callbacks should stay alive so that
         // when the surface is recreated on resume, rendering resumes
         // seamlessly via init_window().
+    }
+
+    /// Releases cached GPU resources in response to Android `onTrimMemory` / `LowMemory`.
+    pub fn trim_memory(&self, clear_atlas: bool) {
+        let mut state = self.state.lock();
+        if let Some(renderer) = &mut state.renderer {
+            renderer.trim_memory(clear_atlas);
+        }
+        if clear_atlas {
+            self.force_render_once
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        drop(state);
+        if clear_atlas && self.is_active() {
+            super::frame_source::resume();
+        }
     }
 
     /// Called when `APP_CMD_WINDOW_RESIZED` fires.
@@ -1730,128 +1750,11 @@ impl PlatformWindow for AndroidPlatformWindow {
         self.window.gpu_specs()
     }
 
-    fn update_ime_position(&self, bounds: gpui::Bounds<gpui::Pixels>) {
-        // Update the IME candidate window position via JNI.
-        // Calls InputMethodManager.updateCursorAnchorInfo() with a
-        // CursorAnchorInfo built from the given bounds.
-        // Requires API level 21+ (Lollipop).
-
-        use crate::android::jni as jni_helpers;
-        use jni::objects::JValue;
-
-        let x: f32 = bounds.origin.x.into();
-        let y: f32 = bounds.origin.y.into();
-        let h: f32 = bounds.size.height.into();
-
-        let _ = jni_helpers::with_env(|env| {
-            let activity = jni_helpers::activity(env)?;
-
-            // 1. Get InputMethodManager
-            let service_name = env.new_string("input_method").map_err(|e| e.to_string())?;
-            let imm = env
-                .call_method(
-                    &activity,
-                    jni::jni_str!("getSystemService"),
-                    jni::jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
-                    &[JValue::Object(&service_name)],
-                )
-                .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
-            if imm.is_null() {
-                return Err("getSystemService returned null".to_string());
-            }
-
-            // 2. Build CursorAnchorInfo
-            let builder = env
-                .new_object(
-                    jni::jni_str!("android/view/inputmethod/CursorAnchorInfo$Builder"),
-                    jni::jni_sig!("()V"),
-                    &[],
-                )
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
-
-            let _ = env.call_method(
-                &builder,
-                jni::jni_str!("setInsertionMarkerLocation"),
-                jni::jni_sig!("(FFFFI)Landroid/view/inputmethod/CursorAnchorInfo$Builder;"),
-                &[
-                    JValue::Float(x),
-                    JValue::Float(y),
-                    JValue::Float(y + h * 0.8),
-                    JValue::Float(y + h),
-                    JValue::Int(0),
-                ],
-            );
-            env.exception_clear();
-
-            let anchor_info = env
-                .call_method(
-                    &builder,
-                    jni::jni_str!("build"),
-                    jni::jni_sig!("()Landroid/view/inputmethod/CursorAnchorInfo;"),
-                    &[],
-                )
-                .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
-            if anchor_info.is_null() {
-                return Err("CursorAnchorInfo.build() returned null".to_string());
-            }
-
-            // 3. Get decor view: activity.getWindow().getDecorView()
-            let window = env
-                .call_method(
-                    &activity,
-                    jni::jni_str!("getWindow"),
-                    jni::jni_sig!("()Landroid/view/Window;"),
-                    &[],
-                )
-                .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
-            if window.is_null() {
-                return Err("getWindow() returned null".to_string());
-            }
-
-            let decor_view = env
-                .call_method(
-                    &window,
-                    jni::jni_str!("getDecorView"),
-                    jni::jni_sig!("()Landroid/view/View;"),
-                    &[],
-                )
-                .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
-            if decor_view.is_null() {
-                return Err("getDecorView() returned null".to_string());
-            }
-
-            // 4. imm.updateCursorAnchorInfo(view, info)
-            let _ = env.call_method(
-                &imm,
-                jni::jni_str!("updateCursorAnchorInfo"),
-                jni::jni_sig!("(Landroid/view/View;Landroid/view/inputmethod/CursorAnchorInfo;)V"),
-                &[JValue::Object(&decor_view), JValue::Object(&anchor_info)],
-            );
-            env.exception_clear();
-
-            log::trace!("update_ime_position: x={:.0} y={:.0} h={:.0}", x, y, h);
-
-            Ok(())
-        });
+    fn update_ime_position(&self, _bounds: gpui::Bounds<gpui::Pixels>) {
+        // Android soft keyboards are docked by the system and `GpuiInputActivity`'s hidden
+        // `imeProxy` (not `decorView`) owns the `InputConnection`, so invoking
+        // `InputMethodManager.updateCursorAnchorInfo(decorView, ...)` over 7 JNI calls per
+        // cursor movement is a wasted no-op (MS-441).
     }
 }
 

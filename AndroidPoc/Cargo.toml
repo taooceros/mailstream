@@ -14,7 +14,7 @@ gpui-mobile = { path = "vendor/gpui-mobile", default-features = false, features 
 mailstream-gpui = { path = "../GPUI" }
 mailstream = { path = "../FFI", default-features = false, features = ["blitz"] }
 mailstream-engine = { path = "../Engine" }
-log = "0.4"
+log = { version = "0.4", features = ["release_max_level_info"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 ndk = { version = "0.9", features = ["nativewindow"] }

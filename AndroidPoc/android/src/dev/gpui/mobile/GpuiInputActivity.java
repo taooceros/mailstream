@@ -47,6 +47,7 @@ public class GpuiInputActivity extends NativeActivity {
     private static native void nativeInsets(int top, int bottom, int left, int right, float density);
     private static native void nativeDisplayMetrics(float density, float fontScale);
     private static native void nativeBack();
+    private static native void nativeTrimMemory(int level);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -107,6 +108,15 @@ public class GpuiInputActivity extends NativeActivity {
         super.onConfigurationChanged(newConfig);
         configureEdgeToEdge(newConfig);
         pushDisplayMetrics(newConfig);
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        try {
+            nativeTrimMemory(level);
+        } catch (UnsatisfiedLinkError ignored) {
+        }
     }
 
     private void pushDisplayMetrics(Configuration config) {

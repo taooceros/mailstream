@@ -374,7 +374,7 @@ static NET: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 static RESOURCES: LazyLock<Arc<Resources>> = LazyLock::new(|| {
     Arc::new(Resources {
         web: Arc::new(Browser),
-        cache: ResourceCache::new(mailstream_engine::cache_directory().join("reader-resources"), CACHE_CAP),
+        cache: ResourceCache::new(crate::configured_cache_directory().join("reader-resources"), CACHE_CAP),
         late: LATE,
     })
 });
