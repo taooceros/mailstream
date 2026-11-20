@@ -86,15 +86,18 @@ if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
   fi
 fi
 
-CARGO_FLAGS=(--manifest-path "$POC/Cargo.toml" --target aarch64-linux-android --lib)
+CARGO_FLAGS=(--manifest-path "$ROOT/Cargo.toml" -p mailstream-android-poc --target aarch64-linux-android --lib)
 if [[ "$PROFILE" == "release" ]]; then
-  CARGO_FLAGS+=(--release)
+  CARGO_FLAGS+=(--profile android-release)
+  TARGET_PROFILE="android-release"
+else
+  TARGET_PROFILE="$PROFILE"
 fi
 
 echo "==> Building libmailstream_android_poc.so ($PROFILE, aarch64-linux-android)"
 "$ROOT/scripts/capped" cargo build "${CARGO_FLAGS[@]}"
 
-SO="$CARGO_TARGET_DIR/aarch64-linux-android/$PROFILE/libmailstream_android_poc.so"
+SO="$CARGO_TARGET_DIR/aarch64-linux-android/$TARGET_PROFILE/libmailstream_android_poc.so"
 [[ -f "$SO" ]] || { echo "error: missing $SO" >&2; exit 1; }
 
 OUT_DIR="$CARGO_TARGET_DIR/apk-$PROFILE"

@@ -85,6 +85,10 @@ static FRAME_DUE: AtomicBool = AtomicBool::new(false);
 /// into [`schedule_frame`] on its next iteration.
 static OFF_THREAD_DEMAND: AtomicBool = AtomicBool::new(false);
 
+/// Hardware vsync instant captured when `AChoreographer` last fired, passed
+/// through `RequestFrameOptions::signal_at` for jitter-free animation clocks.
+static LAST_VSYNC_AT: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
+
 /// Installs the pacer on the calling thread, which must own an `ALooper`
 /// (`android-activity`'s native thread, or the host render thread after
 /// `ALooper_prepare`). Idempotent; spawns the vsync thread on first use.
@@ -168,12 +172,38 @@ fn vsync_thread(ready: mpsc::Sender<bool>) {
     }
 }
 
+fn vsync_instant(frame_time_nanos: std::os::raw::c_long) -> Instant {
+    let now = Instant::now();
+    if frame_time_nanos <= 0 {
+        return now;
+    }
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: `ts` is a valid out-pointer for `CLOCK_MONOTONIC`.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
+        let now_ns = (ts.tv_sec as i128) * 1_000_000_000 + (ts.tv_nsec as i128);
+        let lag_ns = now_ns - (frame_time_nanos as i128);
+        if (0..=100_000_000).contains(&lag_ns) {
+            if let Some(vsync) = now.checked_sub(Duration::from_nanos(lag_ns as u64)) {
+                return vsync;
+            }
+        }
+    }
+    now
+}
+
 unsafe extern "C" fn on_vsync(
-    _frame_time_nanos: std::os::raw::c_long,
+    frame_time_nanos: std::os::raw::c_long,
     _data: *mut std::ffi::c_void,
 ) {
+    *LAST_VSYNC_AT.lock() = Some(vsync_instant(frame_time_nanos));
     FRAME_DUE.store(true, Ordering::Release);
     wake_looper(&MAIN_LOOPER);
+}
+
+/// Takes the most recent `AChoreographer` vsync instant, if one fired since
+/// the last frame request.
+pub(crate) fn take_signal_at() -> Option<Instant> {
+    LAST_VSYNC_AT.lock().take()
 }
 
 fn wake_looper(looper: &AtomicPtr<ndk_sys::ALooper>) {

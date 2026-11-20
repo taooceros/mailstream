@@ -107,22 +107,14 @@ pub fn bind_keys(cx: &mut App) {
 /// Pastes clipboard HTML as Markdown into `editor` when present and non-empty; returns whether
 /// the paste was handled.
 fn paste_rich_into_editor(editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) -> bool {
-    #[cfg(feature = "gpui-fast")]
-    {
-        let Some(item) = cx.read_from_clipboard() else { return false };
-        let Some(html) = item.html() else { return false };
-        let markdown = mailstream::html_to_markdown(html);
-        if markdown.trim().is_empty() {
-            return false;
-        }
-        editor.update(cx, |input, cx| input.replace(markdown, window, cx));
-        true
+    let Some(item) = cx.read_from_clipboard() else { return false };
+    let Some(html) = item.html() else { return false };
+    let markdown = mailstream::html_to_markdown(html);
+    if markdown.trim().is_empty() {
+        return false;
     }
-    #[cfg(not(feature = "gpui-fast"))]
-    {
-        let _ = (editor, window, cx);
-        false
-    }
+    editor.update(cx, |input, cx| input.replace(markdown, window, cx));
+    true
 }
 
 /// Pastes clipboard plain text directly into `editor`, bypassing HTML-to-Markdown conversion.

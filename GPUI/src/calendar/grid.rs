@@ -317,10 +317,7 @@ impl CalendarPane {
                 if arrived {
                     self.pan = Pan::Rest;
                 } else {
-                    #[cfg(feature = "gpui-fast")]
                     window.request_animation_frame_at_display_rate();
-                    #[cfg(not(feature = "gpui-fast"))]
-                    window.request_animation_frame();
                 }
                 offset
             }

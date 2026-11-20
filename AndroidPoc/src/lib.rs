@@ -1,5 +1,5 @@
-//! Minimal isolated Android PoC reusing `GPUI/` (`mailstream-gpui`) + `FFI/` (`mailstream`)
-//! + `Engine/` (`mailstream-engine`) directly on top of `gpui-mobile` + upstream `gpui` (`gpui-pre`).
+//! Android entry reusing `GPUI/` (`mailstream-gpui`) + `FFI/` (`mailstream`)
+//! + `Engine/` (`mailstream-engine`) on top of `gpui-mobile` + `gpui-fast`.
 
 #[cfg(target_os = "android")]
 extern crate gpui_mobile;
