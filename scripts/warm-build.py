@@ -174,16 +174,18 @@ def remove_stale():
         print(f"Deleted {stale.relative_to(ROOT)}", flush=True)
 
 
-# Flutter's Dart binding generator: Flutter is paused (MS-300), so nothing builds it.
-PAUSED = {"mailstream-bindgen"}
+# Packages excluded from desktop `cargo test -p MEMBER --no-run`:
+# - `mailstream-bindgen`: Flutter's Dart binding generator (Flutter is paused, MS-300).
+# - `mailstream-android-poc`: Android-only entry crate cross-compiled via `AndroidPoc/build-apk.sh`.
+SKIP = {"mailstream-bindgen", "mailstream-android-poc"}
 
 
 def members():
-    """The workspace's member packages, by name, without PAUSED."""
+    """The workspace's desktop member packages, by name, without SKIP."""
     metadata = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
                                          cwd=ROOT, check=True, text=True, capture_output=True).stdout)
     return sorted(package["name"] for package in metadata["packages"]
-                  if package["id"] in metadata["workspace_members"] and package["name"] not in PAUSED)
+                  if package["id"] in metadata["workspace_members"] and package["name"] not in SKIP)
 
 
 def build(open_before):

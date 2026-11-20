@@ -64,8 +64,9 @@ Colocated jj repo (`.jj` + `.git`), pushed to `github.com/taooceros/mailstream` 
   `linear-poll.py watch` locks it again whenever anything there is writable. A `jj` command that
   rewrites its working copy fails there and leaves it stale; the script's header says how to
   recover.
-- One line: every front end (the AppKit app, `GPUI/`, the paused `Flutter/`) and the engine
-  they share (`Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout starts from it
+- One line: every front end (the AppKit app, `GPUI/`, Android's `AndroidPoc/` which reuses `GPUI/`
+  over `gpui-mobile` + `gpui-fast`, and the paused `Flutter/`) and the engine they share
+  (`Engine/`, `Sources/MailstreamKit`, `FFI/`) live on `main`, and every checkout starts from it
   and lands on it; `ms-<n>` bookmarks live only until their issue lands; the `gpui-ui` and
   `flutter-ui` bookmarks are history and take no new commits. An engine change updates the
   AppKit app and GPUI where they call what it changed, in the same change; not Flutter (paused,
@@ -341,11 +342,12 @@ it is not moved mid-way.
     waiting: `python3 scripts/build-budget.py status` shows who holds what. Don't pass cargo a
     `-j` or add a build lock of your own.
 - Every Rust crate is a member of one cargo workspace (the root `Cargo.toml`: `Engine`, `FFI`,
-  `FFI/bindgen`, `GPUI`; MS-279) with one `Cargo.lock` and one `target/` at the root. A new crate
-  goes in its `members`; cargo works as before from a member's folder or with `-p` from the root,
-  and builds land in the root `target/` (`target/release/mailstream-gpui`,
-  `target/release/libmailstream.dylib`). Flutter's Linux runner (`Flutter/linux/runner`) stays
-  outside it: only Flutter's CMake build compiles it.
+  `FFI/bindgen`, `GPUI`, `AndroidPoc`; MS-279, MS-416) with one `Cargo.lock` and one `target/` at
+  the root. `AndroidPoc` stays out of `default-members` and is cross-compiled for
+  `aarch64-linux-android` via `AndroidPoc/build-apk.sh`. A new crate goes in `members`; cargo works
+  as before from a member's folder or with `-p` from the root, and builds land in the root `target/`
+  (`target/release/mailstream-gpui`, `target/release/libmailstream.dylib`). Flutter's Linux runner
+  (`Flutter/linux/runner`) stays outside it: only Flutter's CMake build compiles it.
 - The default checkout keeps a warm `target/` (and `.turso/`) that every new checkout starts from
   and keeps (MS-151, MS-152, MS-159), so a checkout's first build of any configuration below
   recompiles only the repo's crates that changed since that build (cargo goes by modification
