@@ -395,6 +395,21 @@ impl Mail {
         } else {
             self.remove_envelopes(&all);
         }
+        for (messages, other) in moves {
+            if back {
+                for (key, grouped) in messages_by_mailbox(messages) {
+                    if self.is_inbox_mailbox(&key.account, &key.mailbox) {
+                        self.record_seen_inbox(&key.account, grouped.iter().map(|m| m.id().to_string()));
+                    }
+                }
+            } else {
+                for (key, grouped) in messages_by_mailbox(messages) {
+                    if self.is_inbox_mailbox(&key.account, other) {
+                        self.record_seen_inbox(&key.account, grouped.iter().map(|m| m.id().to_string()));
+                    }
+                }
+            }
+        }
         let mut groups: Vec<(MailboxKey, String, Vec<MailMessage>)> = Vec::new();
         for (messages, other) in moves {
             for (key, grouped) in messages_by_mailbox(messages) {

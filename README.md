@@ -119,6 +119,10 @@ mailstream status
 # List recent unread inbox messages
 mailstream mail list --mailbox inbox --unread --limit 10
 
+# Stream newly arrived unread inbox mail as NDJSON (supports --account, --once, --exec)
+mailstream mail watch
+mailstream mail watch --account you@gmail.com --exec 'notify-send "$MAILSTREAM_FROM" "$MAILSTREAM_SUBJECT"'
+
 # Search messages across accounts
 mailstream mail search "invoice" --account you@gmail.com
 

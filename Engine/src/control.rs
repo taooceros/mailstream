@@ -20,9 +20,23 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use self::transport::socket_path;
 use crate::EngineError;
 
+/// Result of trying to handle a request as a streaming subscription (`mail.watch`, MS-452).
+pub(crate) enum StreamReply {
+    /// Normal one-shot command: fall back to [`Handle::handle`].
+    NotStreaming,
+    /// Subscription accepted: emit an initial handshake then one JSON line per event.
+    Started(tokio::sync::mpsc::UnboundedReceiver<Value>),
+    /// Streaming command failed validation; send this error and close.
+    Error(EngineError),
+}
+
 /// What answers the socket's requests: the engine, or a headless sync node (`sync_node`).
 pub(crate) trait Handle: Send + Sync + 'static {
     fn handle(&self, command: &str, args: Value) -> impl Future<Output = Result<Value, EngineError>> + Send;
+
+    fn stream(&self, _command: &str, _args: Value) -> impl Future<Output = StreamReply> + Send {
+        async { StreamReply::NotStreaming }
+    }
 }
 
 /// Requests larger than this are refused.
@@ -58,10 +72,51 @@ async fn accept(mut listener: transport::Listener, core: &Arc<impl Handle>) {
 
 async fn connection(mut stream: impl AsyncRead + AsyncWrite + Unpin, core: &impl Handle) -> std::io::Result<()> {
     let Some(request) = receive(&mut stream).await? else { return Ok(()) };
-    let mut answer = answer(core, &request).await;
-    answer.push(b'\n');
-    stream.write_all(&answer).await?;
-    stream.shutdown().await
+    let (command, args) = match parse_request(&request) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            stream.write_all(&encode_result(Err(error))).await?;
+            return stream.shutdown().await;
+        }
+    };
+    match core.stream(&command, args.clone()).await {
+        StreamReply::NotStreaming => {
+            let line = encode_result(core.handle(&command, args).await);
+            stream.write_all(&line).await?;
+            stream.shutdown().await
+        }
+        StreamReply::Error(error) => {
+            stream.write_all(&encode_result(Err(error))).await?;
+            stream.shutdown().await
+        }
+        StreamReply::Started(mut events) => {
+            stream.write_all(&encode_result(Ok(json!({ "watching": true })))).await?;
+            stream.flush().await?;
+            let (mut reader, mut writer) = tokio::io::split(stream);
+            let mut scratch = [0u8; 64];
+            let mut read_open = true;
+            loop {
+                tokio::select! {
+                    item = events.recv() => {
+                        let Some(value) = item else { break };
+                        let line = encode_result(Ok(value));
+                        if writer.write_all(&line).await.is_err() || writer.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                    result = reader.read(&mut scratch), if read_open => {
+                        match result {
+                            Ok(0) => read_open = false,
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            let _ = writer.shutdown().await;
+            Ok(())
+        }
+    }
 }
 
 /// Bytes up to the first newline or the end of the stream; None past `MAX_REQUEST`.
@@ -82,16 +137,18 @@ async fn receive(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Optio
     Ok(None)
 }
 
-/// One request's answer, encoded as the Swift engine's `ControlService.handle` encodes it.
-async fn answer(core: &impl Handle, request: &[u8]) -> Vec<u8> {
-    let answer = match run(core, request).await {
+/// One request's answer, encoded as the Swift engine's `ControlService.handle` encodes it, with a trailing newline.
+fn encode_result(result: Result<Value, EngineError>) -> Vec<u8> {
+    let answer = match result {
         Ok(result) => json!({ "ok": true, "result": result }),
         Err(error) => json!({ "ok": false, "error": { "code": error.code, "message": error.message } }),
     };
-    crate::json::encode(&answer, false, false)
+    let mut line = crate::json::encode(&answer, false, false);
+    line.push(b'\n');
+    line
 }
 
-async fn run(core: &impl Handle, request: &[u8]) -> Result<Value, EngineError> {
+fn parse_request(request: &[u8]) -> Result<(String, Value), EngineError> {
     let mut request = serde_json::from_slice::<Value>(request).unwrap_or(Value::Null);
     let Some(command) = request.get("command").and_then(Value::as_str).map(str::to_owned) else {
         return Err(EngineError::new("bad_request", "Expected {\"command\": …, \"args\": {…}}."));
@@ -100,7 +157,7 @@ async fn run(core: &impl Handle, request: &[u8]) -> Result<Value, EngineError> {
         Some(Value::Object(args)) => args,
         _ => Map::new(),
     };
-    core.handle(&command, Value::Object(args)).await
+    Ok((command, Value::Object(args)))
 }
 
 

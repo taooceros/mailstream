@@ -511,6 +511,11 @@ impl Engine {
         self.core.events.listen(listener);
     }
 
+    /// Subscribes to newly arrived unread inbox mail events (`mailstream mail watch`, MS-452).
+    pub fn subscribe_new_mail(&self) -> tokio::sync::broadcast::Receiver<answers::NewMail> {
+        self.core.mail.subscribe_new_mail()
+    }
+
     /// Whether remote images and fonts of conversation `id` (from a listing) load on their own,
     /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. The
     /// `mail.remote` command answers the same.
@@ -628,6 +633,28 @@ impl Core {
                     }
                 }
             },
+        }
+    }
+
+    async fn stream(&self, command: &str, args: Value) -> control::StreamReply {
+        if command != "mail.watch" {
+            return control::StreamReply::NotStreaming;
+        }
+        let spec = match commands::spec(command) {
+            Ok(spec) => spec,
+            Err(error) => return control::StreamReply::Error(error),
+        };
+        let values = match args {
+            Value::Object(values) => values,
+            _ => Map::new(),
+        };
+        let args = match Arguments::new(spec, &values) {
+            Ok(args) => args,
+            Err(error) => return control::StreamReply::Error(error),
+        };
+        match self.mail.watch(&args) {
+            Ok(rx) => control::StreamReply::Started(rx),
+            Err(error) => control::StreamReply::Error(error),
         }
     }
 
@@ -901,6 +928,10 @@ impl account_sync::AccountHost for Core {
 impl control::Handle for Core {
     fn handle(&self, command: &str, args: Value) -> impl Future<Output = Result<Value, EngineError>> + Send {
         Core::handle(self, command, args)
+    }
+
+    fn stream(&self, command: &str, args: Value) -> impl Future<Output = control::StreamReply> + Send {
+        Core::stream(self, command, args)
     }
 }
 

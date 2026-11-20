@@ -531,6 +531,20 @@ pub const COMMANDS: &[Spec] = &[
         ],
     )
     .confirmed(),
+    Spec::new(
+        "mail.watch",
+        Handler::Mail,
+        "Watches for newly arrived unread inbox mail (excluding mail you sent), printing one JSON line per message until interrupted.",
+        &[
+            ACCOUNT,
+            Argument::new("once", Kind::Bool, "Exit after the first matching new message."),
+            Argument::new(
+                "exec",
+                Kind::String,
+                "Shell command to run for each matching message; receives the event JSON on stdin and MAILSTREAM_* env vars.",
+            ),
+        ],
+    ),
     Spec::new("refresh", Handler::Core, "Fetches new mail and counts for the list on screen now.", &[]),
     Spec::new(
         "contacts.search",

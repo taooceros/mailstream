@@ -296,3 +296,28 @@ pub struct Sent {
     pub to: Vec<String>,
     pub subject: String,
 }
+
+/// One newly arrived unread inbox message announced by `mail.watch` (`mailstream mail watch`, MS-452).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct NewMail {
+    /// Conversation id (`mail show`, `mail archive`, …).
+    pub conversation_id: String,
+    /// Provider message id within the conversation.
+    pub message_id: String,
+    pub account: String,
+    pub subject: String,
+    /// ISO 8601, when the message arrived.
+    pub date: Option<String>,
+    #[serde(with = "address_text::optional")]
+    pub from: Option<Address>,
+    pub unread: bool,
+    pub starred: bool,
+    pub has_attachment: bool,
+    pub snippet: Option<String>,
+    /// Existing AI or provisional category, if known at arrival.
+    pub category: Option<Category>,
+    /// Existing "waiting on you" flag, if known at arrival.
+    pub waiting: bool,
+    pub labels: Vec<String>,
+}

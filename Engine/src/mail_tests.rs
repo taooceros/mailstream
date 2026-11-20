@@ -1405,3 +1405,310 @@ fn paging_recovers_stale_disk_cursor_past_more_than_six_cached_pages() {
     drop(engine);
     cleanup(&config);
 }
+
+/// New-mail watch (`mail.watch` / `subscribe_new_mail`, MS-452): ignores startup baseline, own
+/// mail, already-read mail, drafts, restored/undone mail, and page-2 backfill, while emitting
+/// newly arrived unread incoming mail and new replies in existing threads with snippets.
+#[test]
+fn watch_notifies_only_newly_arrived_unread_incoming_inbox_mail() {
+    struct BoxState {
+        inbox: Vec<Value>,
+        trash: Vec<Value>,
+        next_link: Option<String>,
+    }
+
+    fn msg(
+        id: &str,
+        conv: &str,
+        from: (&str, &str),
+        subject: &str,
+        offset_secs: i64,
+        is_read: bool,
+        is_draft: bool,
+    ) -> Value {
+        let mut m = graph_message(id, conv, from, subject, offset_secs);
+        m["isRead"] = json!(is_read);
+        m["isDraft"] = json!(is_draft);
+        m
+    }
+
+    let state = Arc::new(Mutex::new(BoxState {
+        inbox: vec![
+            msg("m1", "c1", ("Ann", "ann@x.com"), "Thread one", 0, false, false),
+            msg("m0", "c0", ("Bob", "bob@x.com"), "Older", -120, false, false),
+        ],
+        trash: vec![msg("tr1", "ctr1", ("Trash Sender", "tr@x.com"), "Old trash", -300, false, false)],
+        next_link: None,
+    }));
+    let server_state = state.clone();
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            return token_reply(&tokens);
+        }
+        let Some(resource) = request.path.strip_prefix("/v1.0/") else {
+            return Reply::status(404, json!({ "error": { "message": "Not found" } }));
+        };
+        let mut st = server_state.lock().unwrap();
+        match resource {
+            "me" => Reply::json(json!({ "displayName": "Me", "mail": "me@outlook.com" })),
+            "me/mailFolders" => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "totalItemCount": st.inbox.len(), "unreadItemCount": st.inbox.len() },
+                { "id": "F-sent", "displayName": "Sent Items", "childFolderCount": 0, "totalItemCount": 0, "unreadItemCount": 0 },
+                { "id": "F-archive", "displayName": "Archive", "childFolderCount": 0, "totalItemCount": 0, "unreadItemCount": 0 },
+                { "id": "F-trash", "displayName": "Deleted Items", "childFolderCount": 0, "totalItemCount": st.trash.len(), "unreadItemCount": st.trash.len() },
+            ]})),
+            "me/mailFolders/inbox" => Reply::json(json!({ "id": "F-inbox" })),
+            "me/mailFolders/sentitems" => Reply::json(json!({ "id": "F-sent" })),
+            "me/mailFolders/archive" => Reply::json(json!({ "id": "F-archive" })),
+            "me/mailFolders/deleteditems" => Reply::json(json!({ "id": "F-trash" })),
+            "me/mailFolders/F-inbox/messages" => {
+                let mut body = json!({ "value": st.inbox });
+                if let Some(next) = &st.next_link {
+                    body["@odata.nextLink"] = json!(next);
+                }
+                Reply::json(body)
+            }
+            "me/mailFolders/F-trash/messages" => Reply::json(json!({ "value": st.trash })),
+            other if other.starts_with("me/mailFolders/") && other.ends_with("/messages") => {
+                Reply::json(json!({ "value": [] }))
+            }
+            other if other.starts_with("me/messages/") && other.ends_with("/move") => {
+                let id = other.trim_start_matches("me/messages/").trim_end_matches("/move");
+                let body: Value = serde_json::from_str(&request.text()).unwrap_or(Value::Null);
+                let dest = body["destinationId"].as_str().unwrap_or("").to_string();
+                if dest == "F-inbox"
+                    && let Some(pos) = st.trash.iter().position(|m| m["id"] == id)
+                {
+                    let moved = st.trash.remove(pos);
+                    st.inbox.push(moved);
+                } else if dest == "F-archive"
+                    && let Some(pos) = st.inbox.iter().position(|m| m["id"] == id)
+                {
+                    st.inbox.remove(pos);
+                }
+                Reply::json(json!({ "id": id }))
+            }
+            other if other.starts_with("me/messages/") => {
+                let id = other.trim_start_matches("me/messages/");
+                Reply::json(json!({
+                    "body": { "contentType": "text", "content": format!("Hello from {id}") },
+                    "ccRecipients": [], "attachments": [],
+                }))
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        }
+    });
+
+    let (engine, config) = engine_for(&server, &[("me@outlook.com", "microsoft")]);
+    let mut rx = engine.subscribe_new_mail();
+
+    // Wait for initial baseline fetch to complete; startup mail must not notify.
+    wait_until("initial inbox loaded", || {
+        call(&engine, "mail.list", json!({ "cached": true })).ok().is_some_and(|listed| ids(&listed).len() == 2)
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(rx.try_recv().is_err(), "startup baseline must not emit new-mail notifications");
+
+    // 1. Mix of valid new mail, reply in existing thread, own-sent mail, already-read mail, and draft.
+    {
+        let mut st = state.lock().unwrap();
+        st.inbox.insert(0, msg("m-own", "c-own", ("Me", "me@outlook.com"), "Note to self", 10, false, false));
+        st.inbox.insert(0, msg("m-read", "c-read", ("Cam", "cam@x.com"), "Already read", 20, true, false));
+        st.inbox.insert(0, msg("m-draft", "c-draft", ("Dan", "dan@x.com"), "Draft", 30, false, true));
+        st.inbox.insert(0, msg("m-new", "c-new", ("Eve", "eve@x.com"), "New alert", 40, false, false));
+        st.inbox.insert(0, msg("m-reply", "c1", ("Ann", "ann@x.com"), "Re: Thread one", 50, false, false));
+    }
+    let _ = call(&engine, "mail.list", json!({})).unwrap();
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let first = rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), rx.recv()).await }).unwrap().unwrap();
+    let second = rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), rx.recv()).await }).unwrap().unwrap();
+    // Chronological order: m-new (offset +40) then m-reply (offset +50).
+    assert_eq!(first.message_id, "m-new");
+    assert_eq!(first.conversation_id, "me@outlook.com|m-new@outlook");
+    assert_eq!(first.account, "me@outlook.com");
+    assert_eq!(first.subject, "New alert");
+    assert_eq!(first.from.as_ref().map(|a| a.text()).as_deref(), Some("Eve <eve@x.com>"));
+    assert_eq!(first.snippet.as_deref(), Some("Hello from m-new"));
+    assert!(first.unread);
+
+    // New reply keeps the existing thread's conversation id and carries the reply's message id/snippet.
+    assert_eq!(second.message_id, "m-reply");
+    assert_eq!(second.conversation_id, "me@outlook.com|m1@outlook");
+    assert_eq!(second.subject, "Re: Thread one");
+    assert_eq!(second.snippet.as_deref(), Some("Hello from m-reply"));
+
+    // The conversationId is immediately usable with `mail.show`.
+    let shown = call(&engine, "mail.show", json!({ "id": first.conversation_id })).unwrap();
+    assert_eq!(shown["id"], json!(first.conversation_id));
+
+    // No spurious events for own/read/draft or a repeat refresh.
+    let _ = call(&engine, "mail.list", json!({})).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(rx.try_recv().is_err(), "own/read/draft/duplicate must not emit");
+
+    // 2. Restoring an unread message from Trash to Inbox must not emit.
+    let trash = call(&engine, "mail.list", json!({ "mailbox": "trash" })).unwrap();
+    let trash_id = trash["conversations"][0]["id"].as_str().unwrap().to_string();
+    call(&engine, "mail.restore", json!({ "ids": [trash_id] })).unwrap();
+    let _ = call(&engine, "mail.list", json!({})).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(rx.try_recv().is_err(), "restoring from trash must not emit");
+
+    // 3. Page-2 unread backfill sliding up when `next.is_some()` must not emit.
+    {
+        let mut st = state.lock().unwrap();
+        st.next_link = Some(format!("{}/v1.0/me/mailFolders/F-inbox/messages?page=2", server.base));
+    }
+    let _ = call(&engine, "mail.list", json!({})).unwrap();
+    {
+        let mut st = state.lock().unwrap();
+        // Simulate archiving top mail and an older unread page-2 email sliding onto page 1.
+        st.inbox.push(msg("m-page2", "c-page2", ("Old", "old@x.com"), "Page 2 backfill", -9999, false, false));
+    }
+    let _ = call(&engine, "mail.list", json!({})).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(rx.try_recv().is_err(), "older page-2 backfill must not emit");
+
+    // One-shot `mail.watch` rejects with `usage`.
+    let err = call(&engine, "mail.watch", json!({})).unwrap_err();
+    assert_eq!(err.code, "usage");
+
+    drop(engine);
+    cleanup(&config);
+}
+
+#[cfg(unix)]
+#[test]
+fn watch_over_control_socket_streams_events_and_validates_account() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let a_inbox = Arc::new(Mutex::new(vec![graph_message("a0", "ca0", ("Init", "i@x.com"), "Init A", 0)]));
+    let b_inbox = Arc::new(Mutex::new(vec![graph_message("b0", "cb0", ("Init", "i@x.com"), "Init B", 0)]));
+    let (a_ref, b_ref) = (a_inbox.clone(), b_inbox.clone());
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            let who = request.text();
+            let tok = if who.contains("rt-a") { "at-a" } else { "at-b" };
+            tokens.fetch_add(1, Ordering::SeqCst);
+            return Reply::json(json!({ "access_token": tok, "expires_in": 3599 }));
+        }
+        let is_a = request.header("authorization").is_some_and(|v| v.contains("at-a"));
+        let Some(resource) = request.path.strip_prefix("/v1.0/") else {
+            return Reply::status(404, json!({ "error": { "message": "Not found" } }));
+        };
+        match resource {
+            "me" if is_a => Reply::json(json!({ "displayName": "A", "mail": "a@outlook.com" })),
+            "me" => Reply::json(json!({ "displayName": "B", "mail": "b@outlook.com" })),
+            "me/mailFolders" => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "totalItemCount": 1, "unreadItemCount": 1 },
+                { "id": "F-sent", "displayName": "Sent Items", "childFolderCount": 0, "totalItemCount": 0, "unreadItemCount": 0 },
+            ]})),
+            "me/mailFolders/inbox" => Reply::json(json!({ "id": "F-inbox" })),
+            "me/mailFolders/sentitems" => Reply::json(json!({ "id": "F-sent" })),
+            "me/mailFolders/F-inbox/messages" => {
+                let list = if is_a { a_ref.lock().unwrap().clone() } else { b_ref.lock().unwrap().clone() };
+                Reply::json(json!({ "value": list }))
+            }
+            other if other.starts_with("me/mailFolders/") && other.ends_with("/messages") => {
+                Reply::json(json!({ "value": [] }))
+            }
+            other if other.starts_with("me/messages/") => {
+                let id = other.trim_start_matches("me/messages/");
+                Reply::json(json!({ "body": { "contentType": "text", "content": format!("Snippet {id}") }, "ccRecipients": [], "attachments": [] }))
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        }
+    });
+
+    let mut config = crate::testkit::server_config(&server);
+    config.control_socket = true;
+    crate::testkit::sign_in_all(
+        &config,
+        &[
+            crate::testkit::mail_account("a@outlook.com", "microsoft"),
+            crate::testkit::mail_account("b@outlook.com", "microsoft"),
+        ],
+    );
+    // Distinguish the two accounts' refresh tokens so the fake server knows which account is asking.
+    {
+        let kc = crate::keychain::Keychain::new(config.keychain_service.clone(), config.keychain_directory.clone());
+        let mut sign_ins = kc.load().unwrap();
+        sign_ins.refresh_tokens.insert("a@outlook.com".into(), "rt-a".into());
+        sign_ins.refresh_tokens.insert("b@outlook.com".into(), "rt-b".into());
+        kc.store(&sign_ins).unwrap();
+    }
+    let socket = crate::control::socket_path(&config.support_directory);
+    let engine = Engine::start(config.clone());
+    wait_until("socket ready", || UnixStream::connect(&socket).is_ok());
+    wait_until("both inboxes seeded", || {
+        call(&engine, "mail.list", json!({ "cached": true })).ok().is_some_and(|listed| ids(&listed).len() == 2)
+    });
+
+    // Invalid --account fails immediately on line 1.
+    {
+        let mut bad = UnixStream::connect(&socket).unwrap();
+        bad.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        bad.write_all(b"{\"command\":\"mail.watch\",\"args\":{\"account\":\"nope@x.com\"}}\n").unwrap();
+        let mut reader = BufReader::new(bad);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["error"]["code"], json!("unknown_account"));
+    }
+
+    // Unfiltered watcher (keeps write open, like `mailstream mail watch`) + filtered watcher (half-closed, like `nc -U`).
+    let mut all_stream = UnixStream::connect(&socket).unwrap();
+    all_stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    all_stream.write_all(b"{\"command\":\"mail.watch\",\"args\":{}}\n").unwrap();
+    let mut all_reader = BufReader::new(all_stream);
+    let mut handshake = String::new();
+    all_reader.read_line(&mut handshake).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&handshake).unwrap()["result"]["watching"], json!(true));
+
+    let mut a_stream = UnixStream::connect(&socket).unwrap();
+    a_stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    a_stream.write_all(b"{\"command\":\"mail.watch\",\"args\":{\"account\":\"A@Outlook.com\"}}\n").unwrap();
+    a_stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut a_reader = BufReader::new(a_stream);
+    let mut handshake_a = String::new();
+    a_reader.read_line(&mut handshake_a).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&handshake_a).unwrap()["result"]["watching"], json!(true));
+
+    // Deliver new mail to b first, then a.
+    {
+        let mut b = b_inbox.lock().unwrap();
+        let mut m = graph_message("b1", "cb1", ("Bob", "bob@x.com"), "For B", 60);
+        m["isRead"] = json!(false);
+        b.insert(0, m);
+    }
+    let _ = call(&engine, "mail.list", json!({ "account": "b@outlook.com" })).unwrap();
+    {
+        let mut a = a_inbox.lock().unwrap();
+        let mut m = graph_message("a1", "ca1", ("Alice", "alice@x.com"), "For A", 70);
+        m["isRead"] = json!(false);
+        a.insert(0, m);
+    }
+    let _ = call(&engine, "mail.list", json!({ "account": "a@outlook.com" })).unwrap();
+
+    let mut line1 = String::new();
+    all_reader.read_line(&mut line1).unwrap();
+    let mut line2 = String::new();
+    all_reader.read_line(&mut line2).unwrap();
+    let r1 = &serde_json::from_str::<Value>(&line1).unwrap()["result"];
+    let r2 = &serde_json::from_str::<Value>(&line2).unwrap()["result"];
+    assert_eq!((&r1["account"], &r1["messageId"]), (&json!("b@outlook.com"), &json!("b1")));
+    assert_eq!((&r2["account"], &r2["messageId"]), (&json!("a@outlook.com"), &json!("a1")));
+
+    let mut a_line = String::new();
+    a_reader.read_line(&mut a_line).unwrap();
+    let ra = &serde_json::from_str::<Value>(&a_line).unwrap()["result"];
+    assert_eq!((&ra["account"], &ra["messageId"], &ra["snippet"]), (&json!("a@outlook.com"), &json!("a1"), &json!("Snippet a1")));
+
+    drop(engine);
+    cleanup(&config);
+}

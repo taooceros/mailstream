@@ -3,7 +3,7 @@
 //! `mailstream daemon` (`mailstream_engine::control`), starting Mailstream GPUI in the background
 //! when none runs and a desktop can show it. Commands, arguments, help and output are the command
 //! table's (`mailstream_engine::commands`).
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -24,6 +24,8 @@ const FRONT_END: &str = "dev.mailstream.MailstreamGPUI";
 const FRONT_ENDS: [&str; 2] = ["mailstream-gpui.sh", "mailstream-gpui"];
 /// How long an answer may take: `accounts add` waits up to 5 minutes for the browser sign-in.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(420);
+/// How long `mail watch` waits for the engine's initial handshake line.
+const WATCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a started front end may take to open the socket.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// What to run where no app can serve the socket (a server without a desktop).
@@ -89,6 +91,10 @@ fn execute(arguments: &[String]) -> Result<String, EngineError> {
         return Ok(spec.help());
     }
     let args = parse(rest, spec)?;
+    if spec.id == "mail.watch" {
+        watch(args, &data_dir)?;
+        return Ok(String::new());
+    }
     let result = if spec.local() {
         mailstream_engine::run_settings_command(&data_dir, spec.id, &args)?
     } else {
@@ -447,7 +453,11 @@ fn request_over(mut stream: connection::Connection, spec: &Spec, args: Map<Strin
     connection::sent(&stream, ANSWER_TIMEOUT);
     let closed = || EngineError::new("unavailable", "Mailstream closed the connection without answering.");
     let message = receive(&mut stream).filter(|message| !message.is_empty()).ok_or_else(closed)?;
-    let answer: Value = serde_json::from_slice(&message).map_err(|_| closed())?;
+    parse_answer(&message, closed)
+}
+
+fn parse_answer(message: &[u8], closed: impl Fn() -> EngineError) -> Result<Value, EngineError> {
+    let answer: Value = serde_json::from_slice(message).map_err(|_| closed())?;
     if answer.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok(answer.get("result").cloned().unwrap_or(Value::Null));
     }
@@ -457,6 +467,139 @@ fn request_over(mut stream: connection::Connection, spec: &Spec, args: Map<Strin
         &field("code").unwrap_or_else(|| "failed".into()),
         field("message").unwrap_or_else(|| "Mailstream reported a failure.".into()),
     ))
+}
+
+fn watch(args: Map<String, Value>, data_dir: &Path) -> Result<(), EngineError> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut stderr = std::io::stderr();
+    watch_with(args, data_dir, &mut out, &mut stderr)
+}
+
+fn watch_with(
+    mut args: Map<String, Value>,
+    data_dir: &Path,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<(), EngineError> {
+    let once = args.remove("once").and_then(|value| value.as_bool()).unwrap_or(false);
+    let exec = match args.remove("exec") {
+        Some(Value::String(command)) => {
+            if command.trim().is_empty() {
+                return Err(usage("--exec requires a non-empty command."));
+            }
+            Some(command)
+        }
+        _ => None,
+    };
+    let mut stream = connect_or_launch(data_dir)?;
+    let mut request = json::encode(&json!({ "command": "mail.watch", "args": args }), false, false);
+    request.push(b'\n');
+    if stream.write_all(&request).is_err() || stream.flush().is_err() {
+        return Err(EngineError::new("unavailable", "Could not write to Mailstream's control socket."));
+    }
+    connection::set_read_timeout(&stream, Some(WATCH_HANDSHAKE_TIMEOUT));
+    let mut reader = BufReader::new(stream);
+    let closed = || EngineError::new("unavailable", "Mailstream closed the watch connection.");
+    let handshake = read_line_bytes(&mut reader).filter(|line| !line.is_empty()).ok_or_else(closed)?;
+    let _ = parse_answer(&handshake, closed)?;
+    connection::set_read_timeout(reader.get_ref(), None);
+
+    while let Some(line) = read_line_bytes(&mut reader) {
+        if line.is_empty() {
+            continue;
+        }
+        let event = parse_answer(&line, closed)?;
+        let encoded = single_line(&event);
+        if let Err(error) = writeln!(out, "{encoded}").and_then(|()| out.flush()) {
+            if error.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(EngineError::new("failed", format!("Could not write watch output: {error}")));
+        }
+        if let Some(command) = &exec
+            && let Err(error) = run_exec(command, &encoded, &event)
+        {
+            if once {
+                return Err(error);
+            }
+            let mut failure =
+                json::encode(&json!({ "error": { "code": error.code, "message": error.message } }), false, false);
+            failure.push(b'\n');
+            let _ = err.write_all(&failure);
+            let _ = err.flush();
+        }
+        if once {
+            return Ok(());
+        }
+    }
+    Err(closed())
+}
+
+/// Reads one newline-terminated line (without trailing `\n`/`\r`), retrying on `EINTR`.
+fn read_line_bytes(reader: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut line = Vec::new();
+    loop {
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return (!line.is_empty()).then_some(line),
+            Ok(_) => {
+                while matches!(line.last(), Some(b'\n' | b'\r')) {
+                    line.pop();
+                }
+                return Some(line);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+}
+
+fn run_exec(command: &str, json_line: &str, event: &Value) -> Result<(), EngineError> {
+    use std::process::{Command, Stdio};
+
+    let mut child_command = if cfg!(windows) {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", command]);
+        cmd
+    } else {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        cmd
+    };
+    let str_field = |key: &str| event.get(key).and_then(Value::as_str).unwrap_or("");
+    let waiting = if event.get("waiting").and_then(Value::as_bool).unwrap_or(false) { "true" } else { "false" };
+    child_command
+        .stdin(Stdio::piped())
+        .env("MAILSTREAM_ACCOUNT", str_field("account"))
+        .env("MAILSTREAM_CONVERSATION_ID", str_field("conversationId"))
+        .env("MAILSTREAM_MESSAGE_ID", str_field("messageId"))
+        .env("MAILSTREAM_FROM", str_field("from"))
+        .env("MAILSTREAM_SUBJECT", str_field("subject"))
+        .env("MAILSTREAM_DATE", str_field("date"))
+        .env("MAILSTREAM_SNIPPET", str_field("snippet"))
+        .env("MAILSTREAM_CATEGORY", str_field("category"))
+        .env("MAILSTREAM_WAITING", waiting);
+    let mut child = child_command
+        .spawn()
+        .map_err(|error| EngineError::new("exec_failed", format!("Could not start --exec command: {error}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut payload = String::with_capacity(json_line.len() + 1);
+        payload.push_str(json_line);
+        payload.push('\n');
+        if let Err(error) = stdin.write_all(payload.as_bytes())
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(EngineError::new("exec_failed", format!("Could not write to --exec stdin: {error}")));
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| EngineError::new("exec_failed", format!("Could not wait for --exec command: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(EngineError::new("exec_failed", format!("--exec command exited with {status}.")))
+    }
 }
 
 /// Bytes up to the first newline (or the end), at most `control::MAX_ANSWER`.
@@ -607,6 +750,10 @@ mod connection {
         let _ = stream.set_read_timeout(Some(timeout));
         let _ = stream.shutdown(Shutdown::Write);
     }
+
+    pub fn set_read_timeout(stream: &Connection, timeout: Option<Duration>) {
+        let _ = stream.set_read_timeout(timeout);
+    }
 }
 
 /// The control pipe's client side.
@@ -635,6 +782,8 @@ mod connection {
 
     /// A pipe has neither a half-close nor a read timeout: the request's newline ends it.
     pub fn sent(_pipe: &Connection, _timeout: Duration) {}
+
+    pub fn set_read_timeout(_pipe: &Connection, _timeout: Option<Duration>) {}
 }
 
 #[cfg(test)]
@@ -724,5 +873,108 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(error.code, "not_running");
         assert!(error.message.contains(&format!("`mailstream daemon --data-dir {}`", folder.display())), "{}", error.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mail_watch_parses_options_streams_ndjson_and_runs_exec() {
+        use std::os::unix::net::UnixListener;
+
+        // Help and command discovery expose `mail watch`.
+        let help = execute(&words(&["mail", "watch", "--help"])).unwrap();
+        assert!(help.contains("mailstream mail watch"), "{help}");
+        assert!(help.contains("--once"), "{help}");
+        assert!(help.contains("--exec"), "{help}");
+        let list: Value = serde_json::from_str(&execute(&words(&["commands"])).unwrap()).unwrap();
+        assert!(list.as_array().unwrap().iter().any(|c| c["name"] == "mail watch"));
+
+        let root = std::env::temp_dir().join(format!("mailstream-watch-cli-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let sock_path = control::socket_path(&root);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let server = std::thread::spawn(move || {
+            // Connection 1: handshake + 2 events (`--once` should print only the first and exit 0).
+            let (mut s, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut req = String::new();
+            reader.read_line(&mut req).unwrap();
+            let parsed: Value = serde_json::from_str(&req).unwrap();
+            assert_eq!(parsed["command"], "mail.watch");
+            assert_eq!(parsed["args"]["account"], "me@gmail.com");
+            assert!(parsed["args"].get("once").is_none());
+            assert!(parsed["args"].get("exec").is_none());
+            s.write_all(b"{\"ok\":true,\"result\":{\"watching\":true}}\n").unwrap();
+            s.write_all(
+                b"{\"ok\":true,\"result\":{\"account\":\"me@gmail.com\",\"category\":\"people\",\"conversationId\":\"me@gmail.com|m1\",\"date\":\"2026-11-20T12:00:00Z\",\"from\":\"Alice <alice@x.com>\",\"hasAttachment\":false,\"labels\":[],\"messageId\":\"m1\",\"snippet\":\"Hi there\",\"starred\":false,\"subject\":\"Hello\",\"unread\":true,\"waiting\":false}}\n",
+            )
+            .unwrap();
+            s.flush().unwrap();
+            drop(s);
+
+            // Connection 2: unknown_account error on handshake.
+            let (mut s2, _) = listener.accept().unwrap();
+            let mut reader2 = BufReader::new(s2.try_clone().unwrap());
+            let mut req2 = String::new();
+            reader2.read_line(&mut req2).unwrap();
+            s2.write_all(b"{\"ok\":false,\"error\":{\"code\":\"unknown_account\",\"message\":\"No account nope@x.com\"}}\n")
+                .unwrap();
+            s2.flush().unwrap();
+            drop(s2);
+
+            // Connection 3: handshake then EOF (server stopped).
+            let (mut s3, _) = listener.accept().unwrap();
+            let mut reader3 = BufReader::new(s3.try_clone().unwrap());
+            let mut req3 = String::new();
+            reader3.read_line(&mut req3).unwrap();
+            s3.write_all(b"{\"ok\":true,\"result\":{\"watching\":true}}\n").unwrap();
+            s3.flush().unwrap();
+            drop(s3);
+        });
+
+        // 1. `--once` + `--exec` receives both stdin JSON and MAILSTREAM_* env vars.
+        let capture = root.join("exec.out");
+        let cmd = format!(
+            "cat > {}; printf '|%s|%s|%s' \"$MAILSTREAM_FROM\" \"$MAILSTREAM_SUBJECT\" \"$MAILSTREAM_CONVERSATION_ID\" >> {}",
+            capture.display(),
+            capture.display()
+        );
+        let cli = words(&["mail", "watch", "--account", "me@gmail.com", "--once", "--exec", &cmd]);
+        let (spec, rest) = matching(&cli).unwrap();
+        let args = parse(rest, spec).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        watch_with(args, &root, &mut out, &mut err).unwrap();
+        let stdout_line = String::from_utf8(out).unwrap();
+        let printed: Value = serde_json::from_str(stdout_line.trim()).unwrap();
+        assert_eq!(printed["conversationId"], "me@gmail.com|m1");
+        assert_eq!(printed["subject"], "Hello");
+        let captured = std::fs::read_to_string(&capture).unwrap();
+        assert!(captured.contains("\"messageId\":\"m1\""), "{captured}");
+        assert!(captured.ends_with("|Alice <alice@x.com>|Hello|me@gmail.com|m1"), "{captured}");
+
+        // 2. Handshake error surfaces error code.
+        let cli2 = words(&["mail", "watch", "--account", "nope@x.com"]);
+        let (spec, rest) = matching(&cli2).unwrap();
+        let args = parse(rest, spec).unwrap();
+        let error = watch_with(args, &root, &mut Vec::new(), &mut Vec::new()).unwrap_err();
+        assert_eq!(error.code, "unknown_account");
+
+        // 3. Server disconnect returns `unavailable`.
+        let cli3 = words(&["mail", "watch"]);
+        let (spec, rest) = matching(&cli3).unwrap();
+        let args = parse(rest, spec).unwrap();
+        let error = watch_with(args, &root, &mut Vec::new(), &mut Vec::new()).unwrap_err();
+        assert_eq!(error.code, "unavailable");
+
+        // 4. Empty --exec rejected as usage.
+        let cli4 = words(&["mail", "watch", "--exec", "   "]);
+        let (spec, rest) = matching(&cli4).unwrap();
+        let args = parse(rest, spec).unwrap();
+        let error = watch_with(args, &root, &mut Vec::new(), &mut Vec::new()).unwrap_err();
+        assert_eq!(error.code, "usage");
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

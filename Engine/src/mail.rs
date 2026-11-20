@@ -141,6 +141,15 @@ struct State {
     pending: Vec<pending::Pending>,
     /// Local user mutations held over stale listing and unread-count fetches (MS-429).
     overlay: overlay::LocalOverlay,
+    /// Inbox mailboxes whose first live network page has established their baseline (MS-452).
+    inbox_seeded: HashSet<MailboxKey>,
+    /// Message ids already seen in each account's inbox (including restored/undone mail), so
+    /// `mail.watch` notifies only once per newly arrived message and ignores restores.
+    seen_inbox_ids: HashMap<String, HashSet<String>>,
+    /// Oldest date on the latest seeded first page of an inbox that still has further pages
+    /// (`next.is_some()`), kept monotonically non-decreasing so older unread mail sliding up from
+    /// page 2 after an archive/delete is never mistaken for new mail.
+    inbox_floor: HashMap<MailboxKey, Date>,
 }
 
 type CacheRead = Shared<BoxFuture<'static, ()>>;
@@ -211,6 +220,8 @@ pub struct Mail {
     auto_read: autoread::AutoRead,
     /// The steps `mail.undo` can take back.
     undo: undo::Undo,
+    /// Live stream of newly arrived unread inbox messages for `mail.watch` (MS-452).
+    new_mail: tokio::sync::broadcast::Sender<answers::NewMail>,
 }
 
 impl Mail {
@@ -234,6 +245,7 @@ impl Mail {
         let contents = Arc::new(Contents::new(cache.clone(), peers, move || previews.emit_soon("previews")));
         let tagging =
             Tagging::new(cache.clone(), contents.clone(), settings.clone(), events.clone(), tool_environment, apple_tagger);
+        let (new_mail, _) = tokio::sync::broadcast::channel(256);
         Self {
             cache,
             contents,
@@ -248,6 +260,7 @@ impl Mail {
             contacts: contacts::ContactsLoad::default(),
             auto_read: autoread::AutoRead::new(),
             undo: undo::Undo::default(),
+            new_mail,
         }
     }
 
@@ -264,6 +277,47 @@ impl Mail {
 
     pub async fn flush(&self) {
         self.cache.flush().await;
+    }
+
+    /// Subscribes to newly arrived unread inbox mail events (`mailstream mail watch`, MS-452).
+    pub fn subscribe_new_mail(&self) -> tokio::sync::broadcast::Receiver<answers::NewMail> {
+        self.new_mail.subscribe()
+    }
+
+    /// Streaming subscription for `mail.watch`, optionally filtered to one account.
+    pub(crate) fn watch(&self, args: &Arguments) -> Result<tokio::sync::mpsc::UnboundedReceiver<Value>, EngineError> {
+        let account = self.account_filter(args)?;
+        let mut rx = self.new_mail.subscribe();
+        let (tx, out) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(item) => {
+                        if account.as_ref().is_some_and(|filter| filter != &item.account) {
+                            continue;
+                        }
+                        if tx.send(answers::json(&item)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        Ok(out)
+    }
+
+    /// Marks `ids` as already known in `account`'s inbox so local moves into inbox (`mail.restore`,
+    /// `mail.undo`) never emit false new-mail notifications.
+    pub(super) fn record_seen_inbox(&self, account: &str, ids: impl IntoIterator<Item = String>) {
+        self.state().seen_inbox_ids.entry(account.to_string()).or_default().extend(ids);
+    }
+
+    /// Whether `mailbox` of `account` has the inbox role.
+    pub(super) fn is_inbox_mailbox(&self, account: &str, mailbox: &str) -> bool {
+        let key = MailboxKey::new(account, mailbox);
+        Self::role(&self.state(), &key) == MailboxRole::Inbox
     }
 
     // MARK: - Startup and accounts
@@ -492,6 +546,11 @@ impl Mail {
                 state.first_page_requests.retain(|key, _| !removed.contains(&key.account));
                 state.active_keys.retain(|key| !removed.contains(&key.account));
                 state.overlay.forget_accounts(&removed);
+                state.inbox_seeded.retain(|key| !removed.contains(&key.account));
+                state.inbox_floor.retain(|key, _| !removed.contains(&key.account));
+                for name in &removed {
+                    state.seen_inbox_ids.remove(name);
+                }
                 state.known.retain(|_, known| !removed.contains(&known.conversation.account));
                 let known = &state.known;
                 let order: VecDeque<String> = state.known_order.iter().filter(|id| known.contains_key(*id)).cloned().collect();
@@ -974,6 +1033,7 @@ impl Mail {
             };
             // Only the latest request's page is taken in; any answer says whether the account
             // connects.
+            let mut notifications = Vec::new();
             let result = {
                 let mut state = self.state();
                 if !state.accounts.iter().any(|account| account.name == key.account) {
@@ -982,8 +1042,9 @@ impl Mail {
                 let latest = state.first_page_requests.get(&key) == tickets.get(&key);
                 result.map(|page| {
                     if latest {
-                        let merged =
+                        let (merged, arrived) =
                             self.merge_first_page(&mut state, page.envelopes, page.next, &key, started_at, &reconciled);
+                        notifications = arrived;
                         let settled = self.settle_pending(&mut state, &key);
                         if merged || settled {
                             if Self::default_keys(&state).contains(&key) {
@@ -995,6 +1056,9 @@ impl Mail {
                     }
                 })
             };
+            if !notifications.is_empty() {
+                self.clone().publish_new_mail(notifications);
+            }
             let tally = accounts.get_mut(&key.account).expect("every asked account is counted");
             tally.0 -= 1;
             if let Err(error) = result {
@@ -1013,7 +1077,8 @@ impl Mail {
         failures
     }
 
-    /// Returns whether anything changed, so an unchanged mailbox costs nothing.
+    /// Returns whether anything changed (so an unchanged mailbox costs nothing) and any newly
+    /// arrived unread inbox messages to broadcast to `mail.watch` subscribers.
     fn merge_first_page(
         &self,
         state: &mut State,
@@ -1022,13 +1087,15 @@ impl Mail {
         key: &MailboxKey,
         fetch_started_at: u64,
         reconciled: &HashMap<String, Option<Arc<Envelope>>>,
-    ) -> bool {
+    ) -> (bool, Vec<(crate::model::MessageRef, answers::NewMail)>) {
         let before = state.listings.get(key);
         let mut listing = Listing { envelopes: envelopes.into_iter().map(Arc::new).collect(), next: next.clone(), restart: next.clone() };
+        let page_oldest = listing.envelopes.iter().filter_map(|envelope| envelope.date).reduce(f64::min);
+        let fresh_ids: HashSet<String> = listing.envelopes.iter().map(|envelope| envelope.id.clone()).collect();
         if next.is_some()
             && let Some(before) = before
         {
-            let oldest = listing.envelopes.iter().filter_map(|envelope| envelope.date).reduce(f64::min).unwrap_or(DISTANT_PAST);
+            let oldest = page_oldest.unwrap_or(DISTANT_PAST);
             let ids: HashSet<&str> = listing.envelopes.iter().map(|envelope| envelope.id.as_str()).collect();
             let older: Vec<Arc<Envelope>> = before
                 .envelopes
@@ -1048,6 +1115,7 @@ impl Mail {
             listing.envelopes.extend(older);
         }
         state.overlay.apply(key, &mut listing.envelopes, fetch_started_at, true);
+        let arrivals = self.detect_new_inbox_mail(state, key, &listing.envelopes, &fresh_ids, next.is_some(), page_oldest);
         let unchanged = state.listings.get(key).is_some_and(|before| {
             before.next == listing.next
                 && before.envelopes.len() == listing.envelopes.len()
@@ -1057,11 +1125,179 @@ impl Mail {
             if let Some(kept) = state.listings.get_mut(key) {
                 kept.restart = next;
             }
-            return false;
+            return (false, Vec::new());
         }
         self.cache.save_listing(CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() }, key);
         state.listings.insert(key.clone(), listing);
-        true
+        let notifications = if arrivals.is_empty() || self.new_mail.receiver_count() == 0 {
+            Vec::new()
+        } else {
+            self.build_new_mail(state, key, arrivals)
+        };
+        (true, notifications)
+    }
+
+    /// Updates inbox baseline/seen ids and returns newly arrived unread incoming envelopes.
+    fn detect_new_inbox_mail(
+        &self,
+        state: &mut State,
+        key: &MailboxKey,
+        envelopes: &[Arc<Envelope>],
+        fresh_ids: &HashSet<String>,
+        has_next: bool,
+        page_oldest: Option<Date>,
+    ) -> Vec<Arc<Envelope>> {
+        if Self::role(state, key) != MailboxRole::Inbox {
+            return Vec::new();
+        }
+        if !state.inbox_seeded.contains(key) {
+            let seen = state.seen_inbox_ids.entry(key.account.clone()).or_default();
+            for envelope in envelopes {
+                seen.insert(envelope.id.clone());
+            }
+            if has_next && let Some(oldest) = page_oldest {
+                state.inbox_floor.insert(key.clone(), oldest);
+            }
+            state.inbox_seeded.insert(key.clone());
+            return Vec::new();
+        }
+        let prev_floor = state.inbox_floor.get(key).copied();
+        let own = Self::own_addresses(state);
+        let seen = state.seen_inbox_ids.entry(key.account.clone()).or_default();
+        let mut arrivals = Vec::new();
+        for envelope in envelopes {
+            if !fresh_ids.contains(&envelope.id) {
+                seen.insert(envelope.id.clone());
+                continue;
+            }
+            if !seen.insert(envelope.id.clone()) {
+                continue;
+            }
+            if envelope.is_seen() || envelope.is_draft() {
+                continue;
+            }
+            if envelope.from.iter().any(|address| own.contains(&address.normalized_email())) {
+                continue;
+            }
+            if let Some(floor) = prev_floor
+                && !envelope.date.is_some_and(|date| date > floor)
+            {
+                continue;
+            }
+            arrivals.push(envelope.clone());
+        }
+        if has_next {
+            if let Some(oldest) = page_oldest {
+                state.inbox_floor.insert(key.clone(), prev_floor.map_or(oldest, |prev| prev.max(oldest)));
+            }
+        } else {
+            state.inbox_floor.remove(key);
+        }
+        arrivals
+    }
+
+    /// Builds `NewMail` records in chronological order, remembering each conversation so `mail show`
+    /// and actions work immediately on its `conversationId`.
+    fn build_new_mail(
+        &self,
+        state: &mut State,
+        key: &MailboxKey,
+        mut arrivals: Vec<Arc<Envelope>>,
+    ) -> Vec<(crate::model::MessageRef, answers::NewMail)> {
+        arrivals.sort_by(|a, b| {
+            let (da, db) = (a.date.unwrap_or(DISTANT_PAST), b.date.unwrap_or(DISTANT_PAST));
+            da.total_cmp(&db).then_with(|| a.id.cmp(&b.id))
+        });
+        let primary_keys: Vec<MailboxKey> = Self::unified_mailboxes(state, MailboxRole::Inbox)
+            .into_iter()
+            .filter(|k| k.account == key.account)
+            .collect();
+        let context: Vec<MailboxKey> = Self::default_keys(state)
+            .into_iter()
+            .filter(|k| k.account == key.account && !primary_keys.contains(k))
+            .collect();
+        let fetched: Vec<(MailboxKey, Vec<Arc<Envelope>>)> =
+            primary_keys.iter().map(|k| (k.clone(), Self::loaded_envelopes(state, k))).collect();
+        let listed = Self::threads(state, &fetched, &context, Vec::new(), true);
+        let primary_set: HashSet<MailboxKey> = primary_keys.into_iter().collect();
+
+        let mut out = Vec::with_capacity(arrivals.len());
+        for envelope in arrivals {
+            let conversation = listed
+                .conversations
+                .iter()
+                .find(|c| c.messages.iter().any(|m| *m.key == *key && m.id() == envelope.id));
+            let fallback;
+            let conversation = match conversation {
+                Some(found) => found,
+                None => {
+                    fallback = Conversation::thread(vec![MailMessage {
+                        key: Arc::new(key.clone()),
+                        envelope: envelope.clone(),
+                        role: MailboxRole::Inbox,
+                    }]);
+                    &fallback
+                }
+            };
+            remember(state, conversation, &primary_set);
+            let tag = self.tag(conversation);
+            let msg_ref = crate::model::MessageRef {
+                account: key.account.clone(),
+                mailbox: key.mailbox.clone(),
+                id: envelope.id.clone(),
+            };
+            let subject = if envelope.subject.is_empty() {
+                conversation.subject.clone()
+            } else {
+                envelope.subject.clone()
+            };
+            let snippet = self.contents.snippet(&msg_ref).filter(|s| !s.is_empty());
+            out.push((
+                msg_ref,
+                answers::NewMail {
+                    conversation_id: conversation.id.clone(),
+                    message_id: envelope.id.clone(),
+                    account: key.account.clone(),
+                    subject,
+                    date: envelope.date.map(iso8601),
+                    from: envelope.from.first().cloned(),
+                    unread: !envelope.is_seen(),
+                    starred: envelope.is_flagged(),
+                    has_attachment: envelope.has_attachment == Some(true),
+                    snippet,
+                    category: tag.as_ref().map(|tag| tag.category),
+                    waiting: tag.as_ref().is_some_and(|tag| tag.to_respond),
+                    labels: tag.map(|tag| tag.labels).unwrap_or_default(),
+                },
+            ));
+        }
+        out
+    }
+
+    /// Fetches missing previews (bounded by a short timeout) and broadcasts new-mail events in order.
+    fn publish_new_mail(self: Arc<Self>, items: Vec<(crate::model::MessageRef, answers::NewMail)>) {
+        tokio::spawn(async move {
+            let enriched = futures::future::join_all(items.into_iter().map(|(msg_ref, mut item)| {
+                let mail = self.clone();
+                async move {
+                    if item.snippet.is_none() {
+                        let backend = mail.backend(&msg_ref.account);
+                        if let Ok(Some(snippet)) =
+                            tokio::time::timeout(std::time::Duration::from_secs(3), mail.contents.preview(&msg_ref, backend))
+                                .await
+                            && !snippet.is_empty()
+                        {
+                            item.snippet = Some(snippet);
+                        }
+                    }
+                    item
+                }
+            }))
+            .await;
+            for item in enriched {
+                let _ = self.new_mail.send(item);
+            }
+        });
     }
 
     /// The next page of each of `keys` that has one, fetched at once and kept in mail.db with
@@ -1454,6 +1690,9 @@ impl Mail {
             "mail.undo" => self.undo_command(args).await,
             "mail.send" => self.send_command(args).await,
             "mail.reply" => self.reply_command(args).await,
+            "mail.watch" => Err(EngineError::usage(
+                "`mail.watch` is a streaming command; use `mailstream mail watch` over the control socket.",
+            )),
             _ => unreachable!("{command} is a mail command"),
         }
     }
