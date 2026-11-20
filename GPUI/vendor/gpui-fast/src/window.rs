@@ -1732,6 +1732,11 @@ impl Window {
         }
 
         let display_id = platform_window.display().map(|display| display.id());
+        if let Some(display_id) = display_id
+            && !cx.knows_display(display_id)
+        {
+            cx.displays_changed();
+        }
         let sprite_atlas = platform_window.sprite_atlas();
         let mouse_position = platform_window.mouse_position();
         let modifiers = platform_window.modifiers();
@@ -2044,9 +2049,11 @@ impl Window {
                 if !pending_next_frame_callbacks.is_empty() {
                     handle
                         .update(&mut cx, |_, window, cx| {
+                            window.frame_signal_at = request_frame_options.signal_at;
                             for callback in pending_next_frame_callbacks {
                                 callback(window, cx);
                             }
+                            window.frame_signal_at = None;
                         })
                         .with_context(|| {
                             format!(
@@ -6306,7 +6313,8 @@ impl Window {
 
     fn schedule_touch_momentum_tick(&mut self) {
         self.on_next_frame(|window, cx| {
-            if let Some(gesture) = window.touch_gestures.tick_momentum() {
+            let now = window.frame_signal_at.unwrap_or_else(Instant::now);
+            if let Some(gesture) = window.touch_gestures.tick_momentum_at(now) {
                 window.dispatch_recognized_touch_gesture(gesture, cx);
             }
             if window.touch_gestures.has_momentum() {
@@ -10516,6 +10524,7 @@ mod tests {
                         position: point(px(x), px(0.)),
                         predicted_position: None,
                         force: None,
+                        timestamp: None,
                     }
                     .to_platform_input(),
                     cx,

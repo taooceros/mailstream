@@ -53,8 +53,10 @@ pub struct AndroidDisplay {
     /// Derived from the window pointer because the NDK does not assign stable
     /// integer display IDs at the C level.
     id: u64,
-}
 
+    /// Refresh interval queried from Android's `Display.getRefreshRate()`.
+    refresh_interval: Option<std::time::Duration>,
+}
 impl AndroidDisplay {
     // ── constructors ─────────────────────────────────────────────────────────
 
@@ -79,6 +81,7 @@ impl AndroidDisplay {
             window: Some(window.clone()),
             scale_factor,
             id,
+            refresh_interval: None,
         }
     }
 
@@ -87,6 +90,19 @@ impl AndroidDisplay {
         let config = Configuration::from_asset_manager(asset_manager);
         let density_dpi = config.density().unwrap_or(DENSITY_DEFAULT as u32) as i32;
         Self::from_window(window, density_dpi)
+    }
+
+    /// Attach the display's refresh rate in Hertz (from `Display.getRefreshRate()`).
+    pub fn with_refresh_rate_hz(mut self, hz: f32) -> Self {
+        if hz.is_finite() && (10.0..=480.0).contains(&hz) {
+            self.refresh_interval = Some(std::time::Duration::from_secs_f64(1.0 / hz as f64));
+        }
+        self
+    }
+
+    /// Refresh interval of this display, if known.
+    pub fn refresh_interval_duration(&self) -> Option<std::time::Duration> {
+        self.refresh_interval
     }
 
     /// Create a synthetic `AndroidDisplay` for headless / testing use.
@@ -98,9 +114,9 @@ impl AndroidDisplay {
             window: None,
             scale_factor: 1.0,
             id: ((width as u64) << 32) | (height as u64),
+            refresh_interval: None,
         }
     }
-
     // ── geometry ──────────────────────────────────────────────────────────────
 
     /// Physical width of the display in device pixels.
@@ -248,7 +264,7 @@ impl PlatformDisplay for AndroidDisplay {
     }
 
     fn refresh_interval(&self) -> Option<std::time::Duration> {
-        None
+        self.refresh_interval
     }
 }
 

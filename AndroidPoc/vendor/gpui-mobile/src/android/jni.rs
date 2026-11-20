@@ -420,6 +420,120 @@ pub fn query_night_mode_via_jni() -> bool {
     is_dark
 }
 
+/// Query the active display refresh rate in Hertz via JNI (`Display.getRefreshRate()`).
+pub(crate) fn query_refresh_rate_via_jni() -> Option<f32> {
+    with_env(|env| {
+        let act = activity(env)?;
+        let api_level = unsafe { ndk_sys::android_get_device_api_level() };
+        let mut display = if api_level >= 30 {
+            match env
+                .call_method(
+                    &act,
+                    jni::jni_str!("getDisplay"),
+                    jni::jni_sig!("()Landroid/view/Display;"),
+                    &[],
+                )
+                .and_then(|v| v.l())
+            {
+                Ok(d) => Some(d),
+                Err(_) => {
+                    env.exception_clear();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if display.as_ref().is_none_or(|d| d.is_null()) {
+            if let Ok(wm) = env
+                .call_method(
+                    &act,
+                    jni::jni_str!("getWindowManager"),
+                    jni::jni_sig!("()Landroid/view/WindowManager;"),
+                    &[],
+                )
+                .and_then(|v| v.l())
+            {
+                if !wm.is_null() {
+                    match env
+                        .call_method(
+                            &wm,
+                            jni::jni_str!("getDefaultDisplay"),
+                            jni::jni_sig!("()Landroid/view/Display;"),
+                            &[],
+                        )
+                        .and_then(|v| v.l())
+                    {
+                        Ok(d) if !d.is_null() => display = Some(d),
+                        _ => env.exception_clear(),
+                    }
+                }
+            } else {
+                env.exception_clear();
+            }
+        }
+        let Some(display) = display.filter(|d| !d.is_null()) else {
+            return Ok(None);
+        };
+        let hz = match env
+            .call_method(
+                &display,
+                jni::jni_str!("getRefreshRate"),
+                jni::jni_sig!("()F"),
+                &[],
+            )
+            .and_then(|v| v.f())
+        {
+            Ok(hz) if hz.is_finite() && (10.0..=480.0).contains(&hz) => {
+                log::info!(
+                    "AndroidDisplay refresh rate: {:.2} Hz ({:.2} ms)",
+                    hz,
+                    1000.0 / hz
+                );
+                Some(hz)
+            }
+            Ok(_) => None,
+            Err(_) => {
+                env.exception_clear();
+                None
+            }
+        };
+        Ok(hz)
+    })
+    .ok()
+    .flatten()
+}
+
+thread_local! {
+    static TOUCH_RESAMPLER: std::cell::RefCell<crate::touch_resampler::TouchResampler> =
+        std::cell::RefCell::new(crate::touch_resampler::TouchResampler::new());
+}
+
+fn flush_resampled_touches(win: &super::window::AndroidWindow) {
+    let vsync_ns = super::frame_source::last_vsync_ns();
+    let target_ns = if vsync_ns > 0 {
+        vsync_ns
+    } else {
+        super::frame_source::monotonic_nanos_now()
+    };
+    let refresh_ns = super::frame_source::refresh_interval_ns();
+    let mut moves = Vec::new();
+    TOUCH_RESAMPLER.with(|slot| {
+        slot.borrow_mut()
+            .flush_for_vsync(target_ns, refresh_ns, |m| moves.push(m));
+    });
+    for m in moves {
+        win.handle_touch(crate::android::TouchPoint {
+            id: m.id,
+            x: m.raw_x,
+            y: m.raw_y,
+            action: AMOTION_EVENT_ACTION_MOVE,
+            predicted: m.predicted,
+            timestamp: Some(super::frame_source::monotonic_nanos_to_instant(m.raw_time_ns)),
+        });
+    }
+}
+
 // ── input event processing ────────────────────────────────────────────────────
 
 /// Process input events from the `AndroidApp` and dispatch them to the window.
@@ -498,6 +612,10 @@ fn process_input_events(app: &AndroidApp) {
                                 return android_activity::InputStatus::Unhandled;
                             }
 
+                            let event_time_ns = motion_event.event_time();
+                            let event_instant =
+                                super::frame_source::monotonic_nanos_to_instant(event_time_ns);
+
                             for i in 0..pointer_count {
                                 let pointer = motion_event.pointer_at_index(i);
 
@@ -523,21 +641,82 @@ fn process_input_events(app: &AndroidApp) {
                                     _ => continue,
                                 };
 
-                                let touch = crate::android::TouchPoint {
-                                    id: pointer.pointer_id(),
-                                    x: pointer.x(),
-                                    y: pointer.y(),
-                                    action: touch_action,
-                                };
-
-                                log::debug!(
-                                    "process_input_events: dispatching touch id={} x={:.0} y={:.0} action={}",
-                                    touch.id, touch.x, touch.y, touch.action,
-                                );
-
-                                win.handle_touch(touch);
+                                let pointer_id = pointer.pointer_id();
+                                match touch_action {
+                                    AMOTION_EVENT_ACTION_DOWN => {
+                                        TOUCH_RESAMPLER.with(|slot| {
+                                            slot.borrow_mut().on_down(
+                                                pointer_id,
+                                                event_time_ns,
+                                                pointer.x(),
+                                                pointer.y(),
+                                            );
+                                        });
+                                        win.handle_touch(crate::android::TouchPoint {
+                                            id: pointer_id,
+                                            x: pointer.x(),
+                                            y: pointer.y(),
+                                            action: AMOTION_EVENT_ACTION_DOWN,
+                                            predicted: None,
+                                            timestamp: Some(event_instant),
+                                        });
+                                    }
+                                    AMOTION_EVENT_ACTION_MOVE => {
+                                        let mut any_sample = false;
+                                        TOUCH_RESAMPLER.with(|slot| {
+                                            let mut resampler = slot.borrow_mut();
+                                            for hist in pointer.history() {
+                                                any_sample |= resampler.on_move(
+                                                    pointer_id,
+                                                    hist.event_time(),
+                                                    hist.x(),
+                                                    hist.y(),
+                                                );
+                                            }
+                                            any_sample |= resampler.on_move(
+                                                pointer_id,
+                                                event_time_ns,
+                                                pointer.x(),
+                                                pointer.y(),
+                                            );
+                                        });
+                                        if any_sample {
+                                            super::frame_source::schedule_frame();
+                                        }
+                                    }
+                                    AMOTION_EVENT_ACTION_UP | AMOTION_EVENT_ACTION_CANCEL => {
+                                        let mut pending = Vec::new();
+                                        TOUCH_RESAMPLER.with(|slot| {
+                                            slot.borrow_mut().on_up_or_cancel(pointer_id, |m| {
+                                                pending.push(m);
+                                            });
+                                        });
+                                        for m in pending {
+                                            win.handle_touch(crate::android::TouchPoint {
+                                                id: m.id,
+                                                x: m.raw_x,
+                                                y: m.raw_y,
+                                                action: AMOTION_EVENT_ACTION_MOVE,
+                                                predicted: None,
+                                                timestamp: Some(
+                                                    super::frame_source::monotonic_nanos_to_instant(
+                                                        m.raw_time_ns,
+                                                    ),
+                                                ),
+                                            });
+                                        }
+                                        win.handle_touch(crate::android::TouchPoint {
+                                            id: pointer_id,
+                                            x: pointer.x(),
+                                            y: pointer.y(),
+                                            action: touch_action,
+                                            predicted: None,
+                                            timestamp: Some(event_instant),
+                                        });
+                                    }
+                                    _ => {}
+                                }
                             }
-
                             android_activity::InputStatus::Handled
                         }
                         InputEvent::KeyEvent(key_event) => {
@@ -775,6 +954,9 @@ pub fn run_event_loop(app: &AndroidApp) {
             log::debug!("deferred: ConfigChanged");
             if let Some(platform) = PLATFORM.get() {
                 platform.notify_keyboard_layout_change();
+                if let Some(native_window) = app.native_window() {
+                    platform.update_primary_display(&native_window, &app.asset_manager());
+                }
                 let is_dark = query_night_mode_via_jni();
                 if let Some(win) = platform.primary_window() {
                     let appearance = if is_dark {
@@ -870,7 +1052,11 @@ pub fn run_event_loop(app: &AndroidApp) {
                     super::frame_source::schedule_frame();
                 }
                 if super::frame_source::take_frame() {
+                    // Pull any last-moment touch samples right up to hardware vsync,
+                    // then flush resampled moves once per vsync before drawing.
+                    process_input_events(app);
                     if let Some(win) = platform.primary_window() {
+                        flush_resampled_touches(&win);
                         win.request_frame();
                     }
 
@@ -879,6 +1065,14 @@ pub fn run_event_loop(app: &AndroidApp) {
                     // in get_current_texture / present).
                     drain_events(app);
                     process_input_events(app);
+                    let now_ns = super::frame_source::monotonic_nanos_now();
+                    let refresh_ns = super::frame_source::refresh_interval_ns();
+                    let keep_pacing = TOUCH_RESAMPLER.with(|slot| {
+                        slot.borrow().needs_next_vsync(now_ns, refresh_ns)
+                    });
+                    if keep_pacing {
+                        super::frame_source::schedule_frame();
+                    }
                 }
             }
         }

@@ -475,7 +475,7 @@ impl WgpuRenderer {
                 .preferred_present_mode
                 .filter(|mode| surface_caps.present_modes.contains(mode))
                 .unwrap_or(wgpu::PresentMode::Fifo),
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: if cfg!(target_os = "android") { 1 } else { 2 },
             alpha_mode,
             view_formats: vec![],
         };

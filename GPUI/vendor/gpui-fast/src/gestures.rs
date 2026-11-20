@@ -628,7 +628,7 @@ impl TouchGestureRecognizer {
         &mut self,
         event: &TouchEvent,
     ) -> SmallVec<[RecognizedTouchGesture; 2]> {
-        self.handle_event_at(event, Instant::now())
+        self.handle_event_at(event, event.timestamp.unwrap_or_else(Instant::now))
     }
 
     fn handle_event_at(
@@ -1031,13 +1031,14 @@ impl TouchGestureRecognizer {
     /// Advances post-fling momentum by one frame, returning the scroll step
     /// to dispatch, or `None` when no momentum is in progress. The final step
     /// carries [`TouchPhase::Ended`] to close the synthetic scroll stream.
+    #[allow(dead_code)]
     pub(crate) fn tick_momentum(&mut self) -> Option<RecognizedTouchGesture> {
         self.tick_momentum_at(Instant::now())
     }
 
-    fn tick_momentum_at(&mut self, now: Instant) -> Option<RecognizedTouchGesture> {
+    pub(crate) fn tick_momentum_at(&mut self, now: Instant) -> Option<RecognizedTouchGesture> {
         let momentum = self.momentum.as_mut()?;
-        let elapsed = now.duration_since(momentum.started_at);
+        let elapsed = now.saturating_duration_since(momentum.started_at);
         let distance = self
             .tuning
             .scroll_physics
@@ -1090,6 +1091,15 @@ struct VelocityTracker {
 
 impl VelocityTracker {
     fn push(&mut self, time: Instant, position: Point<Pixels>) {
+        // Vsync-only prediction ticks reuse the latest hardware sample and
+        // timestamp; skip exact duplicates so they do not dilute velocity.
+        if self
+            .samples
+            .back()
+            .is_some_and(|(last_time, last_pos)| time <= *last_time && position == *last_pos)
+        {
+            return;
+        }
         self.samples.push_back((time, position));
         while self.samples.len() > VELOCITY_MAX_SAMPLES {
             self.samples.pop_front();
@@ -2322,6 +2332,44 @@ mod tests {
         assert!(recognizer.offer_long_press(replacement_touch).is_some());
     }
 
+    #[test]
+    fn hardware_timestamps_preserve_velocity_and_deduplicate_prediction_ticks() {
+        let mut recognizer = TouchGestureRecognizer::new(GestureTuning::default());
+        let t0 = Instant::now();
+        let send = |recognizer: &mut TouchGestureRecognizer,
+                    phase: TouchPhase,
+                    y: f32,
+                    predicted_y: Option<f32>,
+                    ms: u64| {
+            recognizer.handle_event(&TouchEvent {
+                id: TouchId(1),
+                phase,
+                position: point(px(100.), px(y)),
+                predicted_position: predicted_y.map(|py| point(px(100.), px(py))),
+                force: None,
+                timestamp: Some(t0 + Duration::from_millis(ms)),
+            })
+        };
+        send(&mut recognizer, TouchPhase::Started, 300., None, 0);
+        send(&mut recognizer, TouchPhase::Moved, 280., None, 8);
+        send(&mut recognizer, TouchPhase::Moved, 260., None, 16);
+        // Prediction-only tick with identical hardware timestamp & raw position.
+        let pred = send(&mut recognizer, TouchPhase::Moved, 260., Some(250.), 16);
+        assert!(
+            matches!(pred.as_slice(), [RecognizedTouchGesture::Scroll(s)] if s.delta.pixel_delta(px(1.)).y == px(-10.)),
+            "prediction tick should advance scroll smoothly: {pred:?}"
+        );
+        send(&mut recognizer, TouchPhase::Moved, 240., None, 24);
+        send(&mut recognizer, TouchPhase::Ended, 240., None, 26);
+        assert!(recognizer.has_momentum());
+        // Tick at an earlier timestamp saturates cleanly without panicking.
+        let zero = recognizer.tick_momentum_at(t0 + Duration::from_millis(20));
+        assert!(zero.is_some());
+        let step1 = recognizer.tick_momentum_at(t0 + Duration::from_millis(34));
+        let step2 = recognizer.tick_momentum_at(t0 + Duration::from_millis(42));
+        assert!(step1.is_some() && step2.is_some());
+    }
+
     fn touch_event(id: TouchId, phase: TouchPhase, x: f32, y: f32) -> TouchEvent {
         TouchEvent {
             id,
@@ -2329,6 +2377,7 @@ mod tests {
             position: point(px(x), px(y)),
             predicted_position: None,
             force: None,
+            timestamp: None,
         }
     }
 }

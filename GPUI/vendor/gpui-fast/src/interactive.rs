@@ -134,6 +134,9 @@ pub struct TouchEvent {
     pub predicted_position: Option<Point<Pixels>>,
     /// Normalized touch force in `0.0..=1.0`, if the hardware reports it.
     pub force: Option<f32>,
+    /// Hardware timestamp of this touch sample when the platform provides one.
+    /// Falls back to `Instant::now()` at dispatch time when `None`.
+    pub timestamp: Option<scheduler::Instant>,
 }
 
 impl Sealed for TouchEvent {}

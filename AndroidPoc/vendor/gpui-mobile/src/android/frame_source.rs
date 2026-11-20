@@ -42,7 +42,7 @@ use std::{
     cell::RefCell,
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, Ordering},
         mpsc, OnceLock,
     },
     time::{Duration, Instant},
@@ -54,12 +54,14 @@ use crate::frame_pacer::FramePacer;
 /// this much latency instead of a frozen app.
 const IDLE_POLL_CAP: Duration = Duration::from_secs(1);
 
-/// The refresh interval the pacer assumes: a frame slower than this stops
-/// waiting for vsyncs, and the clock fallback spaces frames by it. 60 Hz is
-/// the common case; a faster display only makes an overrunning frame wait
-/// one extra vsync before pacing gives way.
-const REFRESH_INTERVAL: Duration = Duration::from_micros(16_667);
+/// Default refresh interval before the display's real refresh rate is queried.
+const DEFAULT_REFRESH_INTERVAL_NS: u64 = 16_666_667;
 
+/// Active display refresh interval in nanoseconds (updated from `Display.getRefreshRate()`).
+static REFRESH_INTERVAL_NS: AtomicU64 = AtomicU64::new(DEFAULT_REFRESH_INTERVAL_NS);
+
+/// Most recent hardware `AChoreographer` vsync timestamp in `CLOCK_MONOTONIC` ns.
+static LAST_VSYNC_NS: AtomicI64 = AtomicI64::new(0);
 thread_local! {
     /// The loop thread's pacer, installed by [`install`].
     static PACER: RefCell<Option<FramePacer>> = const { RefCell::new(None) };
@@ -102,17 +104,18 @@ pub(crate) fn install() {
         if slot.borrow().is_some() {
             return;
         }
+        let interval = Duration::from_nanos(REFRESH_INTERVAL_NS.load(Ordering::Relaxed));
         let pacer = if has_choreographer {
             FramePacer::with_vsync(
                 Box::new(|| {
                     POST_REQUESTED.store(true, Ordering::Release);
                     wake_looper(&VSYNC_LOOPER);
                 }),
-                REFRESH_INTERVAL,
+                interval,
             )
         } else {
             log::warn!("frame_source: no AChoreographer available; pacing by clock");
-            FramePacer::with_clock(REFRESH_INTERVAL)
+            FramePacer::with_clock(interval)
         };
         *slot.borrow_mut() = Some(pacer);
     });
@@ -172,30 +175,72 @@ fn vsync_thread(ready: mpsc::Sender<bool>) {
     }
 }
 
-fn vsync_instant(frame_time_nanos: std::os::raw::c_long) -> Instant {
-    let now = Instant::now();
-    if frame_time_nanos <= 0 {
-        return now;
-    }
+/// Current `CLOCK_MONOTONIC` timestamp in nanoseconds.
+pub(crate) fn monotonic_nanos_now() -> i64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: `ts` is a valid out-pointer for `CLOCK_MONOTONIC`.
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
-        let now_ns = (ts.tv_sec as i128) * 1_000_000_000 + (ts.tv_nsec as i128);
-        let lag_ns = now_ns - (frame_time_nanos as i128);
-        if (0..=100_000_000).contains(&lag_ns) {
-            if let Some(vsync) = now.checked_sub(Duration::from_nanos(lag_ns as u64)) {
-                return vsync;
-            }
+        (ts.tv_sec as i64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(ts.tv_nsec as i64)
+    } else {
+        0
+    }
+}
+
+/// Converts a `CLOCK_MONOTONIC` nanosecond timestamp (`AChoreographer` vsync or
+/// `AMotionEvent` event time) to `std::time::Instant`.
+pub(crate) fn monotonic_nanos_to_instant(nanos: i64) -> Instant {
+    let now = Instant::now();
+    if nanos <= 0 {
+        return now;
+    }
+    let now_ns = monotonic_nanos_now();
+    if now_ns <= 0 {
+        return now;
+    }
+    let delta_ns = (now_ns as i128) - (nanos as i128);
+    if (0..=500_000_000).contains(&delta_ns) {
+        if let Some(instant) = now.checked_sub(Duration::from_nanos(delta_ns as u64)) {
+            return instant;
+        }
+    } else if (-100_000_000..0).contains(&delta_ns) {
+        if let Some(instant) = now.checked_add(Duration::from_nanos((-delta_ns) as u64)) {
+            return instant;
         }
     }
     now
+}
+
+/// Updates the active display refresh interval (from `Display.getRefreshRate()`).
+pub(crate) fn set_refresh_interval(interval: Duration) {
+    let ns = interval.as_nanos().clamp(2_000_000, 100_000_000) as u64;
+    REFRESH_INTERVAL_NS.store(ns, Ordering::Relaxed);
+    PACER.with(|slot| {
+        if let Some(pacer) = slot.borrow().as_ref() {
+            pacer.set_interval(Duration::from_nanos(ns));
+        }
+    });
+}
+
+/// Active display refresh interval in nanoseconds.
+pub(crate) fn refresh_interval_ns() -> i64 {
+    REFRESH_INTERVAL_NS.load(Ordering::Relaxed) as i64
+}
+
+/// Most recent hardware `AChoreographer` vsync timestamp in `CLOCK_MONOTONIC` ns
+/// (or `0` before the first vsync callback).
+pub(crate) fn last_vsync_ns() -> i64 {
+    LAST_VSYNC_NS.load(Ordering::Acquire)
 }
 
 unsafe extern "C" fn on_vsync(
     frame_time_nanos: std::os::raw::c_long,
     _data: *mut std::ffi::c_void,
 ) {
-    *LAST_VSYNC_AT.lock() = Some(vsync_instant(frame_time_nanos));
+    let ns = frame_time_nanos as i64;
+    LAST_VSYNC_NS.store(ns, Ordering::Release);
+    *LAST_VSYNC_AT.lock() = Some(monotonic_nanos_to_instant(ns));
     FRAME_DUE.store(true, Ordering::Release);
     wake_looper(&MAIN_LOOPER);
 }

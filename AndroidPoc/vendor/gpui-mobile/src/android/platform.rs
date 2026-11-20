@@ -163,6 +163,8 @@ struct AndroidPlatformState {
     /// native window.  This is where the user should set up their GPUI views.
     /// The callback receives the `Arc<AndroidWindow>` that was just created.
     on_init_window_callback: Option<Box<dyn FnOnce(Arc<AndroidWindow>) + Send>>,
+    /// Called when the primary display's geometry or refresh rate changes.
+    displays_changed_callback: Option<Box<dyn FnMut() + Send>>,
 
     // ── miscellaneous ─────────────────────────────────────────────────────────
     /// `true` while the app is active (foreground).
@@ -414,6 +416,7 @@ impl AndroidPlatform {
                 open_urls_callback: None,
                 keyboard_layout_callback: None,
                 on_init_window_callback: None,
+                displays_changed_callback: None,
                 is_active: false,
                 headless,
                 preferred_backend: AndroidBackend::Vulkan,
@@ -635,9 +638,25 @@ impl AndroidPlatform {
         native_window: &ndk::native_window::NativeWindow,
         asset_manager: &ndk::asset::AssetManager,
     ) {
-        let display = AndroidDisplay::from_activity(native_window, asset_manager);
-        let mut state = self.state.lock();
-        state.displays = DisplayList::single(display);
+        let mut display = AndroidDisplay::from_activity(native_window, asset_manager);
+        if let Some(hz) = super::jni::query_refresh_rate_via_jni() {
+            display = display.with_refresh_rate_hz(hz);
+            if let Some(interval) = display.refresh_interval_duration() {
+                super::frame_source::set_refresh_interval(interval);
+            }
+        }
+        let cb = {
+            let mut state = self.state.lock();
+            state.displays = DisplayList::single(display);
+            state.displays_changed_callback.take()
+        };
+        if let Some(mut cb) = cb {
+            cb();
+            let mut state = self.state.lock();
+            if state.displays_changed_callback.is_none() {
+                state.displays_changed_callback = Some(cb);
+            }
+        }
     }
 
     // ── clipboard ─────────────────────────────────────────────────────────────
@@ -994,7 +1013,12 @@ impl Platform for AndroidPlatform {
         }
     }
 
-    fn on_displays_changed(&self, _callback: Box<dyn FnMut()>) {}
+    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+        self.state.lock().displays_changed_callback = Some(unsafe {
+            // SAFETY: on Android display callbacks always run on the main thread.
+            std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
+        });
+    }
 
     fn gestures(&self) -> Option<Rc<dyn PlatformGestures>> {
         Some(Rc::new(AndroidGestures))

@@ -234,6 +234,11 @@ pub struct TouchPoint {
     pub y: f32,
     /// `AMOTION_EVENT_ACTION_*` action masked to a single pointer.
     pub action: u32,
+    /// Optional resampled/predicted position in physical pixels for latency
+    /// and phase compensation during pan/drag.
+    pub predicted: Option<(f32, f32)>,
+    /// Optional hardware monotonic timestamp converted to `Instant`.
+    pub timestamp: Option<std::time::Instant>,
 }
 
 // ── shared logging helper ─────────────────────────────────────────────────────

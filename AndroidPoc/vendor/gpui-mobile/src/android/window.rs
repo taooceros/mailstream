@@ -1451,7 +1451,9 @@ impl PlatformWindow for AndroidPlatformWindow {
 
         // Preserve raw contacts so GPUI can arbitrate long presses, claimed
         // control drags and ordinary pans, including hover suppression and inertia.
-        // `FlingGuard` keeps a contact that stops a fling from inheriting its axis.
+        // GPUI's TouchGestureRecognizer natively handles catching a fling with
+        // its own axis (`TouchGestureState::Caught`), so no synthetic FlingGuard
+        // is needed here.
         {
             let cb = Arc::clone(&input_cb);
             let window = Arc::downgrade(&self.window);
@@ -1462,7 +1464,6 @@ impl PlatformWindow for AndroidPlatformWindow {
                 id
             };
             let mut active_touches = HashMap::new();
-            let mut fling_guard = crate::fling_guard::FlingGuard::new();
             self.window.on_touch(move |touch| {
                 let phase = match touch.action {
                     0 => gpui::TouchPhase::Started,
@@ -1486,17 +1487,19 @@ impl PlatformWindow for AndroidPlatformWindow {
                     return;
                 };
                 let scale = window.scale_factor();
+                let predicted_position = touch
+                    .predicted
+                    .map(|(px_x, px_y)| gpui::point(gpui::px(px_x / scale), gpui::px(px_y / scale)));
                 let event = gpui::TouchEvent {
                     id,
                     phase,
                     position: gpui::point(gpui::px(touch.x / scale), gpui::px(touch.y / scale)),
-                    predicted_position: None,
+                    predicted_position,
                     force: None,
+                    timestamp: touch.timestamp,
                 };
                 let mut cb = cb.lock();
-                fling_guard.relay(event, &mut next_touch_id, |event| {
-                    cb(gpui::PlatformInput::Touch(event));
-                });
+                cb(gpui::PlatformInput::Touch(event));
                 if matches!(phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
                     active_touches.remove(&touch.id);
                 }
@@ -2021,6 +2024,8 @@ mod tests {
             x: 100.0,
             y: 200.0,
             action: 0,
+            predicted: None,
+            timestamp: None,
         });
 
         let pts = received.lock();
@@ -2132,6 +2137,8 @@ mod tests {
             x: 100.,
             y,
             action,
+            predicted: None,
+            timestamp: None,
         });
     }
 
@@ -2188,6 +2195,8 @@ mod tests {
             x: 120.,
             y: 220.,
             action: 0,
+            predicted: None,
+            timestamp: None,
         });
         send_touch(&window, 1, 200.);
         send_touch(&window, 0, 200.);
