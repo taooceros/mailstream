@@ -442,14 +442,17 @@ impl WgpuContext {
     pub(crate) async fn create_device(
         adapter: &wgpu::Adapter,
     ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
-        let dual_source_blending = adapter
-            .features()
-            .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+        // Mailstream patch (MS-446): Android OLED (PenTile) screens use grayscale AA,
+        // so skip requesting DUAL_SOURCE_BLENDING and compiling SUBPIXEL_SHADERS.
+        let dual_source_blending = !cfg!(target_os = "android")
+            && adapter
+                .features()
+                .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
 
         let mut required_features = wgpu::Features::empty();
         if dual_source_blending {
             required_features |= wgpu::Features::DUAL_SOURCE_BLENDING;
-        } else {
+        } else if !cfg!(target_os = "android") {
             log::warn!(
                 "Dual-source blending not available on this GPU. \
                 Subpixel text antialiasing will be disabled."

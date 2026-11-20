@@ -2672,17 +2672,29 @@ impl RenderingParameters {
             .find(|&n| format_features.flags.sample_count_supported(n))
             .unwrap_or(1);
 
+        // Mailstream patch (MS-446): Android OLED uses lower gamma (1.45) and gentler
+        // grayscale contrast (0.35) to prevent dark-mode white-text halation/blooming.
+        let default_gamma = if cfg!(target_os = "android") {
+            1.45_f32
+        } else {
+            1.8_f32
+        };
         let gamma = env::var("ZED_FONTS_GAMMA")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1.8_f32)
+            .unwrap_or(default_gamma)
             .clamp(1.0, 2.2);
         let gamma_ratios = get_gamma_correction_ratios(gamma);
 
+        let default_grayscale_enhanced_contrast = if cfg!(target_os = "android") {
+            0.35_f32
+        } else {
+            1.0_f32
+        };
         let grayscale_enhanced_contrast = env::var("ZED_FONTS_GRAYSCALE_ENHANCED_CONTRAST")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(1.0_f32)
+            .unwrap_or(default_grayscale_enhanced_contrast)
             .max(0.0);
 
         let subpixel_enhanced_contrast = env::var("ZED_FONTS_SUBPIXEL_ENHANCED_CONTRAST")

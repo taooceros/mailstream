@@ -1743,7 +1743,9 @@ impl PlatformWindow for AndroidPlatformWindow {
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {
-        self.window.supports_subpixel_aa()
+        // Mailstream patch (MS-446): Android OLED (PenTile) screens must not use
+        // desktop RGB-stripe LCD subpixel antialiasing; always use grayscale AA.
+        false
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
@@ -2054,6 +2056,13 @@ mod tests {
     fn subpixel_aa_false_for_headless() {
         let w = AndroidWindow::headless(1080, 1920, 2.0);
         assert!(!w.supports_subpixel_aa());
+    }
+
+    #[test]
+    fn platform_window_subpixel_rendering_always_false() {
+        let w = AndroidWindow::headless(1080, 1920, 3.0);
+        let platform = AndroidPlatformWindow::new(w, None);
+        assert!(!platform.is_subpixel_rendering_supported());
     }
 
     #[test]

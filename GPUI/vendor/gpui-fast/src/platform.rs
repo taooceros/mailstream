@@ -1755,8 +1755,21 @@ pub fn get_gamma_correction_ratios(gamma: f32) -> [f32; 4] {
     const NORM13: f32 = ((0x10000 as f64) / (255.0 * 255.0) * 4.0) as f32;
     const NORM24: f32 = ((0x100 as f64) / (255.0) * 4.0) as f32;
 
-    let index = ((gamma * 10.0).round() as usize).clamp(10, 22) - 10;
-    let ratios = GAMMA_INCORRECT_TARGET_RATIOS[index];
+    // Mailstream patch (MS-446): linearly interpolate between table entries instead of
+    // rounding to 0.1 steps so fractional gamma values (e.g. 1.45 on Android OLED) are exact.
+    let clamped = gamma.clamp(1.0, 2.2);
+    let scaled = (clamped - 1.0) * 10.0;
+    let lo = (scaled.floor() as usize).min(GAMMA_INCORRECT_TARGET_RATIOS.len() - 1);
+    let hi = (lo + 1).min(GAMMA_INCORRECT_TARGET_RATIOS.len() - 1);
+    let t = (scaled - lo as f32).clamp(0.0, 1.0);
+    let a = GAMMA_INCORRECT_TARGET_RATIOS[lo];
+    let b = GAMMA_INCORRECT_TARGET_RATIOS[hi];
+    let ratios = [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ];
 
     [
         ratios[0] * NORM13,

@@ -287,7 +287,15 @@ impl PlatformTextSystem for CosmicTextSystem {
         _font_id: FontId,
         _font_size: Pixels,
     ) -> TextRenderingMode {
-        TextRenderingMode::Subpixel
+        // Mailstream patch (MS-446): use grayscale AA on mobile OLED/high-DPI screens.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            TextRenderingMode::Grayscale
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            TextRenderingMode::Subpixel
+        }
     }
 }
 
@@ -643,11 +651,13 @@ impl CosmicTextSystemState {
         // Mailstream patch (MS-230): a variable face at the weight it was shaped at, as
         // cosmic-text's own `SwashCache` does; swash alone draws the default instance.
         let wght = swash::Tag::from_be_bytes(*b"wght");
+        // Mailstream patch (MS-446): disable strong hinting on mobile and high-DPI (>= 2x) displays.
+        let hint = !cfg!(any(target_os = "android", target_os = "ios")) && params.scale_factor < 2.0;
         let mut scaler = self
             .swash_scale_context
             .builder(font_ref)
             .size(pixel_size * params.scale_factor)
-            .hint(true);
+            .hint(hint);
         if let Some(axis) = font_ref.variations().find_by_tag(wght) {
             let weight = f32::from(loaded_font.weight.0).clamp(axis.min_value(), axis.max_value());
             scaler = scaler.normalized_coords(font_ref.variations().normalized_coords([(wght, weight)]));
