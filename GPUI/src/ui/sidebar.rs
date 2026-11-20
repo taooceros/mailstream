@@ -254,7 +254,7 @@ impl MailApp {
                                     .active(|s| s.bg(p.pressed))
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.close_drawer(cx);
-                                        window.dispatch_action(Box::new(ShowSettings), cx);
+                                        this.show_settings(&ShowSettings, window, cx);
                                     }))
                                     .child(icon(Icon::Add, 19., p.accent))
                                     .child(

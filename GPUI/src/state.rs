@@ -78,7 +78,7 @@ pub const CONTEXT: &str = "Mail";
 pub fn bind_keys(cx: &mut App) {
     // Single keys act on the list, never while a text field has focus, in Chat or the calendar
     // (which have their own), or in a draft.
-    let list = Some("Mail && !Input && !Chat && !Calendar && !Compose && !Expander && !VideoLightbox");
+    let list = Some("Mail && !Input && !Chat && !Calendar && !Compose && !Expander && !VideoLightbox && !Settings");
     let window = Some(CONTEXT);
     cx.bind_keys([
         KeyBinding::new("j", Next, list),
@@ -530,6 +530,8 @@ pub struct MailApp {
     pub drawer_open: bool,
     /// Whether the inline search bar is expanded in compact (small-screen) mode.
     pub compact_search: bool,
+    /// Inline Settings overlay shown on compact viewports and single-window mobile hosts (Android).
+    pub(crate) settings: Option<Entity<crate::settings::Settings>>,
     pub swipe: BackSwipe,
     /// A mouse drag on a layer (MS-266).
     pub drag: MouseDrag,
@@ -676,6 +678,7 @@ impl MailApp {
             sidebar_beside_compose: false,
             drawer_open: false,
             compact_search: false,
+            settings: None,
             swipe: BackSwipe::default(),
             drag: MouseDrag::default(),
             slide: Slide::Rest,

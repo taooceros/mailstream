@@ -145,6 +145,7 @@ impl Render for MailApp {
         };
         let show_bottom_bar = compact
             && !compose_fullscreen
+            && self.settings.is_none()
             && if self.chat_view.is_some() {
                 !self.chat.read(cx).has_open_page()
             } else if self.calendar_view {
@@ -187,6 +188,7 @@ impl Render for MailApp {
             .on_action(cx.listener(Self::new_chat))
             .on_action(cx.listener(Self::reset_list_width))
             .on_action(cx.listener(Self::toggle_frame_rate))
+            .on_action(cx.listener(Self::show_settings))
             // The gap beside the docked compose column moves its free edge.
             .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ResizeColumn>, _, cx| {
                 let width = event.drag(cx).width(f32::from(event.event.position.x));
@@ -290,6 +292,19 @@ impl Render for MailApp {
                 )
             })
             .when(compact && self.drawer_open, |d| d.child(self.render_drawer(width, p, window, cx)))
+            .when_some(self.settings.clone(), |d, settings| {
+                d.child(
+                    div()
+                        .id("inline-settings")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .pt(px(safe_top))
+                        .pb(px(safe_bottom))
+                        .bg(p.background)
+                        .child(settings),
+                )
+            })
             .children(self.render_context_menu())
             .children(self.render_tag_editor(p, window, cx))
             .children(video_lightbox)

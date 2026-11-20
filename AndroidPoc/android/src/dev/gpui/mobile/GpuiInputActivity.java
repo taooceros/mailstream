@@ -16,6 +16,8 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.inputmethod.InputMethodManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 
@@ -40,6 +42,7 @@ public class GpuiInputActivity extends NativeActivity {
 
     private static native void nativeIme(long session, int kind, String text, int start, int end);
     private static native void nativeInsets(int top, int bottom, int left, int right, float density);
+    private static native void nativeBack();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -86,6 +89,30 @@ public class GpuiInputActivity extends NativeActivity {
             return v.onApplyWindowInsets(insets);
         });
         decor.requestApplyInsets();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                new OnBackInvokedCallback() {
+                    @Override
+                    public void onBackInvoked() {
+                        try {
+                            nativeBack();
+                        } catch (UnsatisfiedLinkError ignored) {
+                        }
+                    }
+                }
+            );
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        try {
+            nativeBack();
+        } catch (UnsatisfiedLinkError ignored) {
+            super.onBackPressed();
+        }
     }
 
     public void gpuiShowKeyboard(final int kind, final long session) {

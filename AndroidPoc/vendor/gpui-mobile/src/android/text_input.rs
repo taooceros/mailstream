@@ -14,6 +14,7 @@ use std::{
 static SESSION: AtomicU64 = AtomicU64::new(0);
 static COMPOSING: AtomicBool = AtomicBool::new(false);
 static EVENTS: Mutex<VecDeque<ImeEvent>> = Mutex::new(VecDeque::new());
+static BACK_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct ImeEvent {
     pub session: u64,
@@ -37,10 +38,30 @@ pub(super) fn enqueue(event: ImeEvent) {
     }
 }
 
+/// Enqueues a system back event from the Java UI thread (`OnBackInvokedCallback` / `onBackPressed`)
+/// so GPUI dispatches an `escape` keystroke on the native loop thread even when no IME session is
+/// active or predictive back bypasses the native `InputQueue`.
+pub(super) fn enqueue_back() {
+    BACK_PENDING.store(true, Ordering::Release);
+    crate::mark_text_input_dirty();
+}
+
 pub(super) fn drain(
     slot: &Rc<RefCell<Option<PlatformInputHandler>>>,
     input: &mut dyn FnMut(PlatformInput) -> DispatchEventResult,
 ) {
+    if BACK_PENDING.swap(false, Ordering::AcqRel) {
+        finish_composition(slot);
+        input(PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: Keystroke {
+                key: "escape".into(),
+                key_char: None,
+                modifiers: Modifiers::default(),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }));
+    }
     let events = std::mem::take(&mut *EVENTS.lock());
     for event in events {
         if event.session != SESSION.load(Ordering::Acquire) {
