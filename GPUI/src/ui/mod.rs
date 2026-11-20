@@ -453,7 +453,7 @@ impl MailApp {
         // where no swipe reaches it (MS-384).
         // A mouse drag from a press on the top layer moves it the same way (MS-266); its
         // listeners go under the layers and over them (`swipe::mouse_capture`).
-        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().inset_0();
+        let swipe = swipe::scroll_capture(cx.entity(), Self::peek_swipe, Self::follow).absolute().inset_0();
         let (drag_under, drag_over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
 
         // Beside a conversation, the list's content keeps the width the list rests at once the

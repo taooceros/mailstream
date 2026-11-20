@@ -615,9 +615,8 @@ impl CalendarPane {
     }
 
     /// A scroll event over the top surface, in the capture phase: true when the swipe took it.
-    fn feed_close_swipe(&mut self, event: &ScrollEvent, at: Option<Point<Pixels>>, cx: &mut Context<Self>) -> bool {
-        let step = self.close_swipe.feed(event, at.is_some() && self.top_surface().is_some());
-        self.follow_close(step, cx)
+    fn peek_close_swipe(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
+        self.close_swipe.feed(event, at.is_some() && self.top_surface().is_some())
     }
 
     /// The mouse after a press on the top surface, in the capture phase: true when the drag took it.
@@ -669,7 +668,7 @@ impl CalendarPane {
         }
         let width = self.close_width.clone();
         let measure = canvas(move |bounds, _, _| width.set(f32::from(bounds.size.width)), |_, _, _, _| {});
-        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_close_swipe);
+        let swipe = swipe::scroll_capture(cx.entity(), Self::peek_close_swipe, Self::follow_close);
         let (under, over) = swipe::mouse_capture(cx.entity(), Self::feed_drag);
         (
             vec![

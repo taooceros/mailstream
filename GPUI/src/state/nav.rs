@@ -395,13 +395,12 @@ impl MailApp {
     /// A scroll event in the content area (`at`, from its top left; `None` when an overlay over
     /// it covers the pointer), in the capture phase: true when the back swipe took it. A swipe
     /// closes the layer under the fingers (MS-299, MS-319).
-    pub fn feed_swipe(&mut self, event: &ScrollEvent, at: Option<Point<Pixels>>, cx: &mut Context<Self>) -> bool {
+    pub fn peek_swipe(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
         if event.touch_phase == TouchPhase::Started {
-            self.gesture_layer = at.and_then(|at| self.layer_under(f32::from(at.x)));
+            *self.gesture_layer.borrow_mut() = at.and_then(|at| self.layer_under(f32::from(at.x)));
         }
-        let can_start = self.gesture_layer.is_some() && self.context_menu.is_none();
-        let step = self.swipe.feed(event, can_start);
-        self.follow(step, cx)
+        let can_start = self.gesture_layer.borrow().is_some() && self.context_menu.is_none();
+        self.swipe.feed(event, can_start)
     }
 
     /// The layer a gesture at `x` (from the content area's left) closes (MS-299, MS-281).
@@ -416,7 +415,7 @@ impl MailApp {
     /// layer under the pointer, whichever lies on top (MS-266, MS-299).
     pub fn press_layer(&mut self, layer: &SharedString, at: Point<Pixels>) {
         let live = self.live_layers().any(|live| &live.id() == layer);
-        self.gesture_layer = live.then(|| layer.clone());
+        *self.gesture_layer.borrow_mut() = live.then(|| layer.clone());
         self.drag.press(at, live && self.context_menu.is_none());
     }
 
@@ -427,11 +426,14 @@ impl MailApp {
     }
 
     /// The gesture's layer follows a swipe's or a drag's step: true when the gesture took the event.
-    fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+    pub fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
         let moves = !matches!(step, Step::Pass | Step::Consume);
-        if matches!(step, Step::Drag(_)) && self.slide_layer != self.gesture_layer {
-            self.finish_closing();
-            self.slide_layer = self.gesture_layer.clone();
+        if matches!(step, Step::Drag(_)) {
+            let gesture_layer = self.gesture_layer.borrow().clone();
+            if self.slide_layer != gesture_layer {
+                self.finish_closing();
+                self.slide_layer = gesture_layer;
+            }
         }
         let Some(index) = self.sliding() else { return !matches!(step, Step::Pass) };
         let took = self.slide.follow(step, self.travel(index));

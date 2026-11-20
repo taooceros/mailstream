@@ -325,13 +325,17 @@ impl CalendarPane {
     }
 
     /// A scroll event over the grid, in the capture phase: true when the page swipe took it.
-    fn feed_swipe(&mut self, event: &ScrollEvent, at: Option<gpui::Point<gpui::Pixels>>, cx: &mut Context<Self>) -> bool {
-        // A swipe over the event's page, or the pane over the days, is theirs (`feed_close_swipe`).
+    fn peek_swipe(&self, event: &ScrollEvent, at: Option<gpui::Point<gpui::Pixels>>) -> Step {
+        // A swipe over the event's page, or the pane over the days, is theirs (`peek_close_swipe`).
         if self.page || self.pane_covers {
-            return false;
+            return Step::Pass;
         }
+        self.swipe.feed(event, at.is_some() && self.view != View::Agenda)
+    }
+
+    fn follow_swipe(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
         let width = self.page_width.get().max(1.);
-        match self.swipe.feed(event, at.is_some() && self.view != View::Agenda) {
+        match step {
             Step::Pass => false,
             Step::Consume => true,
             Step::Drag(offset) => {
@@ -654,7 +658,7 @@ impl CalendarPane {
 
         // Two-finger paging: scroll events are seen in the capture phase, before the timeline
         // scrolls with them, so a sideways swipe is never eaten by it.
-        let swipe = swipe::scroll_capture(cx.entity(), Self::feed_swipe).absolute().inset_0();
+        let swipe = swipe::scroll_capture(cx.entity(), Self::peek_swipe, Self::follow_swipe).absolute().inset_0();
         let sketching = sketch_capture(cx.entity()).absolute().size_0();
 
         div()

@@ -145,22 +145,37 @@ impl MailApp {
             }
             ReaderPin::Free | ReaderPin::Opening => {}
         }
+        let app = cx.entity();
+        let scroll = self.reader_scroll.clone();
         div()
             .id("reader")
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.reader_scroll)
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+            .on_scroll(move |event: &ScrollEvent, window, cx| {
                 let vertical = match event.delta {
                     ScrollDelta::Pixels(delta) => delta.y != px(0.),
                     ScrollDelta::Lines(delta) => delta.y != 0.,
                 };
                 if vertical {
-                    this.reader_pin = ReaderPin::Free;
-                    // Once the wheel's step is taken and clamped.
-                    cx.on_next_frame(window, |this, _, cx| this.note_reader_top(cx));
+                    if app.read(cx).reader_pin != ReaderPin::Free {
+                        app.update(cx, |this, _| this.reader_pin = ReaderPin::Free);
+                    }
+                    let app = app.clone();
+                    let scroll = scroll.clone();
+                    // Once the wheel's step is taken and clamped; read-only unless `reader_top`
+                    // actually transitions, so Scroll Layers stay composited during scroll.
+                    window.on_next_frame(move |_, cx| {
+                        let top = MailApp::compute_reader_top(&scroll);
+                        if app.read(cx).reader_top != top {
+                            app.update(cx, |this, cx| {
+                                this.reader_top = top;
+                                cx.notify();
+                            });
+                        }
+                    });
                 }
-            }))
+            })
             .flex()
             .flex_col()
             .items_center()
@@ -191,10 +206,9 @@ impl MailApp {
 
     /// Notes how far the reader is scrolled, for the toolbar: past its top, and past its title
     /// and pills (the first row).
-    fn note_reader_top(&mut self, cx: &mut Context<Self>) {
-        let scroll = &self.reader_scroll;
+    fn compute_reader_top(scroll: &gpui::ScrollHandle) -> ReaderTop {
         let scrolled = -scroll.offset().y;
-        let top = if scrolled <= px(0.) {
+        if scrolled <= px(0.) {
             ReaderTop::Top
         } else if scroll
             .bounds_for_item(0)
@@ -203,7 +217,11 @@ impl MailApp {
             ReaderTop::PastTitle
         } else {
             ReaderTop::Scrolled
-        };
+        }
+    }
+
+    fn note_reader_top(&mut self, cx: &mut Context<Self>) {
+        let top = Self::compute_reader_top(&self.reader_scroll);
         if top != self.reader_top {
             self.reader_top = top;
             cx.notify();

@@ -21,6 +21,7 @@
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 
@@ -245,20 +246,25 @@ impl Preferences {
 }
 
 /// The two-finger swipe.
+///
+/// Uses interior mutability (`RefCell`) for the gesture state machine so `scroll_capture` can
+/// inspect and ignore vertical scroll events via `Entity::read` without calling `Entity::update`,
+/// which would otherwise bump GPUI's entity write generation and invalidate Scroll Layers on every
+/// scroll frame (MS-421).
 pub struct BackSwipe {
-    gesture: Gesture,
+    gesture: RefCell<Gesture>,
     pub preferences: Preferences,
 }
 
 impl Default for BackSwipe {
     fn default() -> Self {
-        Self { gesture: Gesture::new(SWIPE_DECISION), preferences: Preferences::default() }
+        Self { gesture: RefCell::new(Gesture::new(SWIPE_DECISION)), preferences: Preferences::default() }
     }
 }
 
 impl BackSwipe {
     /// `can_start`: whether a gesture beginning with this event may become a back swipe.
-    pub fn feed(&mut self, event: &ScrollEvent, can_start: bool) -> Step {
+    pub fn feed(&self, event: &ScrollEvent, can_start: bool) -> Step {
         // Mouse wheels scroll by lines; only trackpads send pixel deltas.
         let ScrollDelta::Pixels(delta) = event.delta else { return Step::Pass };
         let (raw_dx, dy) = (f32::from(delta.x), f32::from(delta.y));
@@ -267,17 +273,18 @@ impl BackSwipe {
         self.step(event.touch_phase, dx, dy, Instant::now(), can_start && self.preferences.enabled)
     }
 
-    fn step(&mut self, phase: TouchPhase, dx: f32, dy: f32, now: Instant, can_start: bool) -> Step {
+    fn step(&self, phase: TouchPhase, dx: f32, dy: f32, now: Instant, can_start: bool) -> Step {
+        let mut gesture = self.gesture.borrow_mut();
         match phase {
             // `Started` also stands for "may begin", which carries no movement.
             TouchPhase::Started => {
-                self.gesture.start(can_start, now);
+                gesture.start(can_start, now);
                 Step::Pass
             }
-            TouchPhase::Cancelled => self.gesture.cancel(),
+            TouchPhase::Cancelled => gesture.cancel(),
             // gpui reports momentum as `Moved` with no touch: after `Ended` they are the flick.
-            TouchPhase::Moved => self.gesture.moved(dx, dy, now),
-            TouchPhase::Ended => self.gesture.lifted(now, true),
+            TouchPhase::Moved => gesture.moved(dx, dy, now),
+            TouchPhase::Ended => gesture.lifted(now, true),
         }
     }
 }
@@ -450,7 +457,8 @@ pub fn settle(offset: f32, velocity: f32, width: f32) -> (bool, f32) {
 #[allow(clippy::type_complexity)]
 pub fn scroll_capture<T: 'static>(
     host: Entity<T>,
-    feed: fn(&mut T, &ScrollEvent, Option<Point<Pixels>>, &mut Context<T>) -> bool,
+    peek: fn(&T, &ScrollEvent, Option<Point<Pixels>>) -> Step,
+    follow: fn(&mut T, Step, &mut Context<T>) -> bool,
 ) -> Canvas<HitboxId> {
     canvas(
         |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal).id,
@@ -460,8 +468,14 @@ pub fn scroll_capture<T: 'static>(
                     return;
                 }
                 let at = hitbox.should_handle_scroll(window).then(|| event.position - bounds.origin);
-                if host.update(cx, |this, cx| feed(this, event, at, cx)) {
-                    cx.stop_propagation();
+                match peek(host.read(cx), event, at) {
+                    Step::Pass => {}
+                    Step::Consume => cx.stop_propagation(),
+                    step => {
+                        if host.update(cx, |this, cx| follow(this, step, cx)) {
+                            cx.stop_propagation();
+                        }
+                    }
                 }
             });
         },
@@ -675,7 +689,7 @@ mod tests {
 
     #[test]
     fn batched_microsecond_moves_do_not_explode_release_velocity() {
-        let mut swipe = BackSwipe::default();
+        let swipe = BackSwipe::default();
         let start = Instant::now();
         swipe.step(TouchPhase::Started, 0.0, 0.0, start, true);
 
@@ -707,7 +721,7 @@ mod tests {
 
     #[test]
     fn slow_drag_with_batched_moves_does_not_falsely_flick_close() {
-        let mut swipe = BackSwipe::default();
+        let swipe = BackSwipe::default();
         let start = Instant::now();
         swipe.step(TouchPhase::Started, 0.0, 0.0, start, true);
 
@@ -732,12 +746,17 @@ mod tests {
         covered: bool,
         dragged: Vec<f32>,
         released: Option<f32>,
+        follow_calls: usize,
     }
 
     impl OverlayHost {
-        fn feed(&mut self, event: &ScrollEvent, at: Option<Point<Pixels>>, cx: &mut Context<Self>) -> bool {
-            let can_start = at.is_some();
-            match self.swipe.feed(event, can_start) {
+        fn peek(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
+            self.swipe.feed(event, at.is_some())
+        }
+
+        fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+            self.follow_calls += 1;
+            match step {
                 Step::Pass => false,
                 Step::Consume => true,
                 Step::Drag(offset) => {
@@ -757,7 +776,7 @@ mod tests {
     impl gpui::Render for OverlayHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
             use gpui::{InteractiveElement as _, ParentElement as _, Styled as _, div};
-            let swipe = scroll_capture(cx.entity(), Self::feed).absolute().size_full();
+            let swipe = scroll_capture(cx.entity(), Self::peek, Self::follow).absolute().size_full();
             let root = div().relative().size_full().child(div().size_full().child(swipe));
             if self.covered {
                 root.child(div().id("overlay").occlude().absolute().right_0().top_0().w(px(200.)).h(px(200.)))
@@ -778,6 +797,7 @@ mod tests {
             covered: true,
             dragged: Vec::new(),
             released: None,
+            follow_calls: 0,
         });
         cx.simulate_resize(size(px(600.), px(400.)));
         cx.run_until_parked();
@@ -810,6 +830,41 @@ mod tests {
         host.read_with(cx, |host, _| {
             assert_eq!(host.dragged, vec![20., 50.]);
             assert_eq!(host.released, Some(50.));
+        });
+    }
+
+    #[gpui::test]
+    fn vertical_scroll_through_scroll_capture_never_updates_host(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollSource, size};
+
+        let (host, cx) = cx.add_window_view(|_, _| OverlayHost {
+            swipe: BackSwipe::default(),
+            covered: false,
+            dragged: Vec::new(),
+            released: None,
+            follow_calls: 0,
+        });
+        cx.simulate_resize(size(px(600.), px(400.)));
+        cx.run_until_parked();
+
+        let vertical = |phase, dy| ScrollEvent {
+            position: point(px(100.), px(100.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+            modifiers: Modifiers::default(),
+            touch_phase: phase,
+            source: ScrollSource::Touch,
+        };
+
+        cx.simulate_event(vertical(TouchPhase::Started, 0.));
+        for _ in 0..10 {
+            cx.simulate_event(vertical(TouchPhase::Moved, -24.));
+        }
+        cx.simulate_event(vertical(TouchPhase::Ended, 0.));
+
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.follow_calls, 0, "vertical scroll must not call Entity::update via scroll_capture");
+            assert!(host.dragged.is_empty());
+            assert_eq!(host.released, None);
         });
     }
 }

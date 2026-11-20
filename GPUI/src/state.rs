@@ -646,7 +646,7 @@ pub struct MailApp {
     /// (MS-299); a layer gone or replaced takes the top one at rest.
     pub slide_layer: Option<SharedString>,
     /// The layer the gesture in progress closes: the one under the pointer as it began (MS-299).
-    pub gesture_layer: Option<SharedString>,
+    pub gesture_layer: std::cell::RefCell<Option<SharedString>>,
     /// How far a layer over the list's island travels between in and out, as last laid out.
     pub content_width: f32,
     /// A conversation beside the list, as last laid out (two panes).
@@ -788,7 +788,7 @@ impl MailApp {
             drag: MouseDrag::default(),
             slide: Slide::Rest,
             slide_layer: None,
-            gesture_layer: None,
+            gesture_layer: std::cell::RefCell::new(None),
             content_width: 0.0,
             beside: None,
             context_menu: None,
