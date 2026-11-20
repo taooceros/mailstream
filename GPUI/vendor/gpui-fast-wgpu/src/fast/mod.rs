@@ -9,6 +9,7 @@
 //! tests — is written here, one file per topic.
 
 pub(crate) mod atlas;
+pub(crate) mod backdrop_blur;
 pub(crate) mod bind_groups;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod composition;

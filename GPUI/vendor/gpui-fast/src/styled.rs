@@ -748,6 +748,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Applies a local backdrop blur behind this element's background when
+    /// supported by the renderer (falling back to the background fill otherwise).
+    fn backdrop_blur(mut self, radius: crate::Pixels) -> Self {
+        self.style().backdrop_blur = Some(radius);
+        self
+    }
+
     /// Sets the grid columns of this element.
     fn grid_cols(mut self, cols: u16) -> Self {
         self.style().grid_cols = Some(GridTemplate {

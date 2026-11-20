@@ -64,6 +64,7 @@ pub(crate) struct FrameState {
     pub(crate) bind_groups: BindGroupCache,
     pub(crate) globals: UploadedGlobals,
     pub(crate) layers: TileCache,
+    pub(crate) backdrop_blur: crate::fast::backdrop_blur::BackdropBlurState,
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
@@ -112,6 +113,8 @@ pub(crate) trait FrameHost {
     fn write_instance_texture(&self, _offset: u64, _data: &[u8]) {
         unreachable!("the storage-buffer host does not write an instance texture")
     }
+    /// Allocates or releases main-frame path intermediate/MSAA textures on demand.
+    fn update_path_targets(&mut self, _has_paths: bool) {}
 }
 
 impl FrameHost for WgpuRendererCore {
@@ -132,6 +135,10 @@ impl FrameHost for WgpuRendererCore {
             self.grow_instance_data(size)?;
         }
         Ok(())
+    }
+
+    fn update_path_targets(&mut self, has_paths: bool) {
+        self.update_path_intermediate_textures(has_paths);
     }
 
     fn target(&self) -> Result<FrameTarget<'_>> {
@@ -250,16 +257,30 @@ pub(crate) fn record_frame(
     renderer: &mut WgpuRendererCore,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
+    frame_texture: Option<&wgpu::Texture>,
     clear_color: wgpu::Color,
 ) -> Result<Option<wgpu::SubmissionIndex>> {
-    record_into(renderer, scene, frame_view, clear_color).map(Some)
+    record_into_with_texture(renderer, scene, frame_view, frame_texture, clear_color).map(Some)
 }
 
 /// Records `scene` into `frame_view`, cleared to `clear` first, and submits it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn record_into(
     host: &mut impl FrameHost,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
+    clear: wgpu::Color,
+) -> Result<wgpu::SubmissionIndex> {
+    record_into_with_texture(host, scene, frame_view, None, clear)
+}
+
+/// Records `scene` into `frame_view` (with optional `COPY_SRC` `frame_texture`
+/// for local Dual-Kawase backdrop blur), cleared to `clear` first, and submits it.
+pub(crate) fn record_into_with_texture(
+    host: &mut impl FrameHost,
+    scene: &Scene,
+    frame_view: &wgpu::TextureView,
+    frame_texture: Option<&wgpu::Texture>,
     clear: wgpu::Color,
 ) -> Result<wgpu::SubmissionIndex> {
     // The state is taken for the frame so that it can change while the host
@@ -267,7 +288,7 @@ pub(crate) fn record_into(
     // which tells the frame's alpha mode by them.
     let mut state = std::mem::take(host.frame_state());
     std::mem::swap(&mut state.globals, &mut host.frame_state().globals);
-    let result = record_with(host, &mut state, scene, frame_view, clear);
+    let result = record_with(host, &mut state, scene, frame_view, frame_texture, clear);
     std::mem::swap(&mut state.globals, &mut host.frame_state().globals);
     *host.frame_state() = state;
     result
@@ -280,7 +301,9 @@ pub(crate) fn record_with_deferred_acquire<H, T>(
     host: &mut H,
     scene: &Scene,
     clear: wgpu::Color,
-    acquire_target: impl FnOnce(&mut H) -> Result<Option<(T, wgpu::TextureView)>>,
+    acquire_target: impl FnOnce(
+        &mut H,
+    ) -> Result<Option<(T, wgpu::TextureView, Option<wgpu::Texture>)>>,
 ) -> Result<Option<(wgpu::SubmissionIndex, T)>>
 where
     H: FrameHost,
@@ -298,7 +321,9 @@ fn record_deferred_with<H, T>(
     state: &mut FrameState,
     scene: &Scene,
     clear: wgpu::Color,
-    acquire_target: impl FnOnce(&mut H) -> Result<Option<(T, wgpu::TextureView)>>,
+    acquire_target: impl FnOnce(
+        &mut H,
+    ) -> Result<Option<(T, wgpu::TextureView, Option<wgpu::Texture>)>>,
 ) -> Result<Option<(wgpu::SubmissionIndex, T)>>
 where
     H: FrameHost,
@@ -315,15 +340,23 @@ where
     let mut sprites = std::mem::take(&mut state.sprites);
     let mut scenes = Vec::with_capacity(rasters.len() + 1);
     let mut raster_indices = Vec::with_capacity(rasters.len());
+    let mut tile_has_paths = Vec::with_capacity(rasters.len());
     for raster in &rasters {
-        raster_indices.push(plan_scene(
+        let scene_start = scenes.len();
+        let idx = plan_scene(
             &raster.scene,
             &mut scenes,
             &mut vertices,
             &mut sprites,
             Vec::new(),
-        ));
+        );
+        let has_paths = scenes[scene_start..=idx]
+            .iter()
+            .any(|planned| !planned.path_batches.is_empty());
+        tile_has_paths.push(has_paths);
+        raster_indices.push(idx);
     }
+    let main_scene_start = scenes.len();
     let path_batches = std::mem::take(&mut state.path_batches);
     plan_scene(
         scene,
@@ -332,6 +365,9 @@ where
         &mut sprites,
         path_batches,
     );
+    let main_has_paths = scenes[main_scene_start..]
+        .iter()
+        .any(|planned| !planned.path_batches.is_empty());
 
     let mut tiles_submitted = false;
     let result = upload(host, &state.bind_groups, &scenes, &vertices, &sprites)
@@ -354,7 +390,9 @@ where
             // `surface.get_current_texture()`.
             {
                 let target = host.target()?;
-                state.layers.prepare(&target, &scene.layers, &planned);
+                state
+                    .layers
+                    .prepare(&target, &scene.layers, &planned, &tile_has_paths);
                 if !rasters.is_empty() {
                     let graph = DrawGraph {
                         scenes: &scenes,
@@ -385,7 +423,7 @@ where
                 }
             }
 
-            let Some((frame, frame_view)) = acquire_target(host)? else {
+            let Some((frame, frame_view, frame_texture)) = acquire_target(host)? else {
                 if !tiles_submitted {
                     // Flush staged atlas/instance uploads even when the surface
                     // skipped presentation (Suboptimal/Lost/Timeout/Occluded).
@@ -394,6 +432,7 @@ where
                 return Ok(None);
             };
 
+            host.update_path_targets(main_has_paths);
             let target = host.target()?;
             let graph = DrawGraph {
                 scenes: &scenes,
@@ -405,9 +444,11 @@ where
                     label: Some("main_encoder"),
                 });
             let main = scenes.len() - 1;
+            let mut backdrop_blur = std::mem::take(&mut state.backdrop_blur);
             draw_scene(
                 &target,
                 state,
+                Some(&mut backdrop_blur),
                 &mut encoder,
                 &SceneDraw {
                     scene,
@@ -415,6 +456,7 @@ where
                     paths: &paths,
                     path_batches: &scenes[main].path_batches,
                     view: &frame_view,
+                    frame_texture: frame_texture.as_ref(),
                     clear: Some(clear),
                     label: "main_pass",
                     globals: target.globals_bind_group,
@@ -426,6 +468,7 @@ where
                     graph: &graph,
                 },
             );
+            state.backdrop_blur = backdrop_blur;
             let submission = target.queue.submit(std::iter::once(encoder.finish()));
             Ok(Some((submission, frame)))
         });
@@ -452,6 +495,7 @@ fn record_with(
     state: &mut FrameState,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
+    frame_texture: Option<&wgpu::Texture>,
     clear: wgpu::Color,
 ) -> Result<wgpu::SubmissionIndex> {
     state.bind_groups.begin_frame();
@@ -466,15 +510,23 @@ fn record_with(
     let mut sprites = std::mem::take(&mut state.sprites);
     let mut scenes = Vec::with_capacity(rasters.len() + 1);
     let mut raster_indices = Vec::with_capacity(rasters.len());
+    let mut tile_has_paths = Vec::with_capacity(rasters.len());
     for raster in &rasters {
-        raster_indices.push(plan_scene(
+        let scene_start = scenes.len();
+        let idx = plan_scene(
             &raster.scene,
             &mut scenes,
             &mut vertices,
             &mut sprites,
             Vec::new(),
-        ));
+        );
+        let has_paths = scenes[scene_start..=idx]
+            .iter()
+            .any(|planned| !planned.path_batches.is_empty());
+        tile_has_paths.push(has_paths);
+        raster_indices.push(idx);
     }
+    let main_scene_start = scenes.len();
     let path_batches = std::mem::take(&mut state.path_batches);
     plan_scene(
         scene,
@@ -483,6 +535,9 @@ fn record_with(
         &mut sprites,
         path_batches,
     );
+    let main_has_paths = scenes[main_scene_start..]
+        .iter()
+        .any(|planned| !planned.path_batches.is_empty());
 
     let result = upload(host, &state.bind_groups, &scenes, &vertices, &sprites)
         .with_context(|| {
@@ -499,10 +554,23 @@ fn record_with(
             )
         })
         .and_then(|(uploads, paths)| {
+            host.update_path_targets(main_has_paths);
             let target = host.target()?;
-            state.layers.prepare(&target, &scene.layers, &planned);
+            state
+                .layers
+                .prepare(&target, &scene.layers, &planned, &tile_has_paths);
             Ok(record(
-                &target, state, scene, frame_view, clear, &rasters, &raster_indices, &scenes, &uploads, &paths,
+                &target,
+                state,
+                scene,
+                frame_view,
+                frame_texture,
+                clear,
+                &rasters,
+                &raster_indices,
+                &scenes,
+                &uploads,
+                &paths,
             ))
         });
     if result.is_err() {
@@ -762,9 +830,10 @@ unsafe fn bytes_of<T>(instances: &[T]) -> &[u8] {
 #[allow(clippy::too_many_arguments)]
 fn record(
     target: &FrameTarget,
-    state: &FrameState,
+    state: &mut FrameState,
     scene: &Scene,
     frame_view: &wgpu::TextureView,
+    frame_texture: Option<&wgpu::Texture>,
     clear: wgpu::Color,
     rasters: &[raster::TileRaster],
     raster_indices: &[usize],
@@ -794,9 +863,11 @@ fn record(
         );
     }
     let main = scenes.len() - 1;
+    let mut backdrop_blur = std::mem::take(&mut state.backdrop_blur);
     draw_scene(
         target,
         state,
+        Some(&mut backdrop_blur),
         &mut encoder,
         &SceneDraw {
             scene,
@@ -804,6 +875,7 @@ fn record(
             paths,
             path_batches: &scenes[main].path_batches,
             view: frame_view,
+            frame_texture,
             clear: Some(clear),
             label: "main_pass",
             globals: target.globals_bind_group,
@@ -815,6 +887,7 @@ fn record(
             graph: &graph,
         },
     );
+    state.backdrop_blur = backdrop_blur;
     target.queue.submit(std::iter::once(encoder.finish()))
 }
 
@@ -825,6 +898,9 @@ pub(crate) struct SceneDraw<'a> {
     pub(crate) paths: &'a PathUpload,
     pub(crate) path_batches: &'a [PathBatch],
     pub(crate) view: &'a wgpu::TextureView,
+    /// The backing texture of `view` when it supports `COPY_SRC` (main frame
+    /// only), enabling local Dual-Kawase backdrop blur.
+    pub(crate) frame_texture: Option<&'a wgpu::Texture>,
     pub(crate) clear: Option<wgpu::Color>,
     pub(crate) label: &'a str,
     /// The globals the scene's primitives are drawn with.
@@ -934,6 +1010,7 @@ fn collect_steps<'a>(
 pub(crate) fn draw_scene(
     target: &FrameTarget,
     state: &FrameState,
+    mut backdrop_blur: Option<&mut crate::fast::backdrop_blur::BackdropBlurState>,
     encoder: &mut wgpu::CommandEncoder,
     draw: &SceneDraw,
 ) {
@@ -987,9 +1064,26 @@ pub(crate) fn draw_scene(
         )
         .then_some(step.path_key())
     });
+    let selected_blurs = match (draw.frame_texture, backdrop_blur.as_ref()) {
+        (Some(frame_tex), Some(_)) => crate::fast::backdrop_blur::select_regions(
+            frame_tex.width(),
+            frame_tex.height(),
+            steps.iter().enumerate().filter_map(|(step_index, step)| {
+                if let PrimitiveBatch::Quads(range) = &step.batch {
+                    Some((step_index, step.scene.quads.as_slice(), range.clone()))
+                } else {
+                    None
+                }
+            }),
+        ),
+        _ => crate::fast::backdrop_blur::SelectedRegions::default(),
+    };
+    if let Some(blur_state) = backdrop_blur.as_deref_mut() {
+        blur_state.note_frame(!selected_blurs.is_empty());
+    }
     let mut pass = begin_main_pass(encoder, draw.view, draw.label, draw.clear);
     let mut bound = PassState::default();
-    for step in steps {
+    for (step_index, step) in steps.into_iter().enumerate() {
         let path_key = step.path_key();
         let upload = step.upload;
         let scene = step.scene;
@@ -999,15 +1093,99 @@ pub(crate) fn draw_scene(
         pass.set_bind_group(3, clip_binding, &[clip_offset]);
         let batch = step.batch;
         match batch {
-            PrimitiveBatch::Quads(range) => draw_batch(
-                &mut pass,
-                &mut bound,
-                draw.globals,
-                &pipelines.quads,
-                &upload.quads,
-                None,
-                range,
-            ),
+            PrimitiveBatch::Quads(range) => {
+                let step_blurs = if selected_blurs.is_empty() {
+                    [None; crate::fast::backdrop_blur::MAX_REGIONS_PER_FRAME]
+                } else {
+                    selected_blurs.for_step(step_index)
+                };
+                if step_blurs[0].is_none() {
+                    draw_batch(
+                        &mut pass,
+                        &mut bound,
+                        draw.globals,
+                        &pipelines.quads,
+                        &upload.quads,
+                        None,
+                        range,
+                    );
+                } else if let (Some(frame_texture), Some(blur_state)) =
+                    (draw.frame_texture, backdrop_blur.as_deref_mut())
+                {
+                    let mut cursor = range.start;
+                    for blur in step_blurs.into_iter().flatten() {
+                        if blur.quad_index > cursor {
+                            draw_batch(
+                                &mut pass,
+                                &mut bound,
+                                draw.globals,
+                                &pipelines.quads,
+                                &upload.quads,
+                                None,
+                                cursor..blur.quad_index,
+                            );
+                        }
+                        let quad = &scene.quads[blur.quad_index];
+                        drop(pass);
+                        let blurred = blur_state.prepare_and_blur(
+                            target.device,
+                            target.queue,
+                            &pipelines.backdrop_blur,
+                            encoder,
+                            frame_texture,
+                            target.format,
+                            target.premultiplied_alpha,
+                            quad,
+                            blur.slot,
+                        );
+                        pass = begin_main_pass(encoder, draw.view, "main_pass_continued", None);
+                        bound.forget();
+                        pass.set_bind_group(3, clip_binding, &[clip_offset]);
+                        if blurred {
+                            blur_state.draw_composite(
+                                &mut pass,
+                                &pipelines.backdrop_blur,
+                                blur.slot,
+                            );
+                            bound.forget();
+                            pass.set_bind_group(3, clip_binding, &[clip_offset]);
+                            if !crate::fast::backdrop_blur::quad_has_no_border(quad) {
+                                draw_batch(
+                                    &mut pass,
+                                    &mut bound,
+                                    draw.globals,
+                                    &pipelines.quads,
+                                    &upload.quads,
+                                    None,
+                                    blur.quad_index..(blur.quad_index + 1),
+                                );
+                            }
+                        } else {
+                            draw_batch(
+                                &mut pass,
+                                &mut bound,
+                                draw.globals,
+                                &pipelines.quads,
+                                &upload.quads,
+                                None,
+                                blur.quad_index..(blur.quad_index + 1),
+                            );
+                        }
+                        cursor = blur.quad_index + 1;
+                    }
+                    if cursor < range.end {
+                        draw_batch(
+                            &mut pass,
+                            &mut bound,
+                            draw.globals,
+                            &pipelines.quads,
+                            &upload.quads,
+                            None,
+                            cursor..range.end,
+                        );
+                    }
+                }
+            }
             PrimitiveBatch::Shadows(range) => draw_batch(
                 &mut pass,
                 &mut bound,

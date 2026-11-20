@@ -279,6 +279,9 @@ pub struct Style {
     /// The fill color of this element
     pub background: Option<Fill>,
 
+    /// Optional local backdrop blur radius behind this element's background.
+    pub backdrop_blur: Option<Pixels>,
+
     /// The border color of this element
     pub border_color: Option<Hsla>,
 
@@ -728,10 +731,14 @@ impl Style {
                 None => Hsla::default(),
             };
             border_color.a = 0.;
+            let mut background = background_color.unwrap_or_default();
+            if let Some(blur) = self.backdrop_blur.filter(|radius| radius.0 > 0.) {
+                background = background.with_backdrop_blur(blur.0 * window.scale_factor());
+            }
             window.paint_quad(quad(
                 bounds,
                 corner_radii,
-                background_color.unwrap_or_default(),
+                background,
                 Edges::default(),
                 border_color,
                 self.border_style,
@@ -803,6 +810,7 @@ impl Default for Style {
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
             background: None,
+            backdrop_blur: None,
             border_color: None,
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),

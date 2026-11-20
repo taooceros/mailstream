@@ -52,8 +52,20 @@ const MAX_COOLDOWN_DOUBLINGS: u8 = 5;
 const RETRY_AFTER_INELIGIBLE_FRAMES: u64 = 8;
 /// A layer not composited for this many frames is dropped.
 const DROP_AFTER_FRAMES: u64 = 120;
+/// Scroll layer tile texture budget for mobile viewports (`36 MiB`), covering
+/// up to QHD+ (`1440×3200` at 3.5× -> `4×8 = 32 MiB`) plus 4 overscan tiles
+/// without silent demotion.
+pub const MOBILE_TILE_BUDGET_BYTES: u64 = 36 << 20;
+/// Scroll layer tile texture budget for desktop viewports (`64 MiB`).
+pub const DESKTOP_TILE_BUDGET_BYTES: u64 = 64 << 20;
 /// The tile textures a window's layers may use, in bytes.
-const TILE_BUDGET_BYTES: u64 = 64 << 20;
+/// Shared by both `gpui`'s layer policy and `gpui-wgpu`'s `TileCache`.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub const DEFAULT_TILE_BUDGET_BYTES: u64 = MOBILE_TILE_BUDGET_BYTES;
+/// The tile textures a window's layers may use, in bytes.
+/// Shared by both `gpui`'s layer policy and `gpui-wgpu`'s `TileCache`.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub const DEFAULT_TILE_BUDGET_BYTES: u64 = DESKTOP_TILE_BUDGET_BYTES;
 /// The side of a tile, in device pixels (spec §3).
 const TILE_SIZE: u64 = 512;
 /// Layer keys stay below this, as tile texture ids require.
@@ -419,14 +431,24 @@ pub(crate) fn note_work(window: &mut Window, id: &GlobalElementId, work: f32) {
 /// its overlay can be drawn over its tiles (see [`LayerRecord::has_paths`]),
 /// and the tiles covering its viewport fit the budget.
 /// A layer whose content does not is demoted.
-fn fits(window: &Window, record: &LayerRecord) -> bool {
-    let scale_factor = window.scale_factor();
+pub fn viewport_fits_tile_budget(
+    viewport: Size<Pixels>,
+    scale_factor: f32,
+    budget_bytes: u64,
+) -> bool {
     // A viewport straddles one more tile than it spans on each axis.
     let tiles = |extent: Pixels| (extent.0 * scale_factor / TILE_SIZE as f32).ceil() as u64 + 1;
-    let viewport = record.viewport.size;
     let tile_bytes = TILE_SIZE * TILE_SIZE * 4;
+    tiles(viewport.width) * tiles(viewport.height) * tile_bytes <= budget_bytes
+}
+
+fn fits(window: &Window, record: &LayerRecord) -> bool {
     !record.has_paths
-        && tiles(viewport.width) * tiles(viewport.height) * tile_bytes <= TILE_BUDGET_BYTES
+        && viewport_fits_tile_budget(
+            record.viewport.size,
+            window.scale_factor(),
+            DEFAULT_TILE_BUDGET_BYTES,
+        )
 }
 
 /// Whether the content `record` holds of the scroll container `id` can be
@@ -582,4 +604,27 @@ pub(crate) fn last_decision(window: &Window, id: &GlobalElementId) -> Option<Dec
     (policy.last_seen_frame + 1 == window.fast_layers.frame)
         .then_some(policy.last_decision)
         .flatten()
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::{px, size};
+
+    #[test]
+    fn mobile_budget_fits_xiaomi_15_and_qhd_plus() {
+        // Xiaomi 15: 1200×2670 @ 3× -> 4×7 = 28 MiB
+        let xiaomi_15 = size(px(1200.0 / 3.0), px(2670.0 / 3.0));
+        assert!(viewport_fits_tile_budget(xiaomi_15, 3.0, MOBILE_TILE_BUDGET_BYTES));
+        assert!(!viewport_fits_tile_budget(xiaomi_15, 3.0, 24 << 20));
+
+        // QHD+: 1440×3200 @ 3.5× -> 4×8 = 32 MiB
+        let qhd_plus = size(px(1440.0 / 3.5), px(3200.0 / 3.5));
+        assert!(viewport_fits_tile_budget(qhd_plus, 3.5, MOBILE_TILE_BUDGET_BYTES));
+        assert!(!viewport_fits_tile_budget(qhd_plus, 3.5, 24 << 20));
+
+        // Both also fit the active platform default budget.
+        assert!(viewport_fits_tile_budget(xiaomi_15, 3.0, DEFAULT_TILE_BUDGET_BYTES));
+        assert!(viewport_fits_tile_budget(qhd_plus, 3.5, DEFAULT_TILE_BUDGET_BYTES));
+    }
 }

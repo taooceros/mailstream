@@ -64,17 +64,18 @@ pub(crate) fn rasterize(
 ) {
     let layer = &layers.frames[tile.layer];
     let cache = &state.layers;
-    let (Some(view), Some(globals), Some(tile_paths)) = (
+    let (Some(view), Some(globals)) = (
         cache.texture(layer.key, tile.tile),
         cache.globals(layer.tile_size),
-        cache.paths(layer.tile_size),
     ) else {
         debug_assert!(false, "a planned tile was not prepared");
         return;
     };
+    let tile_paths = cache.paths(layer.tile_size);
     draw_scene(
         target,
         state,
+        None,
         encoder,
         &SceneDraw {
             scene: &tile.scene,
@@ -82,13 +83,14 @@ pub(crate) fn rasterize(
             paths,
             path_batches,
             view,
+            frame_texture: None,
             clear: Some(clear_color(layer.background)),
             label: "layer_tile_pass",
             globals: &globals.globals,
             path_targets: PathTargets {
                 globals: &globals.path_globals,
-                intermediate: Some(&tile_paths.intermediate),
-                msaa: tile_paths.msaa.as_ref(),
+                intermediate: tile_paths.map(|paths| &paths.intermediate),
+                msaa: tile_paths.and_then(|paths| paths.msaa.as_ref()),
             },
             graph,
         },

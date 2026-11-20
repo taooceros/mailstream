@@ -18,10 +18,9 @@ use crate::fast::frame::FrameTarget;
 use crate::wgpu_renderer::{GlobalParams, WgpuRendererCore};
 
 /// How much tile texture memory a window keeps, by default (spec §5.6).
-#[cfg(target_os = "android")]
-pub(crate) const DEFAULT_BUDGET_BYTES: u64 = 24 * 1024 * 1024;
-#[cfg(not(target_os = "android"))]
-pub(crate) const DEFAULT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+/// Shares the single platform budget with `gpui::fast::layers::policy`
+/// (`36 MiB` on Android/iOS, `64 MiB` on desktop).
+pub(crate) const DEFAULT_BUDGET_BYTES: u64 = gpui::DEFAULT_TILE_BUDGET_BYTES;
 
 /// Frames a layer that no frame composites keeps its tiles for; the core
 /// drops such a layer after as many.
@@ -94,6 +93,7 @@ pub(crate) struct TileGlobals {
 pub(crate) struct TilePaths {
     format: wgpu::TextureFormat,
     sample_count: u32,
+    last_used_frame: u64,
     _intermediate: wgpu::Texture,
     pub(crate) intermediate: wgpu::TextureView,
     _msaa: Option<wgpu::Texture>,
@@ -320,6 +320,7 @@ impl TileCache {
         target: &FrameTarget,
         layers: &SceneLayers,
         planned: &[(usize, TileCoord)],
+        planned_has_paths: &[bool],
     ) {
         self.evict_to_budget(self.budget_bytes);
         for &(index, coord) in planned {
@@ -341,11 +342,18 @@ impl TileCache {
             };
             tile.texture = Some(texture);
         }
-        for &(index, _) in planned {
+        for (pos, &(index, _)) in planned.iter().enumerate() {
             let tile_size = layers.frames[index].tile_size;
             self.ensure_globals(target, tile_size);
-            self.ensure_paths(target, tile_size);
+            if planned_has_paths.get(pos).copied().unwrap_or(false) {
+                self.ensure_paths(target, tile_size);
+            }
         }
+        let frame = self.frame;
+        self.paths.retain(|_, paths| {
+            frame.saturating_sub(paths.last_used_frame)
+                < crate::wgpu_renderer::PATH_INTERMEDIATE_IDLE_RELEASE_FRAMES
+        });
     }
 
     pub(crate) fn globals(&self, tile_size: u32) -> Option<&TileGlobals> {
@@ -424,9 +432,12 @@ impl TileCache {
     }
 
     fn ensure_paths(&mut self, target: &FrameTarget, tile_size: u32) {
-        if self.paths.get(&tile_size).is_some_and(|paths| {
-            paths.format == target.format && paths.sample_count == target.path_sample_count
-        }) {
+        let frame = self.frame;
+        if let Some(paths) = self.paths.get_mut(&tile_size)
+            && paths.format == target.format
+            && paths.sample_count == target.path_sample_count
+        {
+            paths.last_used_frame = frame;
             return;
         }
         let (intermediate_texture, intermediate) = WgpuRendererCore::create_path_intermediate(
@@ -448,6 +459,7 @@ impl TileCache {
             TilePaths {
                 format: target.format,
                 sample_count: target.path_sample_count,
+                last_used_frame: frame,
                 _intermediate: intermediate_texture,
                 intermediate,
                 _msaa: msaa_texture,

@@ -782,8 +782,11 @@ pub struct Background {
     pub(crate) solid: Hsla,
     pub(crate) gradient_angle_or_pattern_height: f32,
     pub(crate) colors: [LinearColorStop; 2],
-    /// Padding for alignment for repr(C) layout.
-    pad: u32,
+    /// Optional local backdrop blur radius in quarter-pixels (`0` = disabled).
+    /// Reuses the trailing 4-byte padding slot of `#[repr(C)]` `Background` so
+    /// GPU buffer layouts on wgpu/Metal/WebGL stay bit-identical.
+    #[serde(default)]
+    pub(crate) backdrop_blur_qpx: u32,
 }
 
 impl std::fmt::Debug for Background {
@@ -818,7 +821,7 @@ impl Default for Background {
             color_space: ColorSpace::default(),
             gradient_angle_or_pattern_height: 0.0,
             colors: [LinearColorStop::default(), LinearColorStop::default()],
-            pad: 0,
+            backdrop_blur_qpx: 0,
         }
     }
 }
@@ -923,6 +926,49 @@ impl Background {
     pub fn color_space(mut self, color_space: ColorSpace) -> Self {
         self.color_space = color_space;
         self
+    }
+
+    /// Enables a local backdrop blur behind this background with `radius_px`
+    /// (in scaled device pixels when stored on a `Quad`).
+    pub fn with_backdrop_blur(mut self, radius_px: f32) -> Self {
+        let qpx = (radius_px.clamp(0.0, 255.0) * 4.0).round() as u32;
+        self.backdrop_blur_qpx = qpx;
+        self
+    }
+
+    /// Returns the local backdrop blur radius in pixels, or `0.0` when disabled.
+    pub fn backdrop_blur_radius(&self) -> f32 {
+        self.backdrop_blur_qpx as f32 * 0.25
+    }
+
+    /// Returns whether this background requests local backdrop blur.
+    pub fn has_backdrop_blur(&self) -> bool {
+        self.backdrop_blur_qpx > 0
+    }
+
+    /// Returns the tint parameters needed to composite a frosted-glass backdrop:
+    /// `(is_linear_gradient, color_space, angle_deg, color0, stop0, color1, stop1)`.
+    pub fn backdrop_tint_params(&self) -> (bool, ColorSpace, f32, Hsla, f32, Hsla, f32) {
+        match self.tag {
+            BackgroundTag::LinearGradient => (
+                true,
+                self.color_space,
+                self.gradient_angle_or_pattern_height,
+                self.colors[0].color,
+                self.colors[0].percentage,
+                self.colors[1].color,
+                self.colors[1].percentage,
+            ),
+            _ => (
+                false,
+                ColorSpace::Srgb,
+                0.0,
+                self.solid,
+                0.0,
+                self.solid,
+                1.0,
+            ),
+        }
     }
 
     /// Returns a new background color with the same hue, saturation, and lightness, but with a modified alpha value.

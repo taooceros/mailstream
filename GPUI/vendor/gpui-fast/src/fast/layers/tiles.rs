@@ -360,6 +360,7 @@ fn hash_background(background: &Background, hasher: &mut FxHasher) {
         hash_hsla(&stop.color, hasher);
         hash_f32(stop.percentage, hasher);
     }
+    hasher.write_u32(background.backdrop_blur_qpx);
 }
 
 fn hash_tile(tile: &AtlasTile, hasher: &mut FxHasher) {

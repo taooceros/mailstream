@@ -22,6 +22,10 @@ const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 
+/// Consecutive frames without path primitives after which path intermediate
+/// and MSAA textures are automatically released (~1.5 s at 120 Hz).
+pub(crate) const PATH_INTERMEDIATE_IDLE_RELEASE_FRAMES: u64 = 180;
+
 /// Shader variant for backends with storage buffer support: the shared shader
 /// logic plus the storage-buffer instance transport.
 const STORAGE_BUFFER_SHADERS: &str = concat!(
@@ -136,6 +140,7 @@ pub(crate) struct WgpuPipelines {
     pub(crate) poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
+    pub(crate) backdrop_blur: crate::fast::backdrop_blur::BackdropBlurPipelines,
 }
 
 /// One frame allocation of instance data, ready to bind.
@@ -197,6 +202,7 @@ pub(crate) struct WgpuResources {
     pub(crate) path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     pub(crate) path_msaa_view: Option<wgpu::TextureView>,
+    path_intermediate_last_used_frame: Option<u64>,
 }
 
 struct CachedTextureBindGroup {
@@ -210,6 +216,7 @@ impl WgpuResources {
         self.path_intermediate_view = None;
         self.path_msaa_texture = None;
         self.path_msaa_view = None;
+        self.path_intermediate_last_used_frame = None;
     }
 }
 
@@ -230,6 +237,8 @@ pub(crate) struct WgpuRendererCore {
     pub(crate) target_format: wgpu::TextureFormat,
     max_texture_size: u32,
     pub(crate) fast_frame: crate::fast::frame::FrameState,
+    pub(crate) frame_index: u64,
+    pub(crate) current_frame_size: Size<DevicePixels>,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -485,8 +494,12 @@ impl WgpuRenderer {
             );
         }
 
+        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        if surface_caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: clamped_width.max(1),
@@ -1000,6 +1013,13 @@ impl WgpuRendererCore {
             &shader_module,
         );
 
+        let backdrop_blur = crate::fast::backdrop_blur::BackdropBlurPipelines::new(
+            device,
+            surface_format,
+            alpha_mode,
+            pipeline_cache,
+        );
+
         WgpuPipelines {
             quads,
             shadows,
@@ -1010,6 +1030,7 @@ impl WgpuRendererCore {
             subpixel_sprites,
             poly_sprites,
             surfaces,
+            backdrop_blur,
         }
     }
 
@@ -1093,6 +1114,7 @@ impl WgpuRenderer {
             return;
         };
         crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
+        core.fast_frame.backdrop_blur.clear();
         let resources = &mut core.resources;
 
         // Wait for any in-flight GPU work to complete before destroying textures
@@ -1237,6 +1259,7 @@ impl WgpuRenderer {
                 core.resources.invalidate_intermediate_textures();
                 self.atlas.clear();
                 crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
+                core.fast_frame.backdrop_blur.clear();
                 self.needs_redraw = true;
                 self.failed_frame_count = 0;
                 return false;
@@ -1303,7 +1326,11 @@ impl WgpuRenderer {
                 let frame_view = frame
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
-                Ok(Some((frame, frame_view)))
+                let frame_texture = surface_config
+                    .usage
+                    .contains(wgpu::TextureUsages::COPY_SRC)
+                    .then(|| frame.texture.clone());
+                Ok(Some((frame, frame_view, frame_texture)))
             },
         ) {
             Ok(Some((_submission, frame))) => {
@@ -1470,6 +1497,7 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                path_intermediate_last_used_frame: None,
             },
             atlas,
             path_globals_offset,
@@ -1488,6 +1516,8 @@ impl WgpuRendererCore {
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::clone(
                 &context.fast_dynamic_textures,
             ),
+            frame_index: 0,
+            current_frame_size: Size::default(),
         }
     }
 
@@ -1501,7 +1531,7 @@ impl WgpuRendererCore {
 
     /// Path rendering goes through an intermediate texture that must match the frame
     /// target's dimensions, so the textures are keyed by size and rebuilt on mismatch.
-    fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>) {
+    pub(crate) fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>) {
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
         if self
@@ -1533,6 +1563,29 @@ impl WgpuRendererCore {
         .unwrap_or((None, None));
         resources.path_msaa_texture = path_msaa_texture;
         resources.path_msaa_view = path_msaa_view;
+    }
+
+    /// Allocates path intermediate/MSAA textures on demand when `has_paths` is
+    /// true, and releases them after [`PATH_INTERMEDIATE_IDLE_RELEASE_FRAMES`]
+    /// consecutive frames without path primitives.
+    pub(crate) fn update_path_intermediate_textures(&mut self, has_paths: bool) {
+        self.frame_index += 1;
+        if has_paths {
+            self.ensure_intermediate_textures(self.current_frame_size);
+            self.resources.path_intermediate_last_used_frame = Some(self.frame_index);
+        } else if let Some(last_used) = self.resources.path_intermediate_last_used_frame
+            && self.frame_index.saturating_sub(last_used) >= PATH_INTERMEDIATE_IDLE_RELEASE_FRAMES
+        {
+            self.resources.invalidate_intermediate_textures();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_path_intermediate_textures(&self) -> (bool, bool) {
+        (
+            self.resources.path_intermediate_texture.is_some(),
+            self.resources.path_msaa_texture.is_some(),
+        )
     }
 
     fn write_frame_globals(&mut self, size: Size<DevicePixels>, premultiplied_alpha: bool) {
@@ -1570,7 +1623,7 @@ impl WgpuRendererCore {
             "render target size {size:?} exceeds maximum texture dimension {}",
             self.max_texture_size
         );
-        self.ensure_intermediate_textures(size);
+        self.current_frame_size = size;
         self.write_frame_globals(size, premultiplied_alpha);
         Ok(())
     }
@@ -1581,10 +1634,13 @@ impl WgpuRendererCore {
         configured_size: Size<DevicePixels>,
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
-        acquire_target: impl FnOnce(&mut Self) -> Result<Option<(T, wgpu::TextureView)>>,
+        acquire_target: impl FnOnce(
+            &mut Self,
+        ) -> Result<Option<(T, wgpu::TextureView, Option<wgpu::Texture>)>>,
     ) -> Result<Option<(wgpu::SubmissionIndex, T)>> {
         self.atlas.before_frame();
         if configured_size.width.0 > 0 && configured_size.height.0 > 0 {
+            self.current_frame_size = configured_size;
             self.write_frame_globals(configured_size, premultiplied_alpha);
         }
         crate::fast::frame::record_with_deferred_acquire(self, scene, clear_color, acquire_target)
@@ -1594,6 +1650,7 @@ impl WgpuRendererCore {
             })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn render_frame(
         &mut self,
         scene: &Scene,
@@ -1602,10 +1659,29 @@ impl WgpuRendererCore {
         premultiplied_alpha: bool,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        self.render_frame_with_texture(
+            scene,
+            target_view,
+            None,
+            size,
+            premultiplied_alpha,
+            clear_color,
+        )
+    }
+
+    pub(crate) fn render_frame_with_texture(
+        &mut self,
+        scene: &Scene,
+        target_view: &wgpu::TextureView,
+        target_texture: Option<&wgpu::Texture>,
+        size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+        clear_color: wgpu::Color,
+    ) -> Result<wgpu::SubmissionIndex> {
         self.atlas.before_frame();
         self.prepare_target_for_size(size, premultiplied_alpha)?;
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target_view, target_texture, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1616,10 +1692,11 @@ impl WgpuRendererCore {
         &mut self,
         scene: &Scene,
         frame_view: &wgpu::TextureView,
+        frame_texture: Option<&wgpu::Texture>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         if let Some(submission) =
-            crate::fast::frame::record_frame(self, scene, frame_view, clear_color)?
+            crate::fast::frame::record_frame(self, scene, frame_view, frame_texture, clear_color)?
         {
             return Ok(submission);
         }
@@ -2005,12 +2082,13 @@ impl WgpuRendererCore {
             &vertices,
         )?;
 
+        self.ensure_intermediate_textures(self.current_frame_size);
         let resources = self.resources();
         let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
             return Ok(false);
         };
 
-        let (target_view, resolve_target) = if let Some(ref msaa_view) = resources.path_msaa_view {
+        let (target_view, resolve_target) = if let Some(msaa_view) = &resources.path_msaa_view {
             (msaa_view, Some(path_intermediate_view))
         } else {
             (path_intermediate_view, None)
@@ -2024,7 +2102,11 @@ impl WgpuRendererCore {
                     resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store: if resolve_target.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                     depth_slice: None,
                 })],
@@ -2272,6 +2354,7 @@ impl WgpuRenderer {
         if let Some(core) = self.core_mut() {
             core.resources.invalidate_intermediate_textures();
             crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
+            core.fast_frame.backdrop_blur.clear();
         }
     }
 
@@ -2284,6 +2367,7 @@ impl WgpuRenderer {
         if let Some(core) = self.core_mut() {
             core.resources.invalidate_intermediate_textures();
             crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
+            core.fast_frame.backdrop_blur.clear();
         }
         if clear_atlas {
             self.atlas.clear();
@@ -2571,14 +2655,21 @@ impl WgpuHeadlessRenderer {
     fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
         self.check_gpu_errors()?;
         self.ensure_render_target(size)?;
-        let view = self
-            .render_target
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
-            .view
-            .clone();
-        self.core
-            .render_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
+        let (view, texture) = {
+            let target = self
+                .render_target
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
+            (target.view.clone(), target.texture.clone())
+        };
+        self.core.render_frame_with_texture(
+            scene,
+            &view,
+            Some(&texture),
+            size,
+            false,
+            wgpu::Color::BLACK,
+        )?;
         Ok(())
     }
 
@@ -2958,27 +3049,30 @@ mod tests {
     #[test]
     fn webgl_shader_is_valid_wgsl_without_storage_buffers() {
         assert!(!WEBGL_SHADERS.contains("var<storage"));
-        validate_wgsl(WEBGL_SHADERS, naga::valid::Capabilities::empty());
+        validate_wgsl(WEBGL_SHADERS, wgpu::naga::valid::Capabilities::empty());
     }
 
     #[test]
     fn storage_buffer_shader_is_valid_wgsl() {
-        validate_wgsl(STORAGE_BUFFER_SHADERS, naga::valid::Capabilities::empty());
+        validate_wgsl(STORAGE_BUFFER_SHADERS, wgpu::naga::valid::Capabilities::empty());
     }
 
     #[test]
     fn subpixel_shader_is_valid_wgsl() {
         validate_wgsl(
             SUBPIXEL_SHADERS,
-            naga::valid::Capabilities::DUAL_SOURCE_BLENDING,
+            wgpu::naga::valid::Capabilities::DUAL_SOURCE_BLENDING,
         );
     }
 
-    fn validate_wgsl(source: &str, capabilities: naga::valid::Capabilities) {
-        let module = naga::front::wgsl::parse_str(source).expect("shader should parse");
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
-            .validate(&module)
-            .expect("shader should validate");
+    fn validate_wgsl(source: &str, capabilities: wgpu::naga::valid::Capabilities) {
+        let module = wgpu::naga::front::wgsl::parse_str(source).expect("shader should parse");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            capabilities,
+        )
+        .validate(&module)
+        .expect("shader should validate");
     }
 
     #[test]

@@ -1567,14 +1567,16 @@ fn render_color_glyph_vello(
 mod tests {
     use super::*;
 
-    #[cfg(feature = "test-support")]
+    #[cfg(all(feature = "test-support", feature = "zed-font-fixtures"))]
     use std::{cell::RefCell, rc::Rc};
+    #[cfg(feature = "zed-font-fixtures")]
     use std::{
         sync::mpsc,
         thread,
         time::{Duration, Instant},
     };
 
+    #[cfg(feature = "zed-font-fixtures")]
     #[test]
     fn all_font_names_tracks_available_families() -> Result<()> {
         let text_system = gpui::TextSystem::new(Arc::new(
@@ -1614,24 +1616,28 @@ mod tests {
         }
     }
 
-    const IBM_PLEX: &[u8] =
-        include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
-    const LILEX: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
-
     /// Every code point of `Bidi_Class=B`, each of which starts a new bidi
     /// paragraph and so can split one line into mixed-direction paragraphs.
     const SEPARATORS: &[char] = &[
         '\u{000a}', '\u{000d}', '\u{001c}', '\u{001d}', '\u{001e}', '\u{0085}', '\u{2029}',
     ];
 
-    fn text_system() -> Result<CosmicTextSystem> {
-        let text_system = CosmicTextSystem::new_without_system_fonts("IBM Plex Sans");
-        text_system.add_fonts(vec![Cow::Borrowed(IBM_PLEX)])?;
-        Ok(text_system)
-    }
+    #[cfg(feature = "zed-font-fixtures")]
+    mod zed_font_fixture_tests {
+        use super::*;
 
-    #[test]
-    fn cached_font_resolution_does_not_wait_for_cold_lookups() -> Result<()> {
+        const IBM_PLEX: &[u8] =
+            include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
+        const LILEX: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
+
+        fn text_system() -> Result<CosmicTextSystem> {
+            let text_system = CosmicTextSystem::new_without_system_fonts("IBM Plex Sans");
+            text_system.add_fonts(vec![Cow::Borrowed(IBM_PLEX)])?;
+            Ok(text_system)
+        }
+
+        #[test]
+        fn cached_font_resolution_does_not_wait_for_cold_lookups() -> Result<()> {
         for family in [".ZedSans", "Missing Font"] {
             let platform_text_system = Arc::new(text_system()?);
             let text_system = gpui::TextSystem::new(platform_text_system.clone());
@@ -2000,6 +2006,7 @@ mod tests {
             Err(row_end.index)
         );
         Ok(())
+    }
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub fn capsule(p: &Palette) -> Div {
 
 /// Compact (phone / Android) toolbar capsule sized to hold [`compact_icon_button`]s comfortably.
 pub fn compact_capsule(p: &Palette) -> Div {
-    capsule(p).h(px(design::compact::CAPSULE_HEIGHT))
+    capsule(p).h(px(design::compact::CAPSULE_HEIGHT)).backdrop_blur(px(12.))
 }
 
 /// The capsule floating over a row (its hover actions, `RaisedCapsule`): lit from above, a hairline
@@ -474,7 +474,7 @@ pub fn bottom_scrim(surface: Hsla, height: f32) -> Div {
     let fade = linear_gradient(
         180.,
         linear_color_stop(surface.opacity(0.), 0.),
-        linear_color_stop(surface, 0.62),
+        linear_color_stop(surface.opacity(0.65), 0.85),
     );
     div().absolute().bottom_0().left_0().right_0().h(px(height)).bg(fade)
 }

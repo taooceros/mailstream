@@ -120,7 +120,7 @@ fn harness_renders_a_quad_at_the_right_pixels() {
 const TILE: u32 = 512;
 
 #[cfg(feature = "test-support")]
-#[path = "../../../../gpui/src/fast/rounded_clip_fixtures.rs"]
+#[path = "../../../../gpui-fast/src/fast/rounded_clip_fixtures.rs"]
 mod rounded_clip_tests;
 
 #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
@@ -900,6 +900,7 @@ impl Harness {
             rendering_params.path_sample_count,
             dual_source_blending,
             false,
+            None,
         );
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas_sampler"),

@@ -222,9 +222,10 @@ fn srgb_to_linear_component(a: f32) -> f32 {
 }
 
 fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
-    let cutoff = linear < vec3<f32>(0.0031308);
-    let higher = vec3<f32>(1.055) * pow(linear, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let lower = linear * vec3<f32>(12.92);
+    let clamped = clamp(linear, vec3<f32>(0.0), vec3<f32>(1.0));
+    let cutoff = clamped < vec3<f32>(0.0031308);
+    let higher = vec3<f32>(1.055) * pow(clamped, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    let lower = clamped * vec3<f32>(12.92);
     return select(higher, lower, cutoff);
 }
 
@@ -276,14 +277,13 @@ fn hsla_to_rgba(hsla: Hsla) -> vec4<f32> {
 /// Convert a linear sRGB to Oklab space.
 /// Reference: https://bottosson.github.io/posts/oklab/#converting-from-linear-srgb-to-oklab
 fn linear_srgb_to_oklab(color: vec4<f32>) -> vec4<f32> {
-	let l = 0.4122214708 * color.r + 0.5363325363 * color.g + 0.0514459929 * color.b;
-	let m = 0.2119034982 * color.r + 0.6806995451 * color.g + 0.1073969566 * color.b;
-	let s = 0.0883024619 * color.r + 0.2817188376 * color.g + 0.6299787005 * color.b;
+	let l = max(0.4122214708 * color.r + 0.5363325363 * color.g + 0.0514459929 * color.b, 0.0);
+	let m = max(0.2119034982 * color.r + 0.6806995451 * color.g + 0.1073969566 * color.b, 0.0);
+	let s = max(0.0883024619 * color.r + 0.2817188376 * color.g + 0.6299787005 * color.b, 0.0);
 
 	let l_ = pow(l, 1.0 / 3.0);
 	let m_ = pow(m, 1.0 / 3.0);
 	let s_ = pow(s, 1.0 / 3.0);
-
 	return vec4<f32>(
 		0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
 		1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
@@ -408,20 +408,16 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     if (tag == 0u || tag == 2u || tag == 3u) {
         result.solid = hsla_to_rgba(solid);
     } else if (tag == 1u) {
-        // The hsla_to_rgba is returns a linear sRGB color
+        // `hsla_to_rgba` already returns encoded perceptual sRGB matching GPUI's
+        // UNORM render target, so sRGB gradients interpolate directly without
+        // double-gamma round-trips and Oklab converts sRGB -> linear -> Oklab.
         result.color0 = hsla_to_rgba(colors[0].color);
         result.color1 = hsla_to_rgba(colors[1].color);
 
-        // Prepare color space in vertex for avoid conversion
-        // in fragment shader for performance reasons
-        if (color_space == 0u) {
-            // sRGB
-            result.color0 = linear_to_srgba(result.color0);
-            result.color1 = linear_to_srgba(result.color1);
-        } else if (color_space == 1u) {
-            // Oklab
-            result.color0 = linear_srgb_to_oklab(result.color0);
-            result.color1 = linear_srgb_to_oklab(result.color1);
+        if (color_space == 1u) {
+            // Oklab: sRGB -> linear sRGB -> Oklab
+            result.color0 = linear_srgb_to_oklab(srgba_to_linear(result.color0));
+            result.color1 = linear_srgb_to_oklab(srgba_to_linear(result.color1));
         }
     }
 
@@ -470,11 +466,11 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             switch (background.color_space) {
                 default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
+                    background_color = mix(color0, color1, t);
                 }
                 case 1u: {
                     let oklab_color = mix(color0, color1, t);
-                    background_color = oklab_to_linear_srgb(oklab_color);
+                    background_color = linear_to_srgba(oklab_to_linear_srgb(oklab_color));
                 }
             }
         }

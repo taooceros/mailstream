@@ -366,6 +366,7 @@ fn fast_clip_subpixel(color: SubpixelSpriteFragmentOutput, position: vec2<f32>) 
 #[cfg(test)]
 mod tests {
     use super::shader;
+    use wgpu::naga;
 
     fn validate(source: &str, capabilities: naga::valid::Capabilities) {
         let module = naga::front::wgsl::parse_str(source).expect("rounded clip shader parses");

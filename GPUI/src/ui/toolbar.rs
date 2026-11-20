@@ -409,6 +409,7 @@ impl MailApp {
                                 gpui::linear_color_stop(p.capsule_glass[0], 0.),
                                 gpui::linear_color_stop(p.capsule_glass[1], 1.),
                             ))
+                            .backdrop_blur(px(12.))
                             .border(px(stroke::HAIRLINE))
                             .border_color(p.capsule_rim)
                             .shadow(p.capsule_shadow.clone())

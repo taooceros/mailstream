@@ -464,6 +464,9 @@ impl crate::Background {
     /// so a platform compositing native content below it can cut that
     /// content out instead of blending it.
     pub fn is_opaque(&self) -> bool {
+        if self.has_backdrop_blur() {
+            return false;
+        }
         match self.tag {
             crate::color::BackgroundTag::Solid => self.solid.is_opaque(),
             crate::color::BackgroundTag::LinearGradient => {
