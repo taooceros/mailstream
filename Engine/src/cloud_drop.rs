@@ -20,8 +20,9 @@
 //! changed since the last upload or the Worker lost it. Exchanges run after every local or synced
 //! change, on start, after a network change or wake, and every few minutes (`DeviceSync`).
 //!
-//! `peer-sync/cloud.json` keeps the Worker's URL, whether the drop is on, and what was last
-//! uploaded where (with its token), so turning it off or leaving the group deletes that copy.
+//! `peer-sync/cloud.json` caches the active sync group's Worker URL and enabled flag (replicated
+//! via `v1/cloud` in the sync group document, MS-419), and records what was last uploaded where
+//! (with its token), so turning it off, resetting, or leaving the group deletes that copy.
 /// The `SyncDrop/` Worker deployed for this project's devices (MS-374): offered by default so a
 /// device does not have to type a URL, still off until turned on.
 pub(crate) const DEFAULT_WORKER_URL: &str = "https://mailstream-sync-drop.ync-rop.workers.dev";
@@ -38,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::answers::SyncCloud;
-use crate::peer_sync::{Device, DeviceKey, PeerSync, PeerSyncError, SealedCredential, Snapshot, Stamped};
+use crate::peer_sync::{CloudConfig, Device, DeviceKey, PeerSync, PeerSyncError, SealedCredential, Snapshot, Stamped};
 use crate::{EngineError, api, files, model};
 
 const FILE: &str = "cloud.json";
@@ -53,6 +54,9 @@ pub(crate) const RETRY: Duration = Duration::from_secs(60);
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CloudFile {
+    /// The sync group whose `enabled` and `url` are cached here; `None` only in pre-MS-419 files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -144,6 +148,8 @@ struct Contents {
     device_keys: BTreeMap<String, DeviceKey>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     credentials: BTreeMap<String, SealedCredential>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cloud: Option<CloudConfig>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -185,6 +191,7 @@ impl Contents {
                 .collect(),
             device_keys: snapshot.device_keys,
             credentials: snapshot.credentials,
+            cloud: snapshot.cloud,
         }
     }
 
@@ -214,6 +221,7 @@ impl Contents {
                 .collect(),
             device_keys: self.device_keys,
             credentials: self.credentials,
+            cloud: self.cloud,
             pending: Default::default(),
         }
     }
@@ -291,9 +299,19 @@ impl CloudDrop {
         Ok(())
     }
 
-    pub(crate) fn status(&self) -> SyncCloud {
+    pub(crate) fn status(&self, namespace: Option<&str>) -> SyncCloud {
         let file = self.file.lock().expect("cloud file lock");
         let meta = self.meta.lock().expect("cloud meta lock");
+        let for_group = namespace.is_some() && (file.namespace.is_none() || file.namespace.as_deref() == namespace);
+        if !for_group {
+            return SyncCloud {
+                enabled: false,
+                url: Some(DEFAULT_WORKER_URL.to_owned()),
+                last_upload: None,
+                last_received: None,
+                problem: if namespace.is_some() { meta.problem.clone() } else { None },
+            };
+        }
         SyncCloud {
             enabled: file.enabled,
             url: Some(file.url.clone().unwrap_or_else(|| DEFAULT_WORKER_URL.to_owned())),
@@ -303,27 +321,85 @@ impl CloudDrop {
         }
     }
 
-    /// Turns the drop on with the Worker at `url`; the next exchange uploads.
-    pub(crate) fn enable(&self, url: &str) -> Result<(), EngineError> {
-        let url = worker_url(url).map_err(|message| EngineError::new("invalid", message))?;
+    /// Pre-MS-419 `cloud.json` had no `namespace` field; returns its enabled Worker URL once so
+    /// the device's existing sync group adopts it on first reconcile.
+    pub(crate) fn legacy_enabled_url(&self) -> Option<String> {
+        let file = self.file.lock().expect("cloud file lock");
+        if file.namespace.is_none() && file.enabled {
+            file.url.as_deref().and_then(|url| worker_url(url).ok())
+        } else {
+            None
+        }
+    }
+
+    /// Whether an uploaded slot from a disabled or previous sync group is still waiting to be
+    /// deleted from the Worker.
+    pub(crate) fn has_pending_cleanup(&self, namespace: &str) -> bool {
+        let file = self.file.lock().expect("cloud file lock");
+        file.upload.is_some() && (!file.enabled || file.namespace.as_deref() != Some(namespace))
+    }
+
+    /// Mirrors the sync group's `v1/cloud` setting into `cloud.json`. Returns `true` when the
+    /// effective state for this group changed.
+    pub(crate) fn apply_group(&self, namespace: &str, config: Option<&CloudConfig>) -> Result<bool, EngineError> {
+        let url = config.and_then(|c| c.url.as_deref()).and_then(|u| worker_url(u).ok());
+        let enabled = config.is_some_and(|c| c.enabled) && url.is_some();
+        let mut changed = false;
+        let mut reset_meta = false;
         self.update(|file| {
+            let ns_changed = file.namespace.as_deref() != Some(namespace);
+            let state_changed = file.enabled != enabled || file.url != url;
+            changed = ns_changed || state_changed;
+            reset_meta = changed;
+            file.namespace = Some(namespace.to_owned());
+            file.enabled = enabled;
+            file.url = url;
+        })
+        .map_err(EngineError::failed)?;
+        if reset_meta {
+            let mut meta = self.meta.lock().expect("cloud meta lock");
+            meta.last_upload = None;
+            meta.last_received = None;
+            meta.problem = None;
+        }
+        Ok(changed)
+    }
+
+    /// Turns the drop on for `namespace` with the validated Worker at `url`; the next exchange uploads.
+    pub(crate) fn enable_for_group(&self, namespace: &str, url: String) -> Result<(), EngineError> {
+        let mut reset_meta = false;
+        self.update(|file| {
+            reset_meta = file.namespace.as_deref() != Some(namespace) || file.url.as_deref() != Some(url.as_str());
+            file.namespace = Some(namespace.to_owned());
             file.url = Some(url);
             file.enabled = true;
         })
         .map_err(EngineError::failed)?;
-        self.meta.lock().expect("cloud meta lock").problem = None;
+        let mut meta = self.meta.lock().expect("cloud meta lock");
+        meta.problem = None;
+        if reset_meta {
+            meta.last_upload = None;
+            meta.last_received = None;
+        }
         Ok(())
     }
 
-    /// Turns the drop off and deletes this device's copy from the Worker; a copy the Worker
-    /// couldn't delete shows as the problem.
-    pub(crate) async fn disable(&self) {
+    /// Turns the drop off for `namespace` and deletes this device's copy from the Worker; a copy
+    /// the Worker couldn't delete shows as the problem.
+    pub(crate) async fn disable_for_group(&self, namespace: &str, url: Option<String>) {
         let _exchanging = self.exchanging.lock().await;
-        let result = match self.update(|file| file.enabled = false) {
+        let result = match self.update(|file| {
+            file.namespace = Some(namespace.to_owned());
+            file.enabled = false;
+            file.url = url;
+        }) {
             Ok(()) => self.delete_upload().await,
             Err(error) => Err(error),
         };
-        self.meta.lock().expect("cloud meta lock").problem = result.err();
+        let mut meta = self.meta.lock().expect("cloud meta lock");
+        meta.last_upload = None;
+        meta.last_received = None;
+        meta.problem = result.err();
     }
 
     /// Deletes the copy `cloud.json` records, if any, and forgets it once the Worker did.
@@ -348,12 +424,21 @@ impl CloudDrop {
     /// (MS-396). Does nothing while the drop is off or sync isn't running.
     pub(crate) async fn exchange(&self, sync: &PeerSync, drop_key: Option<&[u8; 32]>) -> Exchange {
         let _exchanging = self.exchanging.lock().await;
-        let url = {
+        let active_namespace = sync.status().await.namespace;
+        let (url, has_upload) = {
             let file = self.file.lock().expect("cloud file lock");
-            match (&file.url, file.enabled) {
-                (Some(url), true) => url.clone(),
-                _ => return Exchange::default(),
+            let active = active_namespace.is_some()
+                && file.namespace.as_deref() == active_namespace.as_deref()
+                && file.enabled;
+            (active.then(|| file.url.clone()).flatten(), file.upload.is_some())
+        };
+        let Some(url) = url else {
+            if has_upload {
+                // Delete a copy left behind when the group turned cloud fallback off or this
+                // device switched/reset groups (MS-419).
+                self.delete_upload().await.ok();
             }
+            return Exchange::default();
         };
         let result = match sync.drop_secret(drop_key).await {
             Ok(Some(secret)) => {
@@ -462,6 +547,11 @@ impl CloudDrop {
     }
 }
 
+/// Validates `url` as a Worker URL, returning the normalized address without a trailing slash.
+pub(crate) fn validate_url(url: &str) -> Result<String, EngineError> {
+    worker_url(url).map_err(|message| EngineError::new("invalid", message))
+}
+
 /// `url` without a trailing slash, when it is an https URL (or http on this machine, for a local
 /// `wrangler dev`) without a query.
 fn worker_url(url: &str) -> Result<String, String> {
@@ -538,7 +628,7 @@ mod tests {
     fn default_worker_url_is_offered_while_off() {
         let directory = std::env::temp_dir().join(format!("mailstream-cloud-drop-default-{}", std::process::id()));
         let drop = CloudDrop::new(&directory);
-        let status = drop.status();
+        let status = drop.status(None);
         assert!(!status.enabled);
         assert_eq!(status.url.as_deref(), Some(DEFAULT_WORKER_URL));
     }

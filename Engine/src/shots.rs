@@ -638,6 +638,9 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             mock.paused = false;
             mock.joined_peer = true;
             mock.last_sync_secs = Some(now);
+            mock.cloud_enabled = false;
+            mock.cloud_url = None;
+            mock.cloud_upload_secs = None;
             events.emit("deviceSync");
             Ok(answers::json(&mock.status()))
         }
@@ -652,6 +655,9 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             mock.paused = false;
             mock.joined_peer = false;
             mock.last_sync_secs = Some(now);
+            mock.cloud_enabled = false;
+            mock.cloud_url = None;
+            mock.cloud_upload_secs = None;
             events.emit("deviceSync");
             Ok(answers::json(&mock.status()))
         }
@@ -679,9 +685,13 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             Ok(answers::json(&mock.status()))
         }
         "sync.cloud_enable" => {
+            if !mock.grouped {
+                return Err(EngineError::new("no_group", "This device is in no sync group yet."));
+            }
             let url = args
                 .string("url")
                 .filter(|url| !url.trim().is_empty())
+                .or_else(|| mock.cloud_url.clone())
                 .unwrap_or_else(|| crate::cloud_drop::DEFAULT_WORKER_URL.to_owned());
             let url = url.trim().trim_end_matches('/');
             if !url.starts_with("https://") {
@@ -694,6 +704,9 @@ pub(crate) fn device_sync(command: &str, args: &Arguments, events: &Events) -> R
             Ok(answers::json(&mock.status()))
         }
         "sync.cloud_disable" => {
+            if !mock.grouped {
+                return Err(EngineError::new("no_group", "This device is in no sync group yet."));
+            }
             mock.cloud_enabled = false;
             mock.cloud_upload_secs = None;
             events.emit("deviceSync");

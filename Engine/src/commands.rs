@@ -766,18 +766,18 @@ pub const COMMANDS: &[Spec] = &[
     Spec::new(
         "sync.cloud_enable",
         Handler::Sync,
-        "Keeps an encrypted copy of the synced settings on your Cloudflare Worker (SyncDrop/), so devices that are never online together still sync.",
+        "Turns on the sync group's Cloudflare Worker fallback (SyncDrop/) for every device in the group, keeping an encrypted copy of the synced settings so devices that are never online together still sync.",
         &[Argument::new(
             "url",
             Kind::String,
-            "The Worker's URL, https://….workers.dev (default: https://mailstream-sync-drop.ync-rop.workers.dev).",
+            "The Worker's URL, https://….workers.dev (default: the group's saved URL or https://mailstream-sync-drop.ync-rop.workers.dev).",
         )
         .optional_positional()],
     ),
     Spec::new(
         "sync.cloud_disable",
         Handler::Sync,
-        "Stops using the Cloudflare Worker and deletes this device's copy from it.",
+        "Turns off the sync group's Cloudflare Worker fallback for every device in the group and deletes stored copies from it.",
         &[],
     ),
 ];

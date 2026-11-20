@@ -336,8 +336,9 @@ pub(crate) struct Settings {
     errors: HashMap<String, SharedString>,
     join_input: Option<Entity<InputState>>,
     join_subscription: Option<Subscription>,
-    /// The Cloudflare drop's Worker URL, made once device sync's status names the saved one.
+    /// The Cloudflare drop's Worker URL, kept in sync with the active sync group's setting.
     cloud_input: Option<Entity<InputState>>,
+    cloud_url_shown: String,
     cloud_subscription: Option<Subscription>,
     /// Why the last change to the Cloudflare drop failed before reaching it (no URL, a bad one).
     cloud_error: Option<SharedString>,
@@ -390,6 +391,7 @@ impl Settings {
             join_input: None,
             join_subscription: None,
             cloud_input: None,
+            cloud_url_shown: String::new(),
             cloud_subscription: None,
             cloud_error: None,
             sync_ticket: None,
@@ -688,12 +690,19 @@ impl Settings {
 
     fn ensure_cloud_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(status) = &self.device_sync else { return };
-        if self.cloud_input.is_some() {
+        let saved = status.cloud.url.clone().unwrap_or_default();
+        if let Some(input) = &self.cloud_input {
+            if self.cloud_url_shown != saved && !input.focus_handle(cx).is_focused(window) {
+                input.update(cx, |input, cx| input.set_value(saved.clone(), window, cx));
+                self.cloud_url_shown = saved;
+                self.cloud_error = None;
+            }
             return;
         }
-        let saved = status.cloud.url.clone().unwrap_or_default();
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Worker URL, like https://mailstream-sync-drop.<you>.workers.dev").default_value(saved)
+            InputState::new(window, cx)
+                .placeholder("Worker URL, like https://mailstream-sync-drop.<you>.workers.dev")
+                .default_value(saved.clone())
         });
         let subscription = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
             if let InputEvent::PressEnter { secondary: false, .. } = event {
@@ -701,6 +710,7 @@ impl Settings {
             }
         });
         self.cloud_input = Some(input);
+        self.cloud_url_shown = saved;
         self.cloud_subscription = Some(subscription);
     }
 
@@ -816,6 +826,7 @@ impl Settings {
                         this.device_sync = Some(status);
                         this.sync_ticket = None;
                         this.ticket_copied = false;
+                        this.cloud_error = None;
                         input.update(cx, |input, cx| input.clean(window, cx));
                         this.changed(cx);
                     }
@@ -848,6 +859,7 @@ impl Settings {
             |this| {
                 this.sync_ticket = None;
                 this.ticket_copied = false;
+                this.cloud_error = None;
             },
             cx,
         );
@@ -2532,10 +2544,11 @@ impl Settings {
                 )
             })
             .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
-                "Keeps an encrypted copy of the synced settings and accounts on your own Cloudflare Worker (SyncDrop/ in the \
-                 Mailstream repository), so devices that are never online at the same time still sync. The Worker \
-                 sees only ciphertext under ids derived from this sync group; turning this off deletes this \
-                 device's copy. Off unless you turn it on.",
+                "Shared across this sync group: turning this on or off applies to every device in the group, and \
+                 devices that join inherit it. Keeps an encrypted copy of the synced settings and accounts on a \
+                 Cloudflare Worker (SyncDrop/ in the Mailstream repository), so devices that are never online at \
+                 the same time still sync. The Worker sees only ciphertext under ids derived from this sync group; \
+                 turning this off or resetting the group deletes stored copies. Off for new groups until turned on.",
             ))
             .when_some(self.cloud_error.clone().or_else(|| cloud.problem.clone().map(SharedString::from)), |d, problem| {
                 d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.danger).child(problem))

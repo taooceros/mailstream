@@ -218,3 +218,162 @@ fn the_drop_refuses_plain_http_and_reports_an_unreachable_worker() {
     assert!(status["cloud"]["problem"].as_str().unwrap().contains("Couldn't reach"), "{status}");
     drop(engine);
 }
+
+/// MS-419: Cloudflare fallback is per sync group: joining devices inherit it, changing the
+/// Worker URL or turning it off replicates to every device in the group, and old slots are
+/// deleted from the Worker.
+#[test]
+fn cloud_fallback_syncs_across_group_and_inherits_on_join() {
+    let (server1, groups1) = worker();
+    let (server2, groups2) = worker();
+    let lookup = MemoryLookup::new();
+    let paired = || {
+        let mut cfg = config(OAuthConfig::default());
+        cfg.device_sync = Some(Network::Loopback(lookup.clone()));
+        cfg
+    };
+    let (cfg_a, cfg_b) = (paired(), paired());
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_b = Engine::start(cfg_b.clone());
+
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    let status = call(&engine_a, "sync.cloud_enable", json!({ "url": server1.base })).unwrap();
+    assert_eq!(status["cloud"]["enabled"], json!(true));
+    assert_eq!(status["cloud"]["url"], json!(server1.base));
+    until("A's copy on server1", || copies(&groups1).len() == 1);
+
+    // B joins A without calling sync.cloud_enable itself and inherits the group's Worker.
+    let code = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": code })).unwrap();
+    until("B to inherit server1 and upload its copy", || {
+        let status = call(&engine_b, "sync.status", json!({})).unwrap();
+        status["cloud"]["enabled"] == json!(true)
+            && status["cloud"]["url"] == json!(server1.base)
+            && copies(&groups1).len() == 2
+    });
+
+    // B switches the group's Worker to server2; A follows and both delete their slots on server1.
+    let status = call(&engine_b, "sync.cloud_enable", json!({ "url": server2.base })).unwrap();
+    assert_eq!(status["cloud"]["url"], json!(server2.base));
+    until("A to follow server2 and both to leave server1", || {
+        let status = call(&engine_a, "sync.status", json!({})).unwrap();
+        status["cloud"]["enabled"] == json!(true)
+            && status["cloud"]["url"] == json!(server2.base)
+            && copies(&groups2).len() == 2
+            && copies(&groups1).is_empty()
+    });
+
+    // A disables cloud fallback for the group; B follows and deletes its copy from server2.
+    let status = call(&engine_a, "sync.cloud_disable", json!({})).unwrap();
+    assert_eq!(status["cloud"]["enabled"], json!(false));
+    assert_eq!(status["cloud"]["url"], json!(server2.base));
+    until("B to disable cloud fallback and delete its copy", || {
+        let status = call(&engine_b, "sync.status", json!({})).unwrap();
+        status["cloud"]["enabled"] == json!(false)
+            && status["cloud"]["url"] == json!(server2.base)
+            && copies(&groups2).is_empty()
+    });
+
+    // Re-enabling without passing a URL reuses the group's saved Worker URL.
+    let status = call(&engine_a, "sync.cloud_enable", json!({})).unwrap();
+    assert_eq!(status["cloud"]["enabled"], json!(true));
+    assert_eq!(status["cloud"]["url"], json!(server2.base));
+    until("B to re-enable with the group's saved URL", || {
+        let status = call(&engine_b, "sync.status", json!({})).unwrap();
+        status["cloud"]["enabled"] == json!(true)
+            && status["cloud"]["url"] == json!(server2.base)
+            && copies(&groups2).len() == 2
+    });
+
+    drop(engine_b);
+    drop(engine_a);
+}
+
+/// MS-419: `sync.reset` starts the new sync group with Cloudflare fallback off and deletes the
+/// old group's copy; joining another group whose fallback is off also turns it off and cleans up.
+#[test]
+fn sync_reset_and_switching_groups_isolate_cloud_fallback() {
+    let (server, groups) = worker();
+    let lookup = MemoryLookup::new();
+    let paired = || {
+        let mut cfg = config(OAuthConfig::default());
+        cfg.device_sync = Some(Network::Loopback(lookup.clone()));
+        cfg
+    };
+    let (cfg_a, cfg_c) = (paired(), paired());
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_c = Engine::start(cfg_c.clone());
+
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    call(&engine_a, "sync.cloud_enable", json!({ "url": server.base })).unwrap();
+    until("A's copy before reset", || copies(&groups).len() == 1);
+
+    // Reset creates a fresh sync group: cloud fallback resets to off + default URL, and old copy is deleted.
+    let reset = call(&engine_a, "sync.reset", json!({ "yes": true })).unwrap();
+    assert_eq!(reset["cloud"]["enabled"], json!(false));
+    assert_eq!(reset["cloud"]["url"], json!(crate::cloud_drop::DEFAULT_WORKER_URL));
+    assert_eq!(reset["cloud"]["lastUpload"], Value::Null);
+    assert_eq!(reset["cloud"]["problem"], Value::Null);
+    assert!(copies(&groups).is_empty(), "old group's copy should be deleted on reset");
+
+    // Re-enable on A's new group, then join C's group (where cloud fallback is off).
+    call(&engine_a, "sync.cloud_enable", json!({ "url": server.base })).unwrap();
+    until("A's copy on new group", || copies(&groups).len() == 1);
+    call(&engine_c, "sync.enable", json!({})).unwrap();
+    let code = call(&engine_c, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    let joined = call(&engine_a, "sync.join", json!({ "ticket": code })).unwrap();
+    assert_eq!(joined["cloud"]["enabled"], json!(false));
+    assert_eq!(joined["cloud"]["url"], json!(crate::cloud_drop::DEFAULT_WORKER_URL));
+    until("A's old group copy deleted after joining C's group", || copies(&groups).is_empty());
+
+    drop(engine_c);
+    drop(engine_a);
+}
+
+/// MS-419: cloud fallback commands require a sync group, and a pre-MS-419 `cloud.json` (without
+/// `namespace`) migrates into the device's existing sync group once on start.
+#[test]
+fn cloud_commands_require_a_sync_group_and_migrate_legacy_cloud_json() {
+    let (server, groups) = worker();
+    let lookup = MemoryLookup::new();
+    let paired = || {
+        let mut cfg = config(OAuthConfig::default());
+        cfg.device_sync = Some(Network::Loopback(lookup.clone()));
+        cfg
+    };
+    let (cfg_a, cfg_b) = (paired(), paired());
+
+    // Without a sync group, cloud commands fail with `no_group`.
+    let engine_a = Engine::start(cfg_a.clone());
+    assert_eq!(call(&engine_a, "sync.cloud_enable", json!({ "url": server.base })).unwrap_err().code, "no_group");
+    assert_eq!(call(&engine_a, "sync.cloud_disable", json!({})).unwrap_err().code, "no_group");
+
+    // Create a group, stop, write a legacy pre-MS-419 cloud.json (no `namespace` field), restart.
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    drop(engine_a);
+    std::fs::write(
+        cfg_a.support_directory.join("peer-sync").join("cloud.json"),
+        serde_json::to_vec_pretty(&json!({ "url": server.base, "enabled": true })).unwrap(),
+    )
+    .unwrap();
+
+    let engine_a = Engine::start(cfg_a.clone());
+    until("legacy cloud.json to migrate into A's sync group", || {
+        let status = call(&engine_a, "sync.status", json!({})).unwrap();
+        status["cloud"]["enabled"] == json!(true)
+            && status["cloud"]["url"] == json!(server.base)
+            && copies(&groups).len() == 1
+    });
+
+    // A device joining A now inherits the migrated setting automatically.
+    let engine_b = Engine::start(cfg_b.clone());
+    let code = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": code })).unwrap();
+    until("B to inherit migrated cloud fallback from A", || {
+        let status = call(&engine_b, "sync.status", json!({})).unwrap();
+        status["cloud"]["enabled"] == json!(true) && status["cloud"]["url"] == json!(server.base)
+    });
+
+    drop(engine_b);
+    drop(engine_a);
+}

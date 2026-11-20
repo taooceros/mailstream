@@ -213,7 +213,7 @@ WantedBy=multi-user.target
 
 ### Cloudflare Fallback for Device Sync (optional)
 
-Without an always-on node, a change reaches another device only once both are online at the same time. The optional Cloudflare fallback (`SyncDrop/`, MS-374) closes that gap on the Workers Free plan: each device keeps an encrypted copy of the synced settings (trusted senders with their removals, the synced settings, the device list) on your own Worker and merges the other devices' copies, latest change per key winning. The Worker stores only AES-256-GCM ciphertext under ids derived from the sync group's secret, and only the group's devices can read or replace its copies (the group's first upload registers a write token derived from the same secret). It is off until you turn it on.
+Without an always-on node, a change reaches another device only once both are online at the same time. The optional Cloudflare fallback (`SyncDrop/`, MS-374, MS-419) closes that gap on the Workers Free plan: configured per sync group, each device in the group keeps an encrypted copy of the synced settings (trusted senders with their removals, the synced settings, the device list) on your Worker and merges the other devices' copies, latest change per key winning. The Worker stores only AES-256-GCM ciphertext under ids derived from the sync group's secret, and only the group's devices can read or replace its copies (the group's first upload registers a write token derived from the same secret). It is off for new sync groups until you turn it on.
 
 Deploy the Worker once with your Cloudflare account (free; one SQLite Durable Object per sync group):
 
@@ -223,12 +223,12 @@ npx --yes wrangler@4 login     # opens Cloudflare in the browser
 npx --yes wrangler@4 deploy    # prints https://mailstream-sync-drop.<you>.workers.dev
 ```
 
-Then turn it on on each device with that URL: Settings ▸ Device sync ▸ Cloudflare fallback, or
+Then turn it on once for the sync group (other devices in the group—and devices that join it—inherit the setting automatically): Settings ▸ Device sync ▸ Cloudflare fallback, or
 
 ```sh
 mailstream sync cloud-enable https://mailstream-sync-drop.<you>.workers.dev
 mailstream sync daemon --data-dir /var/lib/mailstream-sync --cloud https://mailstream-sync-drop.<you>.workers.dev
-mailstream sync cloud-disable   # stops it and deletes this device's copy from the Worker
+mailstream sync cloud-disable   # turns it off for the sync group and deletes stored copies from the Worker
 ```
 
 Devices exchange with the Worker after every change, on start, after waking or a network change, and every 5 minutes. `npx wrangler@4 dev` in a copy of `SyncDrop/` runs the same Worker locally (no account), for `mailstream sync cloud-enable http://127.0.0.1:8787`.

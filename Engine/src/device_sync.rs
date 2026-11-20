@@ -18,7 +18,7 @@ use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
 use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
 use crate::peer_mail::PeerMail;
-use crate::peer_sync::{Network, PeerSync, PeerSyncError, Service, Stored};
+use crate::peer_sync::{CloudConfig, Network, PeerSync, PeerSyncError, Service, Stored};
 use crate::settings::{Setting, Settings, Values};
 use crate::signal::{ProcessSignal, next_wake};
 use crate::{EngineError, Events, files, model};
@@ -377,14 +377,15 @@ impl DeviceSync {
             };
             self.cloud.exchange(sync, drop_key.as_ref()).await
         };
+        let mut notify = exchange.changed;
         if exchange.merged {
             self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
-            self.reconcile_and_report().await;
+            notify |= self.reconcile_and_report().await;
         }
-        if exchange.changed {
+        if notify {
             self.events.emit("deviceSync");
         }
-        self.cloud.status().problem.is_none()
+        self.cloud.status(namespace.as_deref()).problem.is_none()
     }
 
     /// Whether `peer-sync/` names a group this device syncs; a damaged `sync.json` counts, so
@@ -447,27 +448,31 @@ impl DeviceSync {
 
     async fn reconcile_and_report(&self) -> bool {
         let before = self.meta.lock().expect("meta lock").problem.clone();
-        if let Err(error) = self.reconcile().await {
-            self.meta.lock().expect("meta lock").problem = Some(error.message);
-        }
-        self.meta.lock().expect("meta lock").problem != before
+        let cloud_changed = match self.reconcile().await {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.meta.lock().expect("meta lock").problem = Some(error.message);
+                false
+            }
+        };
+        cloud_changed || self.meta.lock().expect("meta lock").problem != before
     }
 
-    async fn reconcile(&self) -> Result<(), EngineError> {
+    async fn reconcile(&self) -> Result<bool, EngineError> {
         let mut bridge = self.bridge.lock().await;
         let sync_guard = self.sync.read().await;
         let Some(sync) = sync_guard.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let status = sync.status().await;
         let Some(namespace) = status.namespace else {
-            return Ok(());
+            return Ok(false);
         };
 
         for _attempt in 0..2 {
             // Skip if settings.json is broken right now so we never push defaults over the group.
             let Ok(raw_before) = self.settings.file().read_raw() else {
-                return Ok(());
+                return Ok(false);
             };
             // Validate synced keys from `raw_before` itself: `SettingsFile::read` replaces an
             // invalid key with its default, which bridged as a local edit would reset every
@@ -536,7 +541,7 @@ impl DeviceSync {
 
             // Re-check whether settings.json was edited underneath us while pushing to iroh-docs.
             let Ok(raw_now) = self.settings.file().read_raw() else {
-                return Ok(());
+                return Ok(false);
             };
             if raw_now != raw_before {
                 continue;
@@ -635,6 +640,26 @@ impl DeviceSync {
             }
             *self.drop_key.lock().expect("drop key lock") = Some((namespace.clone(), drop_key));
 
+            // Per-sync-group Cloudflare fallback (MS-419): migrate a pre-MS-419 local `cloud.json`
+            // into the active group once (never while joining another group), then mirror
+            // `v1/cloud` locally.
+            let mut cloud_changed = false;
+            if !snapshot.pending.contains("v1/cloud") {
+                if !prev_bridged.joining
+                    && snapshot.cloud.is_none()
+                    && let Some(url) = self.cloud.legacy_enabled_url()
+                {
+                    let config = CloudConfig { enabled: true, url: Some(url), at: bridge.next_at(0) };
+                    if sync.set_cloud(&config).await.map_err(map_error)? {
+                        snapshot.cloud = Some(config);
+                    }
+                }
+                cloud_changed = self.cloud.apply_group(&namespace, snapshot.cloud.as_ref())?;
+            }
+            if cloud_changed || self.cloud.has_pending_cleanup(&namespace) {
+                self.cloud_wake.notify_one();
+            }
+
             if !pending_updates.is_empty() {
                 for (setting, value) in &pending_updates {
                     self.settings.file().update(*setting, Some(value))?;
@@ -648,9 +673,9 @@ impl DeviceSync {
                 self.events.emit("settings");
             }
             self.meta.lock().expect("meta lock").problem = invalid_problem(&invalid).or(accounts_problem);
-            return Ok(());
+            return Ok(cloud_changed);
         }
-        Ok(())
+        Ok(false)
     }
 
     pub(crate) async fn run(&self, command: &str, args: &Arguments) -> Result<Value, EngineError> {
@@ -790,17 +815,62 @@ impl DeviceSync {
                 Ok(answers::json(&self.status_answer().await))
             }
             "sync.cloud_enable" => {
-                let url = args
-                    .string("url")
-                    .filter(|url| !url.trim().is_empty())
-                    .unwrap_or_else(|| cloud_drop::DEFAULT_WORKER_URL.to_owned());
-                self.cloud.enable(&url)?;
+                let explicit_url = args.string("url").filter(|url| !url.trim().is_empty());
+                let validated_explicit = explicit_url.as_deref().map(cloud_drop::validate_url).transpose()?;
+                if self.closed_stored().await?.is_some_and(|stored| stored.namespace.is_none()) {
+                    return Err(map_error(PeerSyncError::NoGroup));
+                }
+                self.open_or_err().await?;
+                let (namespace, url) = {
+                    let mut bridge = self.bridge.lock().await;
+                    let guard = self.sync.read().await;
+                    let sync = guard.as_ref().expect("opened");
+                    let Some(namespace) = sync.status().await.namespace else {
+                        return Err(map_error(PeerSyncError::NoGroup));
+                    };
+                    let snapshot = sync.snapshot().await.map_err(map_error)?;
+                    let existing_url = snapshot
+                        .cloud
+                        .as_ref()
+                        .and_then(|c| c.url.as_deref())
+                        .and_then(|u| cloud_drop::validate_url(u).ok());
+                    let url = validated_explicit
+                        .or(existing_url)
+                        .unwrap_or_else(|| cloud_drop::DEFAULT_WORKER_URL.to_owned());
+                    let min_at = snapshot.cloud.as_ref().map_or(0, |c| c.at);
+                    let at = bridge.next_at(min_at);
+                    let config = CloudConfig { enabled: true, url: Some(url.clone()), at };
+                    sync.set_cloud(&config).await.map_err(map_error)?;
+                    (namespace, url)
+                };
+                self.cloud.enable_for_group(&namespace, url)?;
                 self.cloud_exchange().await;
+                self.close_unless_syncing().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
             "sync.cloud_disable" => {
-                self.cloud.disable().await;
+                if self.closed_stored().await?.is_some_and(|stored| stored.namespace.is_none()) {
+                    return Err(map_error(PeerSyncError::NoGroup));
+                }
+                self.open_or_err().await?;
+                let (namespace, url) = {
+                    let mut bridge = self.bridge.lock().await;
+                    let guard = self.sync.read().await;
+                    let sync = guard.as_ref().expect("opened");
+                    let Some(namespace) = sync.status().await.namespace else {
+                        return Err(map_error(PeerSyncError::NoGroup));
+                    };
+                    let snapshot = sync.snapshot().await.map_err(map_error)?;
+                    let url = snapshot.cloud.as_ref().and_then(|c| c.url.clone());
+                    let min_at = snapshot.cloud.as_ref().map_or(0, |c| c.at);
+                    let at = bridge.next_at(min_at);
+                    let config = CloudConfig { enabled: false, url: url.clone(), at };
+                    sync.set_cloud(&config).await.map_err(map_error)?;
+                    (namespace, url)
+                };
+                self.cloud.disable_for_group(&namespace, url).await;
+                self.close_unless_syncing().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
             }
@@ -852,6 +922,7 @@ impl DeviceSync {
         }
         let meta = self.meta.lock().expect("meta lock");
         let last_sync = meta.last_sync_ms.or(latest_other_seen).map(iso_ms);
+        let cloud = self.cloud.status(status.namespace.as_deref());
         DeviceSyncStatus {
             available: true,
             enabled: status.namespace.is_some() && !status.paused,
@@ -861,7 +932,7 @@ impl DeviceSync {
             devices,
             last_sync,
             problem: removed_here.or_else(|| meta.problem.clone()),
-            cloud: self.cloud.status(),
+            cloud,
             mail: Default::default(),
         }
     }
@@ -878,7 +949,7 @@ impl DeviceSync {
             devices: Vec::new(),
             last_sync: None,
             problem: None,
-            cloud: self.cloud.status(),
+            cloud: Default::default(),
             mail: Default::default(),
         };
         match PeerSync::stored(&self.support_directory) {
@@ -896,6 +967,7 @@ impl DeviceSync {
                 answer.namespace = stored.namespace;
             }
         }
+        answer.cloud = self.cloud.status(answer.namespace.as_deref());
         answer
     }
 }

@@ -34,6 +34,8 @@
 //!   that device's credential key ([`SealedCredential`], `account_sync.rs`).
 //! - `v1/drop/<recipient endpoint id>` (MS-396): the cloud drop key of the latest removal, sealed
 //!   to that device's credential key like a credential ([`SealedDropKey`], `account_sync.rs`).
+//! - `v1/cloud` (MS-419): `{"enabled": true|false, "url"?: …, "at": …}`, the group's optional
+//!   Cloudflare fallback setting (`CloudConfig`). Latest `at` wins.
 //!
 //! Each device writes with its own author, so a key holds one entry per device that wrote it.
 //! Readers take the entry with the latest `at` (`lastSeen` for devices), on a tie the one of the
@@ -127,6 +129,7 @@ const ACCOUNT: &str = "v1/account/";
 const DEVICE_KEY: &str = "v1/devkey/";
 const CREDENTIAL: &str = "v1/cred/";
 const DROP_KEY: &str = "v1/drop/";
+const CLOUD: &str = "v1/cloud";
 /// What the cloud drop's secret is derived from besides the group's write key and the drop key.
 const DROP_SECRET_CONTEXT: &str = "mailstream device sync drop secret v2";
 /// What a device signs to announce its credential key: this, its endpoint id, the key and when.
@@ -203,6 +206,8 @@ pub struct Snapshot {
     pub credentials: BTreeMap<String, SealedCredential>,
     /// Sealed cloud drop keys by recipient endpoint id (MS-396).
     pub drop_keys: BTreeMap<String, SealedDropKey>,
+    /// The group's optional Cloudflare fallback setting (MS-419).
+    pub cloud: Option<CloudConfig>,
     /// Keys left out above because a value is still downloading: what they hold is unknown,
     /// not absent.
     pub pending: BTreeSet<String>,
@@ -277,6 +282,17 @@ pub struct SealedCredential {
     /// When the credential inside was issued (its sign-in), Unix ms.
     pub issued: u64,
     /// When it was sealed, Unix ms: the latest wins.
+    pub at: u64,
+}
+
+/// The sync group's Cloudflare fallback setting (`v1/cloud`, MS-419).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudConfig {
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// When it was set, Unix ms: the latest wins.
     pub at: u64,
 }
 
@@ -856,6 +872,12 @@ impl PeerSync {
         self.set(format!("{DROP_KEY}{recipient}"), sealed, sealed.at).await
     }
 
+    /// Records the group's Cloudflare fallback setting (MS-419); `false` when the group already
+    /// holds one from `config.at` or later, which stays.
+    pub async fn set_cloud(&self, config: &CloudConfig) -> Result<bool> {
+        self.set(CLOUD.to_string(), config, config.at).await
+    }
+
     /// Removes device `id` (an endpoint id) from the group (MS-396): records its removal, so
     /// every device that reads it lets it in no more and ends its connections. The engine then
     /// withdraws the credentials sealed to it and makes the cloud drop a new key it never gets
@@ -950,6 +972,12 @@ impl PeerSync {
                 inner.put(doc, format!("{CREDENTIAL}{slot}"), credential).await?;
                 wrote = true;
             }
+        }
+        if let Some(cloud) = &incoming.cloud
+            && newer(cloud.at, current.cloud.as_ref().map(|have| have.at))
+        {
+            inner.put(doc, CLOUD.to_string(), cloud).await?;
+            wrote = true;
         }
         Ok(wrote)
     }
@@ -1191,6 +1219,9 @@ impl Inner {
                 Record::DropKey(sealed) => {
                     snapshot.drop_keys.insert(key[DROP_KEY.len()..].to_string(), sealed);
                 }
+                Record::Cloud(config) => {
+                    snapshot.cloud = Some(config);
+                }
             }
         }
         Ok(snapshot)
@@ -1214,6 +1245,7 @@ enum Record {
     DeviceKey(DeviceKey),
     Credential(SealedCredential),
     DropKey(SealedDropKey),
+    Cloud(CloudConfig),
 }
 
 impl Record {
@@ -1238,6 +1270,8 @@ impl Record {
             serde_json::from_slice(data).ok().map(Self::Credential)
         } else if key.starts_with(DROP_KEY) {
             serde_json::from_slice(data).ok().map(Self::DropKey)
+        } else if key == CLOUD {
+            serde_json::from_slice(data).ok().map(Self::Cloud)
         } else {
             None
         }
@@ -1254,6 +1288,7 @@ impl Record {
             Self::DeviceKey(announced) => announced.at,
             Self::Credential(credential) => credential.at,
             Self::DropKey(key) => key.at,
+            Self::Cloud(config) => config.at,
         }
     }
 }
