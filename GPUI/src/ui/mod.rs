@@ -81,6 +81,11 @@ impl Render for MailApp {
         let width = f32::from(viewport.width);
         let compact = width < layout::COMPACT_WIDTH;
         let (safe_top, safe_bottom, _, _) = if compact { design::compact::safe_area_insets() } else { (0., 0., 0., 0.) };
+        let ime = if compact { design::compact::ime_insets() } else { design::compact::ImeInsets::default() };
+        let layout_ime_bottom = ime.layout_bottom();
+        if compact {
+            design::compact::set_back_enabled(self.has_back_target(cx));
+        }
         let (docked, swapped, floating, minimized) = {
             let column = self.compose.read(cx);
             (column.docked(), column.swapped, column.floats().then(|| column.float_bounds(viewport)), column.minimized())
@@ -212,7 +217,11 @@ impl Render for MailApp {
             .relative()
             .size_full()
             .flex()
-            .when(compact, |d| d.flex_col().pt(px(safe_top)).when(!show_bottom_bar, |d| d.pb(px(safe_bottom))))
+            .when(compact, |d| {
+                d.flex_col()
+                    .pt(px(safe_top))
+                    .when(!show_bottom_bar, |d| d.pb(px(safe_bottom + layout_ime_bottom)))
+            })
             .font_family(design::ui_font())
             .text_size(px(design::type_scale(compact).body))
             .text_color(p.text)
@@ -281,7 +290,15 @@ impl Render for MailApp {
                 })
             })
             .when(compose_fullscreen, |d| {
-                d.child(div().absolute().inset_0().pt(px(safe_top)).pb(px(safe_bottom)).bg(p.background).child(self.compose.clone()))
+                d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .pt(px(safe_top))
+                        .pb(px(safe_bottom + layout_ime_bottom))
+                        .bg(p.background)
+                        .child(self.compose.clone()),
+                )
             })
             // Painted in the deferred overlay layer so floating and minimized drafts composite
             // above native Mac web views (`webview.rs`, MS-411) instead of underneath them.
@@ -340,6 +357,8 @@ impl Render for MailApp {
             .child({
                 let toast_bottom = if !compact {
                     0.
+                } else if ime.bottom > 0. {
+                    safe_bottom + ime.bottom + space::S16
                 } else if show_bottom_bar {
                     design::compact::DOCK_CLEARANCE + safe_bottom
                 } else if self.reader().is_some() {

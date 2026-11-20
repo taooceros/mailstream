@@ -15,6 +15,24 @@ static SESSION: AtomicU64 = AtomicU64::new(0);
 static COMPOSING: AtomicBool = AtomicBool::new(false);
 static EVENTS: Mutex<VecDeque<ImeEvent>> = Mutex::new(VecDeque::new());
 static BACK_PENDING: AtomicBool = AtomicBool::new(false);
+static PREDICTIVE_BACK_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PREDICTIVE_BACK_EVENTS: Mutex<VecDeque<PredictiveBackEvent>> = Mutex::new(VecDeque::new());
+static IME_INSETS_DIRTY: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static IME_INSETS_CALLBACK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    static PREDICTIVE_BACK_CALLBACK: RefCell<Option<Box<dyn Fn(PredictiveBackEvent)>>> =
+        const { RefCell::new(None) };
+}
+/// Android 14+ `OnBackAnimationCallback` lifecycle event queued from the Java UI thread
+/// and drained on GPUI's native thread on the next vsync (MS-449).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PredictiveBackEvent {
+    Started { progress: f32, edge: i32 },
+    Progressed { progress: f32, edge: i32 },
+    Invoked,
+    Cancelled,
+}
 
 pub(super) struct ImeEvent {
     pub session: u64,
@@ -38,18 +56,118 @@ pub(super) fn enqueue(event: ImeEvent) {
     }
 }
 
-/// Enqueues a system back event from the Java UI thread (`OnBackInvokedCallback` / `onBackPressed`)
-/// so GPUI dispatches an `escape` keystroke on the native loop thread even when no IME session is
-/// active or predictive back bypasses the native `InputQueue`.
+/// Registers a main-thread callback invoked on the next vsync when Android's
+/// `WindowInsetsAnimation.Callback` updates IME height (without triggering a
+/// full `window.refresh()` or `request_config_refresh()`).
+pub fn set_ime_insets_callback(callback: Option<Box<dyn Fn()>>) {
+    IME_INSETS_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+}
+
+/// Marks IME animation insets dirty and schedules the next hardware vsync frame.
+pub(super) fn mark_ime_insets_dirty() {
+    IME_INSETS_DIRTY.store(true, Ordering::Release);
+    super::frame_source::schedule_frame();
+}
+
+/// Registers a main-thread callback invoked for Android 14+ predictive back
+/// gesture events (`STARTED` / `PROGRESSED` / `INVOKED` / `CANCELLED`).
+pub fn set_predictive_back_callback(callback: Option<Box<dyn Fn(PredictiveBackEvent)>>) {
+    PREDICTIVE_BACK_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+}
+
+/// Enqueues a predictive back gesture event from the Java UI thread.
+/// Coalesces consecutive `Progressed` events so each vsync applies the latest progress.
+pub(super) fn enqueue_predictive_back(event: PredictiveBackEvent) {
+    match event {
+        PredictiveBackEvent::Started { .. } | PredictiveBackEvent::Progressed { .. } => {
+            PREDICTIVE_BACK_ACTIVE.store(true, Ordering::Release);
+        }
+        PredictiveBackEvent::Invoked | PredictiveBackEvent::Cancelled => {
+            PREDICTIVE_BACK_ACTIVE.store(false, Ordering::Release);
+        }
+    }
+    let mut queue = PREDICTIVE_BACK_EVENTS.lock();
+    if matches!(event, PredictiveBackEvent::Progressed { .. })
+        && matches!(queue.back(), Some(PredictiveBackEvent::Progressed { .. }))
+    {
+        if let Some(last) = queue.back_mut() {
+            *last = event;
+        }
+    } else {
+        queue.push_back(event);
+    }
+    drop(queue);
+    super::frame_source::schedule_frame();
+}
+
+/// Enqueues a system back event from the Java UI thread (`OnBackInvokedCallback` / `onBackPressed`).
+/// When an Android 14+ predictive back gesture is active, routes `Invoked` into the predictive
+/// back queue (guaranteeing commit even if progress < 1/3); otherwise dispatches an `escape`
+/// keystroke on the native loop thread.
 pub(super) fn enqueue_back() {
-    BACK_PENDING.store(true, Ordering::Release);
-    crate::mark_text_input_dirty();
+    if PREDICTIVE_BACK_ACTIVE.swap(false, Ordering::AcqRel) {
+        PREDICTIVE_BACK_EVENTS
+            .lock()
+            .push_back(PredictiveBackEvent::Invoked);
+        super::frame_source::schedule_frame();
+    } else {
+        BACK_PENDING.store(true, Ordering::Release);
+        crate::mark_text_input_dirty();
+    }
 }
 
 pub(super) fn drain(
     slot: &Rc<RefCell<Option<PlatformInputHandler>>>,
     input: &mut dyn FnMut(PlatformInput) -> DispatchEventResult,
 ) {
+    if IME_INSETS_DIRTY.swap(false, Ordering::AcqRel) {
+        let cb = IME_INSETS_CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(cb) = cb {
+            cb();
+            IME_INSETS_CALLBACK.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                if guard.is_none() {
+                    *guard = Some(cb);
+                }
+            });
+        }
+    }
+    let back_events = std::mem::take(&mut *PREDICTIVE_BACK_EVENTS.lock());
+    if !back_events.is_empty() {
+        let cb = PREDICTIVE_BACK_CALLBACK.with(|slot| slot.borrow_mut().take());
+        if let Some(cb) = cb {
+            for event in back_events {
+                if matches!(
+                    event,
+                    PredictiveBackEvent::Started { .. } | PredictiveBackEvent::Invoked
+                ) {
+                    finish_composition(slot);
+                }
+                cb(event);
+            }
+            PREDICTIVE_BACK_CALLBACK.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                if guard.is_none() {
+                    *guard = Some(cb);
+                }
+            });
+        } else {
+            for event in back_events {
+                if matches!(event, PredictiveBackEvent::Invoked) {
+                    finish_composition(slot);
+                    input(PlatformInput::KeyDown(KeyDownEvent {
+                        keystroke: Keystroke {
+                            key: "escape".into(),
+                            key_char: None,
+                            modifiers: Modifiers::default(),
+                        },
+                        is_held: false,
+                        prefer_character_input: false,
+                    }));
+                }
+            }
+        }
+    }
     if BACK_PENDING.swap(false, Ordering::AcqRel) {
         finish_composition(slot);
         input(PlatformInput::KeyDown(KeyDownEvent {

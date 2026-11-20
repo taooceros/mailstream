@@ -386,6 +386,9 @@ impl TileCache {
             viewport_size: [tile_size as f32, tile_size as f32],
             premultiplied_alpha: target.premultiplied_alpha as u32,
             pad: 0,
+            overscroll_viewport: [0.0; 4],
+            overscroll_stretch: [0.0; 2],
+            overscroll_order: [0; 2],
         };
         let path_globals = GlobalParams {
             premultiplied_alpha: 0,

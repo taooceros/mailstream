@@ -160,4 +160,15 @@ impl Window {
         self.fast_layers.layers.clear();
         self.refresh();
     }
+
+    /// Returns whether the scroll container named `element_name` last hit
+    /// `Decision::Composite` (MS-449 test support).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scroll_layer_composited(&self, element_name: &str) -> bool {
+        let target = crate::ElementId::from(element_name.to_owned());
+        self.fast_layers.layers.keys().any(|id| {
+            id.last() == Some(&target)
+                && policy::last_decision(self, id) == Some(policy::Decision::Composite)
+        })
+    }
 }

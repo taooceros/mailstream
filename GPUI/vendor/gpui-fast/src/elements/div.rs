@@ -2140,6 +2140,12 @@ impl Element for Div {
             .map(|provider| provider.provide(window, cx));
 
         window.with_image_cache(image_cache, |window| {
+        let overscroll_stretch = self
+            .interactivity
+            .tracked_scroll_handle
+            .as_ref()
+            .map(|handle| handle.0.borrow().overscroll.stretch())
+            .unwrap_or_default();
             self.interactivity.paint(
                 global_id,
                 inspector_id,
@@ -2153,6 +2159,11 @@ impl Element for Div {
                         return;
                     }
 
+                    let overscroll_start =
+                        (overscroll_stretch.x != 0.0 || overscroll_stretch.y != 0.0).then(|| {
+                            let viewport = window.snapped_content_mask().bounds;
+                            (viewport, window.next_frame.scene.begin_overscroll(viewport))
+                        });
                     crate::fast::layers::paint::paint_children(
                         window,
                         cx,
@@ -2163,6 +2174,13 @@ impl Element for Div {
                             }
                         },
                     );
+                    if let Some((viewport, order_start)) = overscroll_start {
+                        window.next_frame.scene.end_overscroll(
+                            viewport,
+                            order_start,
+                            overscroll_stretch,
+                        );
+                    }
                 },
             )
         });
@@ -3441,6 +3459,7 @@ impl Interactivity {
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let ongoing_scroll = self.ongoing_scroll.clone();
+            let tracked_scroll_handle = self.tracked_scroll_handle.clone();
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -3491,6 +3510,92 @@ impl Interactivity {
                             delta_x = Pixels::ZERO;
                         }
                     }
+
+                    // Mailstream patch (MS-449): GPU stretch overscroll without mutating
+                    // `scroll_offset` outside `[-max, 0]` or dirtying Scroll Layers.
+                    if let Some(handle) = &tracked_scroll_handle
+                        && window.overscroll_active()
+                    {
+                        let mut overscroll_changed = false;
+                        let mut schedule_tick = false;
+                        let now = window
+                            .frame_signal_at()
+                            .unwrap_or_else(std::time::Instant::now);
+                        if let Some(v_rem) = window.active_touch_momentum_velocity() {
+                            let clamped_x =
+                                (old_scroll_offset.x + delta_x).clamp(-fast_scroll_max.x, px(0.));
+                            let clamped_y =
+                                (old_scroll_offset.y + delta_y).clamp(-fast_scroll_max.y, px(0.));
+                            let applied_x = clamped_x - old_scroll_offset.x;
+                            let applied_y = clamped_y - old_scroll_offset.y;
+                            let unused_x = overflow.x == Overflow::Scroll
+                                && (delta_x - applied_x).abs() > px(0.01);
+                            let unused_y = overflow.y == Overflow::Scroll
+                                && (delta_y - applied_y).abs() > px(0.01);
+                            scroll_offset.x = clamped_x;
+                            scroll_offset.y = clamped_y;
+                            if unused_x || unused_y {
+                                let absorbed = handle.0.borrow_mut().overscroll.absorb_fling(
+                                    unused_x,
+                                    unused_y,
+                                    v_rem,
+                                    hitbox.bounds.size,
+                                    now,
+                                );
+                                if absorbed {
+                                    window.cancel_touch_momentum();
+                                    overscroll_changed = true;
+                                    schedule_tick = true;
+                                }
+                            }
+                        } else {
+                            let at_start_x = old_scroll_offset.x >= px(-0.5);
+                            let at_end_x = old_scroll_offset.x <= -fast_scroll_max.x + px(0.5);
+                            let at_start_y = old_scroll_offset.y >= px(-0.5);
+                            let at_end_y = old_scroll_offset.y <= -fast_scroll_max.y + px(0.5);
+                            let (rem, changed) = handle.0.borrow_mut().overscroll.drag(
+                                point(delta_x, delta_y),
+                                overflow.x == Overflow::Scroll,
+                                overflow.y == Overflow::Scroll,
+                                at_start_x,
+                                at_end_x,
+                                at_start_y,
+                                at_end_y,
+                                hitbox.bounds.size,
+                            );
+                            overscroll_changed |= changed;
+                            scroll_offset.x =
+                                (old_scroll_offset.x + rem.x).clamp(-fast_scroll_max.x, px(0.));
+                            scroll_offset.y =
+                                (old_scroll_offset.y + rem.y).clamp(-fast_scroll_max.y, px(0.));
+                            if matches!(
+                                event.touch_phase,
+                                crate::TouchPhase::Ended | crate::TouchPhase::Cancelled
+                            ) && handle.0.borrow_mut().overscroll.release(now)
+                            {
+                                overscroll_changed = true;
+                                schedule_tick = true;
+                            }
+                        }
+                        let moved = *scroll_offset != old_scroll_offset;
+                        drop(scroll_offset);
+                        if moved || overscroll_changed {
+                            crate::fast::retained::invalidate_retained_subtrees(window, &subtrees);
+                            crate::fast::layers::invalidate::note_scrolled(window, &fast_container);
+                            cx.notify(current_view);
+                        }
+                        if schedule_tick {
+                            schedule_scroll_handle_overscroll_tick(
+                                handle,
+                                current_view,
+                                subtrees.clone(),
+                                fast_container.clone(),
+                                window,
+                            );
+                        }
+                        return;
+                    }
+
                     if !crate::fast::layers::wheel::moves(
                         old_scroll_offset,
                         point(delta_x, delta_y),
@@ -4352,6 +4457,7 @@ pub(crate) struct ScrollHandleState {
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
     pub(crate) version: crate::fast::dependencies::StateVersion,
+    pub(crate) overscroll: crate::elements::overscroll::OverscrollState,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -4389,6 +4495,11 @@ impl ScrollHandle {
     pub fn offset(&self) -> Point<Pixels> {
         crate::fast::layers::invalidate::note_offset_read(&self.0.borrow().version);
         *self.0.borrow().offset.borrow()
+    }
+
+    /// Current normalized GPU stretch overscroll `(s_x, s_y)` in `[-0.06, 0.06]` (MS-449).
+    pub fn overscroll(&self) -> Point<f32> {
+        self.0.borrow().overscroll.stretch()
     }
 
     /// Get the maximum scroll offset.
@@ -4573,6 +4684,45 @@ impl ScrollHandle {
     pub fn children_count(&self) -> usize {
         self.0.borrow().child_bounds.len()
     }
+}
+
+fn schedule_scroll_handle_overscroll_tick(
+    handle: &ScrollHandle,
+    current_view: EntityId,
+    subtrees: smallvec::SmallVec<[GlobalElementId; 2]>,
+    fast_container: crate::fast::layers::invalidate::ScrollContainer,
+    window: &mut Window,
+) {
+    {
+        let mut state = handle.0.borrow_mut();
+        if state.overscroll.tick_scheduled || !state.overscroll.is_animating() {
+            return;
+        }
+        state.overscroll.tick_scheduled = true;
+    }
+    let handle = handle.clone();
+    window.schedule_overscroll_frame(move |window, cx| {
+        let now = window
+            .frame_signal_at()
+            .unwrap_or_else(std::time::Instant::now);
+        let still_running = {
+            let mut state = handle.0.borrow_mut();
+            state.overscroll.tick_scheduled = false;
+            state.overscroll.step(now)
+        };
+        crate::fast::retained::invalidate_retained_subtrees(window, &subtrees);
+        crate::fast::layers::invalidate::note_scrolled(window, &fast_container);
+        cx.notify(current_view);
+        if still_running {
+            schedule_scroll_handle_overscroll_tick(
+                &handle,
+                current_view,
+                subtrees,
+                fast_container,
+                window,
+            );
+        }
+    });
 }
 
 #[cfg(test)]

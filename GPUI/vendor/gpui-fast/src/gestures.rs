@@ -245,6 +245,34 @@ impl ScrollPhysics {
             }
         }
     }
+
+    /// Instantaneous speed (logical px/s) `elapsed` into a fling released at
+    /// `speed` px/s, used for overscroll boundary velocity absorption (MS-449).
+    fn fling_velocity(self, speed: f32, elapsed: Duration) -> f32 {
+        let duration = self.fling_duration(speed);
+        if duration.is_zero() || elapsed >= duration {
+            return 0.;
+        }
+        match self {
+            Self::Exponential { decay_per_ms } => {
+                let milliseconds = elapsed.as_secs_f32() * 1000.;
+                (speed * decay_per_ms.powf(milliseconds)).max(0.)
+            }
+            Self::FrictionSpline {
+                friction,
+                pixels_per_inch,
+            } => {
+                let deceleration = friction_spline::deceleration(speed, friction, pixels_per_inch);
+                let rate = friction_spline::deceleration_rate();
+                let total_distance = friction as f64
+                    * friction_spline::physical_coefficient(pixels_per_inch)
+                    * (rate / (rate - 1.) * deceleration).exp();
+                let progress = (elapsed.as_secs_f64() / duration.as_secs_f64()) as f32;
+                let vel_coeff = friction_spline::velocity_coefficient(progress);
+                ((total_distance * vel_coeff as f64) / duration.as_secs_f64()) as f32
+            }
+        }
+    }
 }
 
 /// The fling model of Android's `OverScroller.SplineOverScroller`,
@@ -323,6 +351,20 @@ mod friction_spline {
         let distance_upper = SPLINE_POSITION[index + 1];
         let velocity_coefficient = (distance_upper - distance_lower) / (time_upper - time_lower);
         distance_lower + (time - time_lower) * velocity_coefficient
+    }
+
+    /// Slope `d(distance_coefficient)/d(time)` at normalized fraction `time`.
+    pub(super) fn velocity_coefficient(time: f32) -> f32 {
+        if time >= 1. {
+            return 0.;
+        }
+        let time = time.max(0.);
+        let index = ((NB_SAMPLES as f32 * time) as usize).min(NB_SAMPLES - 1);
+        let time_lower = index as f32 / NB_SAMPLES as f32;
+        let time_upper = (index + 1) as f32 / NB_SAMPLES as f32;
+        let distance_lower = SPLINE_POSITION[index];
+        let distance_upper = SPLINE_POSITION[index + 1];
+        (distance_upper - distance_lower) / (time_upper - time_lower)
     }
 
     #[cfg(test)]
@@ -1041,6 +1083,21 @@ impl TouchGestureRecognizer {
     /// is never swallowed as a fling-catching touch (`TouchGestureState::Caught`).
     pub(crate) fn cancel_momentum(&mut self) -> bool {
         self.momentum.take().is_some()
+    }
+
+    /// Instantaneous velocity vector (logical px/s) of any active post-fling
+    /// momentum at `now` (MS-449).
+    pub(crate) fn momentum_velocity_at(&self, now: Instant) -> Option<Point<f32>> {
+        let momentum = self.momentum.as_ref()?;
+        let elapsed = now.saturating_duration_since(momentum.started_at);
+        let speed = self
+            .tuning
+            .scroll_physics
+            .fling_velocity(momentum.speed, elapsed);
+        Some(point(
+            momentum.direction.x * speed,
+            momentum.direction.y * speed,
+        ))
     }
 
     /// Advances post-fling momentum by one frame, returning the scroll step

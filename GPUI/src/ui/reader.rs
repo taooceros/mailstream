@@ -132,7 +132,17 @@ impl MailApp {
             }
         }
         if let Some(reply) = self.reply.as_ref().filter(|r| r.conversation == conversation.id) {
-            rows.push(own_presses(column().mt(px(space::S12))).child(reply.view.clone()).into_any_element());
+            let ime_shift = if compact { design::compact::ime_insets().bar_shift_y() } else { 0.0 };
+            rows.push(
+                own_presses(
+                    column()
+                        .relative()
+                        .when(ime_shift != 0.0, |d| d.top(px(ime_shift)))
+                        .mt(px(space::S12)),
+                )
+                .child(reply.view.clone())
+                .into_any_element(),
+            );
         }
         match self.reader_pin {
             // Taken up as the reader lays out: the end of what it holds now.

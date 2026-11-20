@@ -40,7 +40,7 @@ mod settings;
 mod settings_list;
 mod split;
 pub mod state;
-mod swipe;
+pub mod swipe;
 mod text_checking;
 mod ui;
 // Chat's videos, played in the log (MS-221, MS-398): GStreamer on Linux, AVPlayer on the Mac.

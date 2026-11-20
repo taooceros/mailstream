@@ -43,6 +43,9 @@ pub enum Step {
     Drag(f32),
     /// Fingers lifted or the button released; `velocity` in points per second, positive to the right.
     Release { offset: f32, velocity: f32 },
+    /// Android 14+ predictive back committed (`onBackInvoked`): MUST commit exit (`back = true`)
+    /// even when `offset.abs() < width / 3.0` (MS-449).
+    Commit { offset: f32 },
     /// The system took the gesture: the page returns from `offset` to where it was.
     Cancel(f32),
 }
@@ -477,6 +480,11 @@ impl Slide {
                 let (back, to) = settle(offset, velocity, width);
                 Slide::Settle { from: offset, to, velocity, start: now(), back }
             }
+            Step::Commit { offset } => {
+                let width = width.max(1.0);
+                let to = if offset < 0.0 { -width } else { width };
+                Slide::Settle { from: offset, to, velocity: 0.0, start: now(), back: true }
+            }
             Step::Cancel(offset) => Slide::settle(offset, 0., false),
         };
         true
@@ -635,12 +643,99 @@ impl DrawerSlide {
                 let opening = drawer_settle(pos, velocity, width, started_open);
                 DrawerSlide::Settle { from: pos, velocity, start: now(), opening }
             }
+            Step::Commit { offset: delta } => {
+                let pos = (base + delta).clamp(-width, 0.);
+                DrawerSlide::Settle { from: pos, velocity: 0., start: now(), opening: !started_open }
+            }
             Step::Cancel(delta) => {
                 let pos = (base + delta).clamp(-width, 0.);
                 DrawerSlide::Settle { from: pos, velocity: 0., start: now(), opening: started_open }
             }
         };
         true
+    }
+}
+
+/// Screen edge from which an Android 14+ predictive back gesture started (`BackEvent.EDGE_*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PredictiveEdge {
+    Left,
+    Right,
+}
+
+impl PredictiveEdge {
+    /// Converts Android `BackEvent.getSwipeEdge()` (`0 = EDGE_LEFT`, `1 = EDGE_RIGHT`).
+    pub fn from_android(edge: i32) -> Self {
+        if edge == 1 { Self::Right } else { Self::Left }
+    }
+
+    /// Horizontal slide direction: left edge drags right (`+1`), right edge drags left (`-1`).
+    fn sign(self) -> f32 {
+        match self {
+            Self::Left => 1.0,
+            Self::Right => -1.0,
+        }
+    }
+}
+
+/// Lifecycle event bridged from Android 14+ `OnBackAnimationCallback` (MS-449).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PredictiveBackEvent {
+    Started { progress: f32, edge: PredictiveEdge },
+    Progressed { progress: f32, edge: PredictiveEdge },
+    Invoked,
+    Cancelled,
+}
+
+/// Maps Android 14+ `OnBackAnimationCallback` events into [`Step`] values that drive [`Slide`]
+/// and [`DrawerSlide`] with live parallax/scrim while guaranteeing `Invoked` always commits exit.
+#[derive(Default, Debug)]
+pub struct PredictiveBack {
+    active: bool,
+    edge: Option<PredictiveEdge>,
+    offset: f32,
+}
+
+impl PredictiveBack {
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn reset(&mut self) {
+        self.active = false;
+        self.edge = None;
+        self.offset = 0.0;
+    }
+
+    /// Advances the predictive back state machine for a page of width `width` (logical points).
+    pub fn feed(&mut self, event: PredictiveBackEvent, width: f32) -> Step {
+        let width = width.max(1.0);
+        match event {
+            PredictiveBackEvent::Started { progress, edge }
+            | PredictiveBackEvent::Progressed { progress, edge } => {
+                self.active = true;
+                self.edge = Some(edge);
+                self.offset = edge.sign() * progress.clamp(0.0, 1.0) * width;
+                Step::Drag(self.offset)
+            }
+            PredictiveBackEvent::Invoked => {
+                let offset = if self.offset != 0.0 {
+                    self.offset
+                } else {
+                    self.edge.map_or(1.0, PredictiveEdge::sign)
+                };
+                self.reset();
+                Step::Commit { offset }
+            }
+            PredictiveBackEvent::Cancelled => {
+                if !self.active {
+                    return Step::Pass;
+                }
+                let offset = self.offset;
+                self.reset();
+                Step::Cancel(offset)
+            }
+        }
     }
 }
 
@@ -988,7 +1083,7 @@ mod tests {
                     self.dragged.push(offset);
                     true
                 }
-                Step::Release { offset, .. } => {
+                Step::Release { offset, .. } | Step::Commit { offset } => {
                     self.released = Some(offset);
                     cx.notify();
                     true
@@ -1113,6 +1208,11 @@ mod tests {
                     if settle(offset, velocity, 400.0).0 {
                         self.open = false;
                     }
+                    cx.notify();
+                    true
+                }
+                Step::Commit { .. } => {
+                    self.open = false;
                     cx.notify();
                     true
                 }
@@ -1435,5 +1535,240 @@ mod tests {
         let step2 = swipe.step_bounded(TouchPhase::Moved, 400.0, 0.0, t(4), true, 1.0, Some((0.0, 300.0)));
         assert!(matches!(step1, Step::Drag(d) if (d - 40.0).abs() < 0.01));
         assert!(matches!(step2, Step::Drag(d) if (d - 300.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn predictive_back_invoked_commits_even_below_one_third_threshold() {
+        let width = 400.0;
+        let mut pb = PredictiveBack::default();
+        let mut slide = Slide::Rest;
+
+        let s0 = pb.feed(PredictiveBackEvent::Started { progress: 0.0, edge: PredictiveEdge::Left }, width);
+        assert!(matches!(s0, Step::Drag(o) if o == 0.0));
+        assert!(slide.follow(s0, width));
+
+        // Progress 0.18 is well below `swipe::settle`'s 1/3 (0.333) threshold.
+        let s1 = pb.feed(PredictiveBackEvent::Progressed { progress: 0.18, edge: PredictiveEdge::Left }, width);
+        assert!(matches!(s1, Step::Drag(o) if (o - 72.0).abs() < 0.01));
+        assert!(slide.follow(s1, width));
+        assert!((slide.offset(width) - 72.0).abs() < 0.01);
+
+        // INVOKED must force commit (`back: true`, target `width`) instead of snapping back.
+        let s2 = pb.feed(PredictiveBackEvent::Invoked, width);
+        assert!(matches!(s2, Step::Commit { offset } if (offset - 72.0).abs() < 0.01));
+        assert!(slide.follow(s2, width));
+        assert!(matches!(slide, Slide::Settle { back: true, to, .. } if (to - width).abs() < 0.01));
+        let (end_pos, arrived) = slide.place(width, motion::PAGE.longest().as_secs_f32());
+        assert!((end_pos - width).abs() < 0.01);
+        assert!(arrived);
+    }
+
+    #[test]
+    fn predictive_back_right_edge_invoked_commits_negative_and_cancelled_rebounds_to_zero() {
+        let width = 400.0;
+        let mut pb = PredictiveBack::default();
+        let mut slide = Slide::Rest;
+
+        // Right-edge swipe drags left (negative) and INVOKED commits to `-width`.
+        slide.follow(pb.feed(PredictiveBackEvent::Started { progress: 0.05, edge: PredictiveEdge::Right }, width), width);
+        slide.follow(pb.feed(PredictiveBackEvent::Progressed { progress: 0.18, edge: PredictiveEdge::Right }, width), width);
+        assert!((slide.offset(width) + 72.0).abs() < 0.01);
+        slide.follow(pb.feed(PredictiveBackEvent::Invoked, width), width);
+        assert!(matches!(slide, Slide::Settle { back: true, to, .. } if (to + width).abs() < 0.01));
+
+        // CANCELLED smoothly springs back to 0 without closing (`back: false`).
+        let mut slide = Slide::Rest;
+        slide.follow(pb.feed(PredictiveBackEvent::Started { progress: 0.0, edge: PredictiveEdge::Left }, width), width);
+        slide.follow(pb.feed(PredictiveBackEvent::Progressed { progress: 0.45, edge: PredictiveEdge::Left }, width), width);
+        let cancel_step = pb.feed(PredictiveBackEvent::Cancelled, width);
+        assert!(matches!(cancel_step, Step::Cancel(o) if (o - 180.0).abs() < 0.01));
+        assert!(slide.follow(cancel_step, width));
+        assert!(matches!(slide, Slide::Settle { back: false, to, .. } if to == 0.0));
+        let (end_pos, arrived) = slide.place(width, motion::PAGE.longest().as_secs_f32());
+        assert_eq!(end_pos, 0.0);
+        assert!(arrived);
+
+    }
+    /// Mailstream (MS-449): pulling past `offset = 0` on a promoted Scroll Layer must keep
+    /// `scroll_offset` strictly clamped at `0`, populate `scene.overscroll_stretch`, and keep
+    /// `Decision::Composite` with `tiles_dirtied == 0` across drag and spring rebound.
+    #[gpui::test]
+    fn overscroll_at_zero_keeps_scroll_layer_composite_with_zero_dirty_tiles(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            AppContext as _, InteractiveElement as _, IntoElement, ParentElement as _, PlatformInput,
+            Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, div, rgb,
+        };
+        struct ScrollerView {
+            handle: ScrollHandle,
+        }
+        impl Render for ScrollerView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(rgb(0xffffff)).child(
+                    div()
+                        .id("overscroll-test-scroller")
+                        .overflow_y_scroll()
+                        .track_scroll(&self.handle)
+                        .w(px(220.))
+                        .h(px(160.))
+                        .children((0..30).map(|i| {
+                            div().w(px(200.)).h(px(24.)).bg(rgb(0x202020 + i * 0x040404))
+                        })),
+                )
+            }
+        }
+        let handle = ScrollHandle::new();
+        let window_handle = cx.add_window({
+            let handle = handle.clone();
+            move |_, _| ScrollerView { handle }
+        });
+        let window: gpui::AnyWindowHandle = window_handle.into();
+        cx.update_window(window, |_, window, cx| {
+            window.set_overscroll_enabled(true);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        let send_scroll = |cx: &mut gpui::TestAppContext, dy: f32, phase: TouchPhase| {
+            cx.update_window(window, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Scroll(ScrollEvent {
+                        position: point(px(20.), px(20.)),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                        modifiers: Default::default(),
+                        touch_phase: phase,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+        };
+        // Promote the scroll container to a Scroll Layer, then scroll back to offset 0.
+        send_scroll(cx, -20., TouchPhase::Moved);
+        send_scroll(cx, -20., TouchPhase::Moved);
+        send_scroll(cx, 40., TouchPhase::Moved);
+        assert_eq!(handle.offset().y, px(0.));
+        let (was_composited, dirtied_before) = cx
+            .update_window(window, |_, window, _| {
+                (
+                    window.scroll_layer_composited("overscroll-test-scroller"),
+                    window.layout_stats().tiles_dirtied,
+                )
+            })
+            .unwrap();
+        assert!(was_composited, "scroll layer must be promoted and composited before overscroll");
+
+        // Pull past offset = 0 across 4 frames: must stay clamped, stretched, Composite, 0 dirty tiles.
+        let mut last_stretch = 0.0_f32;
+        for step in 0..4 {
+            send_scroll(cx, 35., TouchPhase::Moved);
+            assert_eq!(handle.offset().y, px(0.), "offset must stay clamped at 0 on step {step}");
+            let stretch = handle.overscroll().y;
+            assert!(stretch > last_stretch && stretch <= 0.06, "expected increasing stretch <= 0.06, got {stretch}");
+            last_stretch = stretch;
+            let (composited, dirtied_now, scene_stretch) = cx
+                .update_window(window, |_, window, _| {
+                    (
+                        window.scroll_layer_composited("overscroll-test-scroller"),
+                        window.layout_stats().tiles_dirtied,
+                        window.painted_scene().overscroll_stretch,
+                    )
+                })
+                .unwrap();
+            assert!(composited, "overscroll drag step {step} must keep Decision::Composite");
+            assert_eq!(dirtied_now - dirtied_before, 0, "overscroll drag must dirty 0 tiles");
+            let scene_stretch = scene_stretch.expect("scene must carry overscroll_stretch");
+            assert!((scene_stretch.stretch.y - stretch).abs() < 1e-6);
+        }
+
+        // Release finger: critically damped spring ticks while preserving Composite & 0 dirty tiles.
+        send_scroll(cx, 0., TouchPhase::Ended);
+        let (composited, dirtied_after) = cx
+            .update_window(window, |_, window, _| {
+                (
+                    window.scroll_layer_composited("overscroll-test-scroller"),
+                    window.layout_stats().tiles_dirtied,
+                )
+            })
+            .unwrap();
+        assert!(composited, "overscroll release must keep Decision::Composite");
+        assert_eq!(dirtied_after - dirtied_before, 0, "overscroll release must dirty 0 tiles");
+    }
+
+    #[gpui::test]
+    fn list_state_overscroll_stretches_at_top_and_populates_scene_stretch(cx: &mut gpui::TestAppContext) {
+        use gpui::{
+            AppContext as _, IntoElement, ListAlignment, ListState, ParentElement as _, PlatformInput,
+            Render, Styled as _, div, list, rgb,
+        };
+        struct ListView {
+            state: ListState,
+        }
+        impl Render for ListView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(rgb(0xffffff)).child(
+                    list(self.state.clone(), |ix, _, _| {
+                        div()
+                            .w(px(220.))
+                            .h(px(32.))
+                            .bg(rgb(0x181818 + (ix as u32) * 0x050505))
+                            .into_any_element()
+                    })
+                    .w(px(220.))
+                    .h(px(160.)),
+                )
+            }
+        }
+        let state = ListState::new(20, ListAlignment::Top, px(200.));
+        let window_handle = cx.add_window({
+            let state = state.clone();
+            move |_, _| ListView { state }
+        });
+        let window: gpui::AnyWindowHandle = window_handle.into();
+        cx.update_window(window, |_, window, cx| {
+            window.set_overscroll_enabled(true);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::Scroll(ScrollEvent {
+                    position: point(px(30.), px(30.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(80.))),
+                    modifiers: Default::default(),
+                    touch_phase: TouchPhase::Moved,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(state.logical_scroll_top().item_ix, 0);
+        assert_eq!(state.logical_scroll_top().offset_in_item, px(0.));
+        let stretch = state.overscroll().y;
+        assert!(stretch > 0.01 && stretch <= 0.06, "got stretch={stretch}");
+        let scene_stretch = cx
+            .update_window(window, |_, window, _| window.painted_scene().overscroll_stretch)
+            .unwrap()
+            .expect("list overscroll must populate scene.overscroll_stretch");
+        assert!((scene_stretch.stretch.y - stretch).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ime_insets_keep_single_target_layout_and_smooth_bar_shift_across_animation() {
+        use crate::design::compact::ImeInsets;
+        for step in 0..=30 {
+            let bottom = 320.0 * (step as f32 / 30.0);
+            let ime = ImeInsets { bottom, target_bottom: 320.0, animating: true };
+            assert_eq!(ime.layout_bottom(), 320.0);
+            assert!((ime.bar_shift_y() - (320.0 - bottom)).abs() < 1e-4);
+        }
+        let settled = ImeInsets { bottom: 320.0, target_bottom: 320.0, animating: false };
+        assert_eq!(settled.layout_bottom(), 320.0);
+        assert_eq!(settled.bar_shift_y(), 0.0);
+        let closing = ImeInsets { bottom: 160.0, target_bottom: 0.0, animating: true };
+        assert_eq!(closing.layout_bottom(), 0.0);
+        assert_eq!(closing.bar_shift_y(), -160.0);
     }
 }

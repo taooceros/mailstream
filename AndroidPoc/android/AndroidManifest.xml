@@ -17,13 +17,14 @@
         android:theme="@style/Theme.Mailstream"
         android:allowBackup="false"
         android:hasCode="true"
-        android:extractNativeLibs="false">
+        android:extractNativeLibs="false"
+        android:enableOnBackInvokedCallback="true">
         <activity
             android:name="dev.gpui.mobile.GpuiInputActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:configChanges="orientation|keyboardHidden|keyboard|navigation|screenSize|screenLayout|smallestScreenSize|uiMode|density|fontScale|locale|layoutDirection|colorMode|touchscreen|mcc|mnc"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustNothing">
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="mailstream_android_poc" />

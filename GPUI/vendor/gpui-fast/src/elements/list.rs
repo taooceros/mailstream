@@ -76,6 +76,7 @@ pub(crate) struct StateInner {
     item_measurement_ready: Option<Box<dyn Fn(usize, &App) -> bool>>,
     pub(crate) follow_state: FollowState,
     pub(crate) version: crate::fast::dependencies::StateVersion,
+    pub(crate) overscroll: crate::elements::overscroll::OverscrollState,
 }
 
 #[derive(Clone, Copy)]
@@ -329,6 +330,7 @@ impl ListState {
             item_measurement_ready: None,
             follow_state: FollowState::default(),
             version: crate::fast::dependencies::StateVersion::default(),
+            overscroll: crate::elements::overscroll::OverscrollState::default(),
         })));
         state.splice(0..0, item_count);
         state
@@ -364,6 +366,7 @@ impl ListState {
             state.measuring_behavior.reset();
             state.set_scroll_anchor(None);
             state.scrollbar_drag_start_height = None;
+            state.overscroll.reset();
             state.items.summary().count
         };
 
@@ -559,6 +562,11 @@ impl ListState {
     pub fn logical_scroll_top(&self) -> ListOffset {
         crate::fast::layers::invalidate::note_offset_read(&self.0.borrow().version);
         self.0.borrow().logical_scroll_top()
+    }
+
+    /// Current normalized GPU stretch overscroll `(s_x, s_y)` in `[-0.06, 0.06]` (MS-449).
+    pub fn overscroll(&self) -> Point<f32> {
+        self.0.borrow().overscroll.stretch()
     }
 
     /// Scroll the list by the given offset
@@ -1719,9 +1727,107 @@ impl Element for List {
         let height = bounds.size.height;
         let scroll_top = prepaint.layout.scroll_top;
         let hitbox_id = prepaint.hitbox.id;
+        let viewport_size = bounds.size;
+        let subtrees = crate::fast::retained::enclosing_retained_subtrees(window);
         let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
+                if window.overscroll_active() {
+                    let event_delta = event.delta.pixel_delta(px(20.));
+                    let (remaining_y, overscroll_changed, schedule_tick) = {
+                        let mut state = list_state.0.borrow_mut();
+                        if state.reset {
+                            return;
+                        }
+                        let padding = state.last_padding.unwrap_or_default();
+                        let scroll_max = (state.items.summary().height
+                            + padding.top
+                            + padding.bottom
+                            - height)
+                            .max(px(0.));
+                        let current_top = state.scroll_top(&state.logical_scroll_top());
+                        let now = window
+                            .frame_signal_at()
+                            .unwrap_or_else(std::time::Instant::now);
+                        if let Some(v_rem) = window.active_touch_momentum_velocity() {
+                            let unclamped = current_top - event_delta.y;
+                            let clamped = unclamped.max(px(0.)).min(scroll_max);
+                            let applied_y = current_top - clamped;
+                            let unused_y = (event_delta.y - applied_y).abs() > px(0.01);
+                            let mut changed = false;
+                            let mut tick = false;
+                            if unused_y
+                                && state.overscroll.absorb_fling(
+                                    false,
+                                    true,
+                                    v_rem,
+                                    viewport_size,
+                                    now,
+                                )
+                            {
+                                window.cancel_touch_momentum();
+                                changed = true;
+                                tick = true;
+                            }
+                            (applied_y, changed, tick)
+                        } else {
+                            let at_start = current_top <= px(0.5);
+                            let at_end = current_top >= scroll_max - px(0.5);
+                            let (rem, mut changed) = state.overscroll.drag(
+                                point(px(0.), event_delta.y),
+                                false,
+                                true,
+                                false,
+                                false,
+                                at_start,
+                                at_end,
+                                viewport_size,
+                            );
+                            let mut tick = false;
+                            if matches!(
+                                event.touch_phase,
+                                crate::TouchPhase::Ended | crate::TouchPhase::Cancelled
+                            ) && state.overscroll.release(now)
+                            {
+                                changed = true;
+                                tick = true;
+                            }
+                            (rem.y, changed, tick)
+                        }
+                    };
+                    if remaining_y != px(0.) {
+                        accumulated_scroll_delta = accumulated_scroll_delta.coalesce(
+                            ScrollDelta::Pixels(point(px(0.), remaining_y)),
+                        );
+                        let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
+                        list_state.0.borrow_mut().scroll(
+                            &scroll_top,
+                            height,
+                            pixel_delta,
+                            current_view,
+                            window,
+                            cx,
+                        );
+                    } else if overscroll_changed {
+                        let version = list_state.0.borrow().version.clone();
+                        crate::fast::retained::invalidate_retained_subtrees(window, &subtrees);
+                        crate::fast::layers::invalidate::note_list_scrolled(
+                            window,
+                            &version,
+                            current_view,
+                        );
+                        cx.notify(current_view);
+                    }
+                    if schedule_tick {
+                        schedule_list_overscroll_tick(
+                            &list_state,
+                            current_view,
+                            subtrees.clone(),
+                            window,
+                        );
+                    }
+                    return;
+                }
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
                 list_state.0.borrow_mut().scroll(
@@ -1736,6 +1842,12 @@ impl Element for List {
         });
 
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            let overscroll_stretch = self.state.0.borrow().overscroll.stretch();
+            let overscroll_start =
+                (overscroll_stretch.x != 0.0 || overscroll_stretch.y != 0.0).then(|| {
+                    let viewport = window.snapped_content_mask().bounds;
+                    (viewport, window.next_frame.scene.begin_overscroll(viewport))
+                });
             crate::fast::layers::lists::begin_paint_list(window, cx, &self.state);
             for item in &mut prepaint.layout.item_layouts {
                 crate::fast::layers::lists::paint_row(
@@ -1746,8 +1858,46 @@ impl Element for List {
                 );
             }
             crate::fast::layers::lists::end_paint_list(window, cx, &self.state);
+            if let Some((viewport, order_start)) = overscroll_start {
+                window
+                    .next_frame
+                    .scene
+                    .end_overscroll(viewport, order_start, overscroll_stretch);
+            }
         });
     }
+}
+
+fn schedule_list_overscroll_tick(
+    list_state: &ListState,
+    current_view: EntityId,
+    subtrees: smallvec::SmallVec<[GlobalElementId; 2]>,
+    window: &mut Window,
+) {
+    {
+        let mut state = list_state.0.borrow_mut();
+        if state.overscroll.tick_scheduled || !state.overscroll.is_animating() {
+            return;
+        }
+        state.overscroll.tick_scheduled = true;
+    }
+    let list_state = list_state.clone();
+    window.schedule_overscroll_frame(move |window, cx| {
+        let now = window
+            .frame_signal_at()
+            .unwrap_or_else(std::time::Instant::now);
+        let (still_running, version) = {
+            let mut state = list_state.0.borrow_mut();
+            state.overscroll.tick_scheduled = false;
+            (state.overscroll.step(now), state.version.clone())
+        };
+        crate::fast::retained::invalidate_retained_subtrees(window, &subtrees);
+        crate::fast::layers::invalidate::note_list_scrolled(window, &version, current_view);
+        cx.notify(current_view);
+        if still_running {
+            schedule_list_overscroll_tick(&list_state, current_view, subtrees, window);
+        }
+    });
 }
 
 fn content_insets(style: &Style, size: Size<Pixels>, rem_size: Pixels) -> Edges<Pixels> {

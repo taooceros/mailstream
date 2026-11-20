@@ -235,6 +235,15 @@ impl ComposeColumn {
         draft.update(cx, |draft, cx| draft.request_close(cx));
     }
 
+    /// Closes the currently active draft tab (used by Android system Back / predictive back).
+    pub fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.tabs.is_empty() || self.stashed {
+            return false;
+        }
+        self.close_tab(self.active, window, cx);
+        true
+    }
+
     /// A draft sent or discarded leaves; the keyboard goes to the next one shown, or back to the
     /// mail.
     fn remove(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {

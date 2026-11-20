@@ -16,13 +16,17 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.WindowInsetsAnimation;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
+import android.window.BackEvent;
+import android.window.OnBackAnimationCallback;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import java.util.List;
 
 /**
  * Minimal NativeActivity host bridging Android IME (including CJK composing text) to gpui-mobile's
@@ -38,6 +42,12 @@ public class GpuiInputActivity extends NativeActivity {
     private volatile long imeSession = 0;
     private int inputKind = 0;
     private ImeProxyView imeProxy;
+    private volatile boolean backEnabled = false;
+    private Object backCallback = null;
+    private boolean backCallbackRegistered = false;
+    private boolean imeAnimating = false;
+    private int lastNavBarBottomPx = 0;
+    private int imeTargetBottomPx = 0;
 
     static {
         System.loadLibrary("mailstream_android_poc");
@@ -47,6 +57,10 @@ public class GpuiInputActivity extends NativeActivity {
     private static native void nativeInsets(int top, int bottom, int left, int right, float density);
     private static native void nativeDisplayMetrics(float density, float fontScale);
     private static native void nativeBack();
+    private static native void nativeImeInsets(int imeBottomPx, int targetBottomPx, boolean animating, float density);
+    private static native void nativeBackStarted(float progress, int edge);
+    private static native void nativeBackProgressed(float progress, int edge);
+    private static native void nativeBackCancelled();
     private static native void nativeTrimMemory(int level);
 
     @Override
@@ -66,12 +80,19 @@ public class GpuiInputActivity extends NativeActivity {
         pushDisplayMetrics(initialConfig);
         decor.setOnApplyWindowInsetsListener((v, insets) -> {
             int top, bottom, left, right;
+            int imeBottom = -1;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
                 top = bars.top;
                 bottom = bars.bottom;
                 left = bars.left;
                 right = bars.right;
+                lastNavBarBottomPx = bars.bottom;
+                if (!imeAnimating) {
+                    Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                    imeBottom = Math.max(0, ime.bottom - bars.bottom);
+                    imeTargetBottomPx = imeBottom;
+                }
             } else {
                 top = insets.getSystemWindowInsetTop();
                 bottom = insets.getSystemWindowInsetBottom();
@@ -82,25 +103,197 @@ public class GpuiInputActivity extends NativeActivity {
             if (density <= 0f) density = 1f;
             try {
                 nativeInsets(top, bottom, left, right, density);
+                if (imeBottom >= 0) {
+                    nativeImeInsets(imeBottom, imeBottom, false, density);
+                }
             } catch (UnsatisfiedLinkError ignored) {
             }
             return v.onApplyWindowInsets(insets);
         });
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            installImeAnimationCallback(decor);
+        }
         decor.requestApplyInsets();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                new OnBackInvokedCallback() {
-                    @Override
-                    public void onBackInvoked() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            backCallback = createPredictiveBackCallback();
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            backCallback = createLegacyOnBackInvokedCallback();
+        }
+        // Keep back callback unregistered at startup on the root inbox so Android 14+
+        // plays the native Back-to-Home preview until Rust reports an in-app back target.
+    }
+
+    private void installImeAnimationCallback(final View decor) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return;
+        }
+        decor.setWindowInsetsAnimationCallback(
+            new WindowInsetsAnimation.Callback(WindowInsetsAnimation.Callback.DISPATCH_MODE_STOP) {
+                @Override
+                public void onPrepare(WindowInsetsAnimation animation) {
+                    if ((animation.getTypeMask() & WindowInsets.Type.ime()) != 0) {
+                        imeAnimating = true;
+                    }
+                }
+
+                @Override
+                public WindowInsetsAnimation.Bounds onStart(
+                        WindowInsetsAnimation animation,
+                        WindowInsetsAnimation.Bounds bounds) {
+                    if ((animation.getTypeMask() & WindowInsets.Type.ime()) != 0) {
+                        imeAnimating = true;
+                        WindowInsets root = decor.getRootWindowInsets();
+                        boolean opening = root != null && root.isVisible(WindowInsets.Type.ime());
+                        int navBottom = lastNavBarBottomPx;
+                        if (root != null) {
+                            Insets bars = root.getInsets(
+                                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                            navBottom = bars.bottom;
+                            lastNavBarBottomPx = navBottom;
+                        }
+                        int upper = Math.max(0, bounds.getUpperBound().bottom - navBottom);
+                        imeTargetBottomPx = opening ? upper : 0;
+                        int initialBottom = opening ? 0 : upper;
+                        float density = getResources().getDisplayMetrics().density;
+                        if (density <= 0f) density = 1f;
                         try {
-                            nativeBack();
+                            nativeImeInsets(initialBottom, imeTargetBottomPx, true, density);
+                        } catch (UnsatisfiedLinkError ignored) {
+                        }
+                    }
+                    return bounds;
+                }
+
+                @Override
+                public WindowInsets onProgress(
+                        WindowInsets insets,
+                        List<WindowInsetsAnimation> runningAnimations) {
+                    boolean hasIme = false;
+                    for (int i = 0; i < runningAnimations.size(); i++) {
+                        if ((runningAnimations.get(i).getTypeMask() & WindowInsets.Type.ime()) != 0) {
+                            hasIme = true;
+                            break;
+                        }
+                    }
+                    if (hasIme) {
+                        Insets bars = insets.getInsets(
+                            WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                        Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                        lastNavBarBottomPx = bars.bottom;
+                        int imeBottom = Math.max(0, ime.bottom - bars.bottom);
+                        float density = getResources().getDisplayMetrics().density;
+                        if (density <= 0f) density = 1f;
+                        try {
+                            nativeImeInsets(imeBottom, imeTargetBottomPx, true, density);
+                        } catch (UnsatisfiedLinkError ignored) {
+                        }
+                    }
+                    return insets;
+                }
+
+                @Override
+                public void onEnd(WindowInsetsAnimation animation) {
+                    if ((animation.getTypeMask() & WindowInsets.Type.ime()) != 0) {
+                        imeAnimating = false;
+                        int finalBottom = 0;
+                        WindowInsets root = decor.getRootWindowInsets();
+                        if (root != null) {
+                            Insets bars = root.getInsets(
+                                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                            lastNavBarBottomPx = bars.bottom;
+                            if (root.isVisible(WindowInsets.Type.ime())) {
+                                Insets ime = root.getInsets(WindowInsets.Type.ime());
+                                finalBottom = Math.max(0, ime.bottom - bars.bottom);
+                            }
+                        }
+                        imeTargetBottomPx = finalBottom;
+                        float density = getResources().getDisplayMetrics().density;
+                        if (density <= 0f) density = 1f;
+                        try {
+                            nativeImeInsets(finalBottom, finalBottom, false, density);
                         } catch (UnsatisfiedLinkError ignored) {
                         }
                     }
                 }
-            );
+            }
+        );
+    }
+
+    private Object createLegacyOnBackInvokedCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return null;
         }
+        return new OnBackInvokedCallback() {
+            @Override
+            public void onBackInvoked() {
+                try {
+                    nativeBack();
+                } catch (UnsatisfiedLinkError ignored) {
+                }
+            }
+        };
+    }
+
+    private Object createPredictiveBackCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return null;
+        }
+        return new OnBackAnimationCallback() {
+            @Override
+            public void onBackStarted(BackEvent backEvent) {
+                try {
+                    nativeBackStarted(backEvent.getProgress(), backEvent.getSwipeEdge());
+                } catch (UnsatisfiedLinkError ignored) {
+                }
+            }
+
+            @Override
+            public void onBackProgressed(BackEvent backEvent) {
+                try {
+                    nativeBackProgressed(backEvent.getProgress(), backEvent.getSwipeEdge());
+                } catch (UnsatisfiedLinkError ignored) {
+                }
+            }
+
+            @Override
+            public void onBackInvoked() {
+                try {
+                    nativeBack();
+                } catch (UnsatisfiedLinkError ignored) {
+                }
+            }
+
+            @Override
+            public void onBackCancelled() {
+                try {
+                    nativeBackCancelled();
+                } catch (UnsatisfiedLinkError ignored) {
+                }
+            }
+        };
+    }
+
+    public void gpuiSetBackEnabled(final boolean enabled) {
+        backEnabled = enabled;
+        runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || backCallback == null) {
+                return;
+            }
+            if (enabled == backCallbackRegistered) {
+                return;
+            }
+            OnBackInvokedDispatcher dispatcher = getOnBackInvokedDispatcher();
+            if (enabled) {
+                dispatcher.registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    (OnBackInvokedCallback) backCallback
+                );
+                backCallbackRegistered = true;
+            } else {
+                dispatcher.unregisterOnBackInvokedCallback((OnBackInvokedCallback) backCallback);
+                backCallbackRegistered = false;
+            }
+        });
     }
 
     @Override
@@ -159,6 +352,10 @@ public class GpuiInputActivity extends NativeActivity {
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
+        if (!backEnabled) {
+            super.onBackPressed();
+            return;
+        }
         try {
             nativeBack();
         } catch (UnsatisfiedLinkError ignored) {

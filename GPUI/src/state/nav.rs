@@ -811,6 +811,136 @@ impl MailApp {
         cx.notify();
     }
 
+    /// Whether an in-app back target exists (used to register/unregister Android's
+    /// `OnBackInvokedCallback` so the root inbox yields to native Back-to-Home preview, MS-449).
+    pub fn has_back_target(&self, cx: &App) -> bool {
+        let compose_open = {
+            let column = self.compose.read(cx);
+            column.docked() || column.floats()
+        };
+        if self.settings.is_some()
+            || self.context_menu.is_some()
+            || self.tag_editor.is_some()
+            || compose_open
+            || self.drawer_slide.is_open()
+            || self.selection().is_some()
+        {
+            return true;
+        }
+        if self.chat_view.is_some() {
+            return self.chat.read(cx).has_back_target();
+        }
+        if self.calendar_view {
+            return self.calendar.read(cx).has_back_target();
+        }
+        self.live_layers().next().is_some()
+            || self.query.is_some()
+            || self.compact_search
+            || self.reply.is_some()
+    }
+
+    /// Bridges Android 14+ `OnBackAnimationCallback` events (`Started`/`Progressed`/`Invoked`/
+    /// `Cancelled`) directly into `swipe::Step` to drive live parallax/scrim on pages and the
+    /// compact drawer, guaranteeing `Invoked` always commits exit even when `progress < 1/3` (MS-449).
+    pub fn handle_predictive_back(
+        &mut self,
+        event: crate::swipe::PredictiveBackEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::swipe::PredictiveBackEvent;
+        if matches!(event, PredictiveBackEvent::Started { .. } | PredictiveBackEvent::Invoked) {
+            window.cancel_touch_momentum();
+        }
+        let compose_open = {
+            let column = self.compose.read(cx);
+            column.docked() || column.floats()
+        };
+        // Modal overlays without a horizontal page Slide dismiss directly on Invoked.
+        if self.context_menu.is_some()
+            || self.tag_editor.is_some()
+            || self.settings.is_some()
+            || compose_open
+            || self.selection().is_some()
+        {
+            if matches!(event, PredictiveBackEvent::Invoked) {
+                self.predictive_back.reset();
+                self.predictive_back_drawer = false;
+                if self.context_menu.is_some() {
+                    self.dismiss_menu(window, cx);
+                } else if self.tag_editor.take().is_some() {
+                    window.focus(&self.focus, cx);
+                    cx.notify();
+                } else if compose_open {
+                    self.compose.update(cx, |column, cx| {
+                        column.close_active(window, cx);
+                    });
+                } else {
+                    self.back(&Back, window, cx);
+                }
+            }
+            return;
+        }
+
+        // Open compact navigation drawer follows predictive back smoothly.
+        if self.drawer_slide.is_open() || self.predictive_back_drawer {
+            let width = self.drawer_width.max(1.0);
+            match event {
+                PredictiveBackEvent::Started { progress, .. } => {
+                    self.predictive_back_drawer = true;
+                    self.drawer_gesture_base.set(0.0);
+                    self.drawer_gesture_started_open.set(true);
+                    let delta = -progress.clamp(0.0, 1.0) * width;
+                    self.follow_drawer(Step::Drag(delta), cx);
+                }
+                PredictiveBackEvent::Progressed { progress, .. } => {
+                    let delta = -progress.clamp(0.0, 1.0) * width;
+                    self.follow_drawer(Step::Drag(delta), cx);
+                }
+                PredictiveBackEvent::Invoked => {
+                    self.predictive_back_drawer = false;
+                    let pos = self.drawer_slide.offset(width);
+                    self.follow_drawer(Step::Commit { offset: pos }, cx);
+                }
+                PredictiveBackEvent::Cancelled => {
+                    self.predictive_back_drawer = false;
+                    let pos = self.drawer_slide.offset(width);
+                    self.follow_drawer(Step::Cancel(pos), cx);
+                }
+            }
+            return;
+        }
+
+        if self.chat_view.is_some() {
+            self.chat.update(cx, |chat, cx| chat.handle_predictive_back(event, window, cx));
+            return;
+        }
+        if self.calendar_view {
+            self.calendar.update(cx, |cal, cx| cal.handle_predictive_back(event, window, cx));
+            return;
+        }
+
+        // Mail layers (Reader / Bundle / Search): drive `Slide::follow` directly.
+        if matches!(event, PredictiveBackEvent::Started { .. }) {
+            self.finish_closing();
+            *self.gesture_layer.borrow_mut() = self.layers.last().map(Layer::id);
+        }
+        if let Some(last_idx) = self.layers.len().checked_sub(1) {
+            let travel = self.travel(last_idx).max(1.0);
+            let step = self.predictive_back.feed(event, travel);
+            self.follow(step, cx);
+            return;
+        }
+
+        // Fallback for non-layered Mail states (inline compact search / query / reply box).
+        if matches!(event, PredictiveBackEvent::Invoked) {
+            self.predictive_back.reset();
+            self.back(&Back, window, cx);
+        } else if matches!(event, PredictiveBackEvent::Cancelled) {
+            self.predictive_back.reset();
+        }
+    }
+
     /// The list's ‹ (its title row): the open bundle goes, a conversation beside the list staying
     /// open (MS-307); without a bundle, as Back.
     pub fn list_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {

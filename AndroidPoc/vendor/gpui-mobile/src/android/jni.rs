@@ -1736,6 +1736,78 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeBack(
     super::text_input::enqueue_back();
 }
 
+/// Receive Android 14+ `OnBackAnimationCallback.onBackStarted` without touching GPUI on UI thread.
+///
+/// # Safety
+/// Called by JNI from `GpuiInputActivity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeBackStarted(
+    _env: *mut c_void,
+    _class: *mut c_void,
+    progress: f32,
+    edge: i32,
+) {
+    super::text_input::enqueue_predictive_back(super::text_input::PredictiveBackEvent::Started {
+        progress,
+        edge,
+    });
+}
+
+/// Receive Android 14+ `OnBackAnimationCallback.onBackProgressed` without touching GPUI on UI thread.
+///
+/// # Safety
+/// Called by JNI from `GpuiInputActivity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeBackProgressed(
+    _env: *mut c_void,
+    _class: *mut c_void,
+    progress: f32,
+    edge: i32,
+) {
+    super::text_input::enqueue_predictive_back(
+        super::text_input::PredictiveBackEvent::Progressed { progress, edge },
+    );
+}
+
+/// Receive Android 14+ `OnBackAnimationCallback.onBackCancelled` without touching GPUI on UI thread.
+///
+/// # Safety
+/// Called by JNI from `GpuiInputActivity`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeBackCancelled(
+    _env: *mut c_void,
+    _class: *mut c_void,
+) {
+    super::text_input::enqueue_predictive_back(super::text_input::PredictiveBackEvent::Cancelled);
+}
+
+/// Schedules a single vsync frame for lock-free IME animation updates (MS-449) without invoking
+/// `request_config_refresh()` or dropping Scroll Layers.
+pub fn schedule_ime_frame() {
+    super::text_input::mark_ime_insets_dirty();
+}
+
+/// Registers or unregisters `GpuiInputActivity`'s system back callback so the root inbox yields
+/// to Android's native Back-to-Home preview animation (MS-449).
+pub fn set_back_enabled_android(enabled: bool) {
+    static LAST_BACK_ENABLED: AtomicBool = AtomicBool::new(false);
+    if LAST_BACK_ENABLED.swap(enabled, Ordering::AcqRel) == enabled {
+        return;
+    }
+    let _ = with_env(|env| {
+        let activity = activity(env)?;
+        let result = env.call_method(
+            &activity,
+            jni::jni_str!("gpuiSetBackEnabled"),
+            jni::jni_sig!("(Z)V"),
+            &[JValue::Bool(enabled)],
+        );
+        env.exception_clear();
+        result.map_err(|e| e.to_string())?;
+        Ok(())
+    });
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 // ── JNI export for GpuiActivity splash screen ────────────────────────────────

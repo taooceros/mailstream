@@ -385,10 +385,11 @@ impl MailApp {
                         .child(label),
                 )
         };
+        let ime_shift = design::compact::ime_insets().bar_shift_y();
         div()
             .id("compact-reply-bar")
             .absolute()
-            .bottom_0()
+            .bottom(px(-ime_shift))
             .left_0()
             .right_0()
             .child(bottom_scrim(p.background, design::compact::REPLY_BAR_HEIGHT + space::S32))

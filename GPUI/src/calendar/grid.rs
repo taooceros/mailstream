@@ -360,6 +360,15 @@ impl CalendarPane {
                 cx.notify();
                 true
             }
+            Step::Commit { offset } => {
+                let step = if offset < 0. { 1 } else { -1 };
+                self.close_week_popover(cx);
+                self.move_focus(step);
+                let from = offset + step as f32 * width;
+                self.pan = Pan::Settle { from, velocity: 0., start: frame_clock::now() };
+                cx.notify();
+                true
+            }
             Step::Cancel(offset) => {
                 self.pan = Pan::Settle { from: offset, velocity: 0., start: frame_clock::now() };
                 cx.notify();

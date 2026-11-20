@@ -1011,6 +1011,7 @@ pub struct ChatPane {
     slide: Slide,
     gesture_target: RefCell<Option<SwipeTarget>>,
     slide_target: Option<SwipeTarget>,
+    predictive_back: crate::swipe::PredictiveBack,
     /// How far the open space's log is scrolled, for its toolbar, and the height of its heading
     /// (the title and its pills) as last laid out.
     log_top: ReaderTop,
@@ -1097,6 +1098,7 @@ impl ChatPane {
             slide: Slide::Rest,
             gesture_target: RefCell::new(None),
             slide_target: None,
+            predictive_back: crate::swipe::PredictiveBack::default(),
             log_top: ReaderTop::Top,
             head_height: Rc::new(Cell::new(0.)),
             logs: HashMap::new(),
@@ -1210,6 +1212,60 @@ impl ChatPane {
             self.list_width = list_width;
             self.two_pane = two_pane;
             cx.notify();
+        }
+    }
+
+    /// Whether Chat currently has an in-app back target (message sheet, video lightbox, open
+    /// thread, open space/new-chat form, or active search query, MS-449).
+    pub fn has_back_target(&self) -> bool {
+        self.message_sheet.is_some()
+            || self.has_video_lightbox()
+            || self.has_open_thread()
+            || !matches!(self.view, View::Spaces)
+            || !self.query.is_empty()
+    }
+
+    /// Drives Chat's open thread or space/form page with Android 14+ predictive back events,
+    /// guaranteeing `Invoked` commits exit even when `progress < 1/3` (MS-449).
+    pub fn handle_predictive_back(
+        &mut self,
+        event: crate::swipe::PredictiveBackEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::swipe::PredictiveBackEvent;
+        if matches!(event, PredictiveBackEvent::Started { .. } | PredictiveBackEvent::Invoked) {
+            window.cancel_touch_momentum();
+        }
+        if self.message_sheet.is_some() || self.has_video_lightbox() {
+            if matches!(event, PredictiveBackEvent::Invoked) {
+                self.predictive_back.reset();
+                let _ = self.close_message_sheet(cx) || self.close_video_lightbox(window, cx);
+            }
+            return;
+        }
+        let target = if self.has_open_thread() {
+            Some(SwipeTarget::Thread)
+        } else if !matches!(self.view, View::Spaces) {
+            Some(SwipeTarget::Page)
+        } else {
+            None
+        };
+        if matches!(event, PredictiveBackEvent::Started { .. }) {
+            self.finish_closing(window, cx);
+            *self.gesture_target.borrow_mut() = target;
+        }
+        if let Some(target) = target {
+            let travel = self.travel(target).max(1.0);
+            let step = self.predictive_back.feed(event, travel);
+            self.follow(step, cx);
+            return;
+        }
+        if matches!(event, PredictiveBackEvent::Invoked) {
+            self.predictive_back.reset();
+            self.back(&Back, window, cx);
+        } else if matches!(event, PredictiveBackEvent::Cancelled) {
+            self.predictive_back.reset();
         }
     }
 
@@ -3533,12 +3589,18 @@ impl ChatPane {
             Surface::Thread => ("chat-thread-composer", "chat-thread-send"),
         };
         let field = composer.clone();
+        let ime_shift = if compact { design::compact::ime_insets().bar_shift_y() } else { 0.0 };
         Self::column(
             surface,
             compact,
-            div().pt(px(8.)).pb(px(16.)).child(
-                div()
-                    .id(id)
+            div()
+                .relative()
+                .when(ime_shift != 0.0, |d| d.top(px(ime_shift)))
+                .pt(px(8.))
+                .pb(px(16.))
+                .child(
+                    div()
+                        .id(id)
                     .key_context(COMPOSER_CONTEXT)
                     .min_h(px(metrics::COMPOSER_HEIGHT))
                     .pl(px(12. - input::AREA_INSET))

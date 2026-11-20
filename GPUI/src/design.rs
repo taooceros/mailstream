@@ -809,7 +809,36 @@ pub mod compact {
     pub const BUTTON_HEIGHT: f32 = 36.0;
     pub const BUTTON_SMALL_HEIGHT: f32 = 30.0;
     pub const SEARCH_HEIGHT: f32 = 40.0;
+    /// Current Android soft-keyboard (`WindowInsetsAnimation`) metrics in logical points (MS-449).
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct ImeInsets {
+        /// Current animated keyboard bottom inset above the navigation bar (`max(0, ime - nav)`).
+        pub bottom: f32,
+        /// Final target bottom inset for the ongoing animation (constant across all 30 frames).
+        pub target_bottom: f32,
+        /// True while `WindowInsetsAnimation.Callback` is driving a keyboard transition.
+        pub animating: bool,
+    }
+
+    impl ImeInsets {
+        /// Bottom clearance used by scrollable content containers: jumps once to `target_bottom`
+        /// when an IME transition starts so text and Scroll Layers never reflow across 30 frames.
+        #[inline]
+        pub fn layout_bottom(self) -> f32 {
+            if self.animating { self.target_bottom } else { self.bottom }
+        }
+
+        /// Vertical offset (`layout_bottom - bottom`) applied to pinned bottom reply/compose bars
+        /// during IME transitions so they glide at 120 Hz glued to Gboard's top edge.
+        #[inline]
+        pub fn bar_shift_y(self) -> f32 {
+            if self.animating { self.target_bottom - self.bottom } else { 0.0 }
+        }
+    }
+
     static SAFE_AREA: std::sync::OnceLock<fn() -> (f32, f32, f32, f32)> = std::sync::OnceLock::new();
+    static IME_INSETS: std::sync::OnceLock<fn() -> ImeInsets> = std::sync::OnceLock::new();
+    static BACK_ENABLED: std::sync::OnceLock<fn(bool)> = std::sync::OnceLock::new();
     static FONT_SCALE: std::sync::OnceLock<fn() -> f32> = std::sync::OnceLock::new();
     static LONG_PRESS_HAPTIC: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
@@ -821,6 +850,29 @@ pub mod compact {
     /// Current platform safe-area insets `(top, bottom, left, right)` in logical points.
     pub fn safe_area_insets() -> (f32, f32, f32, f32) {
         SAFE_AREA.get().map_or((0., 0., 0., 0.), |f| f())
+    }
+
+    /// Registers the platform IME inset provider (Android `WindowInsetsAnimation.Callback`, MS-449).
+    pub fn set_ime_insets_provider(provider: fn() -> ImeInsets) {
+        let _ = IME_INSETS.set(provider);
+    }
+
+    /// Current soft-keyboard insets (zero on desktop).
+    pub fn ime_insets() -> ImeInsets {
+        IME_INSETS.get().map_or_else(ImeInsets::default, |f| f())
+    }
+
+    /// Registers the platform callback controlling Android's `OnBackInvokedDispatcher` registration.
+    pub fn set_back_enabled_provider(provider: fn(bool)) {
+        let _ = BACK_ENABLED.set(provider);
+    }
+
+    /// Notifies the platform whether an in-app back target exists (unregisters on root inbox so
+    /// Android 14+ plays the native Back-to-Home preview animation, MS-449).
+    pub fn set_back_enabled(enabled: bool) {
+        if let Some(f) = BACK_ENABLED.get() {
+            f(enabled);
+        }
     }
 
     /// Registers the platform font-scale provider (Android `Configuration.fontScale`).

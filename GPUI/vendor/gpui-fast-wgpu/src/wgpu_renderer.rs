@@ -67,6 +67,12 @@ pub(crate) struct GlobalParams {
     pub(crate) viewport_size: [f32; 2],
     pub(crate) premultiplied_alpha: u32,
     pub(crate) pad: u32,
+    /// Active GPU overscroll stretch viewport `[left, top, right, bottom]` (device px).
+    pub(crate) overscroll_viewport: [f32; 4],
+    /// Active GPU overscroll stretch `[s_x, s_y]` in `[-0.06, 0.06]`.
+    pub(crate) overscroll_stretch: [f32; 2],
+    /// Exclusive draw-order fence `[order_start, order_end]` (`start < order < end`).
+    pub(crate) overscroll_order: [u32; 2],
 }
 
 #[repr(C)]
@@ -1596,13 +1602,33 @@ impl WgpuRendererCore {
             is_bgr: self.is_bgr as u32,
             _pad: 0,
         };
+        let (overscroll_viewport, overscroll_stretch, overscroll_order) =
+            match scene.overscroll_stretch {
+                Some(s) => (
+                    [
+                        s.viewport.origin.x.0,
+                        s.viewport.origin.y.0,
+                        s.viewport.right().0,
+                        s.viewport.bottom().0,
+                    ],
+                    [s.stretch.x, s.stretch.y],
+                    [s.order_start, s.order_end],
+                ),
+                None => ([0.0; 4], [0.0; 2], [0; 2]),
+            };
         let globals = GlobalParams {
             viewport_size: [size.width.0 as f32, size.height.0 as f32],
             premultiplied_alpha: premultiplied_alpha as u32,
             pad: 0,
+            overscroll_viewport,
+            overscroll_stretch,
+            overscroll_order,
         };
         let path_globals = GlobalParams {
             premultiplied_alpha: 0,
+            overscroll_viewport: [0.0; 4],
+            overscroll_stretch: [0.0; 2],
+            overscroll_order: [0; 2],
             ..globals
         };
         crate::fast::globals::write_globals(self, &globals, &path_globals, &gamma_params);

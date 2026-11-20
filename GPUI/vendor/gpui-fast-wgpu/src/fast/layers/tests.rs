@@ -1035,6 +1035,9 @@ impl Harness {
             viewport_size: [width as f32, height as f32],
             premultiplied_alpha: 0,
             pad: 0,
+            overscroll_viewport: [0.0; 4],
+            overscroll_stretch: [0.0; 2],
+            overscroll_order: [0; 2],
         };
         let gamma = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,

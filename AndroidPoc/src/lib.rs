@@ -8,17 +8,46 @@ extern crate gpui_mobile;
 mod android_entry {
     use std::path::PathBuf;
 
-    use gpui::{App, Application};
-    use gpui_mobile::android::{host, jni};
+    use gpui::{App, AppContext as _, Application};
+    use gpui_mobile::android::{host, jni, text_input};
     use mailstream_engine::Config;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     static INSET_TOP: AtomicU32 = AtomicU32::new(0);
     static INSET_BOTTOM: AtomicU32 = AtomicU32::new(0);
     static INSET_LEFT: AtomicU32 = AtomicU32::new(0);
     static INSET_RIGHT: AtomicU32 = AtomicU32::new(0);
+    static IME_BOTTOM: AtomicU32 = AtomicU32::new(0);
+    static IME_TARGET_BOTTOM: AtomicU32 = AtomicU32::new(0);
+    static IME_ANIMATING: AtomicBool = AtomicBool::new(false);
     static FONT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
     static DISPLAY_DENSITY: AtomicU32 = AtomicU32::new(0);
+
+    /// Receives 120 Hz IME inset updates from `WindowInsetsAnimation.Callback` via lock-free
+    /// atomics and wakes only the next hardware vsync (`frame_source::schedule_frame()`),
+    /// avoiding `request_config_refresh()` and `drop_layers_on_resize` storms (MS-449).
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeImeInsets(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        ime_bottom_px: i32,
+        target_bottom_px: i32,
+        animating: u8,
+        density: f32,
+    ) {
+        let scale = if density.is_finite() && density > 0.0 { density } else { 1.0 };
+        let bottom_bits = (ime_bottom_px.max(0) as f32 / scale).to_bits();
+        let target_bits = (target_bottom_px.max(0) as f32 / scale).to_bits();
+        let is_animating = animating != 0;
+        let changed = IME_BOTTOM.swap(bottom_bits, Ordering::Release) != bottom_bits
+            || IME_TARGET_BOTTOM.swap(target_bits, Ordering::Release) != target_bits
+            || IME_ANIMATING.swap(is_animating, Ordering::AcqRel) != is_animating;
+        if !changed {
+            return;
+        }
+        jni::schedule_ime_frame();
+    }
+
     #[unsafe(no_mangle)]
     pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeInsets(
         _env: *mut std::ffi::c_void,
@@ -109,6 +138,21 @@ mod android_entry {
         }
     }
 
+    fn android_ime_insets() -> mailstream_gpui::design::compact::ImeInsets {
+        let bottom = f32::from_bits(IME_BOTTOM.load(Ordering::Acquire));
+        let target_bottom = f32::from_bits(IME_TARGET_BOTTOM.load(Ordering::Acquire));
+        let animating = IME_ANIMATING.load(Ordering::Acquire);
+        mailstream_gpui::design::compact::ImeInsets {
+            bottom: if bottom.is_finite() && bottom >= 0.0 { bottom } else { 0.0 },
+            target_bottom: if target_bottom.is_finite() && target_bottom >= 0.0 {
+                target_bottom
+            } else {
+                0.0
+            },
+            animating,
+        }
+    }
+
     fn configure_android_engine(support_dir: PathBuf, cache_dir: PathBuf) {
         let mut config = Config::for_this_app().in_directory(support_dir);
         config.cache_directory = cache_dir;
@@ -129,10 +173,48 @@ mod android_entry {
 
     fn launch_mailstream_ui(cx: &mut App) {
         mailstream_gpui::design::compact::set_safe_area_provider(android_safe_area_insets);
+        mailstream_gpui::design::compact::set_ime_insets_provider(android_ime_insets);
+        mailstream_gpui::design::compact::set_back_enabled_provider(jni::set_back_enabled_android);
         mailstream_gpui::design::compact::set_font_scale_provider(android_font_scale);
         mailstream_gpui::design::compact::set_long_press_haptic_provider(android_long_press_haptic);
         mailstream_gpui::init(cx);
         let (window, app) = mailstream_gpui::open_window(mailstream_gpui::mobile_window_options(), cx);
+        let async_cx_ime = cx.to_async();
+        let weak_app_ime = app.downgrade();
+        text_input::set_ime_insets_callback(Some(Box::new(move || {
+            let mut async_cx = async_cx_ime.clone();
+            let _ = weak_app_ime.update(&mut async_cx, |_, cx| cx.notify());
+        })));
+        let async_cx_back = cx.to_async();
+        let weak_app_back = app.downgrade();
+        text_input::set_predictive_back_callback(Some(Box::new(move |event| {
+            let mapped = match event {
+                text_input::PredictiveBackEvent::Started { progress, edge } => {
+                    mailstream_gpui::swipe::PredictiveBackEvent::Started {
+                        progress,
+                        edge: mailstream_gpui::swipe::PredictiveEdge::from_android(edge),
+                    }
+                }
+                text_input::PredictiveBackEvent::Progressed { progress, edge } => {
+                    mailstream_gpui::swipe::PredictiveBackEvent::Progressed {
+                        progress,
+                        edge: mailstream_gpui::swipe::PredictiveEdge::from_android(edge),
+                    }
+                }
+                text_input::PredictiveBackEvent::Invoked => {
+                    mailstream_gpui::swipe::PredictiveBackEvent::Invoked
+                }
+                text_input::PredictiveBackEvent::Cancelled => {
+                    mailstream_gpui::swipe::PredictiveBackEvent::Cancelled
+                }
+            };
+            let mut async_cx = async_cx_back.clone();
+            let _ = async_cx.update_window(window.into(), |_, window, cx| {
+                let _ = weak_app_back.update(cx, |app, cx| {
+                    app.handle_predictive_back(mapped, window, cx);
+                });
+            });
+        })));
         window
             .update(cx, |_, window, cx| {
                 let focus = app.read_with(cx, |app, _| app.focus.clone());

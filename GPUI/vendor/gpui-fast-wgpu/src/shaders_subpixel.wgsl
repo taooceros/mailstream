@@ -28,11 +28,14 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = b_subpixel_sprites[instance_id];
 
+    let base_pos = unit_vertex * vec2<f32>(sprite.bounds.size) + sprite.bounds.origin;
+    let transformed = transpose(sprite.transformation.rotation_scale) * base_pos + sprite.transformation.translation;
+    let screen_pos = apply_overscroll(transformed, sprite.order, sprite.content_mask);
     var out = SubpixelSpriteOutput();
-    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+    out.position = to_device_position_impl(screen_pos);
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
-    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    out.clip_distances = distance_from_clip_rect_impl(screen_pos, sprite.content_mask);
     return out;
 }
 

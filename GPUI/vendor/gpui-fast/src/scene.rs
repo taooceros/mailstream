@@ -37,6 +37,20 @@ impl From<bool> for PaddedBool32 {
     }
 }
 
+/// GPU vertex-stage affine stretch applied to all primitives painted inside an
+/// overscrolling scroll container (Android 12+ Stretch Overscroll, MS-449).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OverscrollStretch {
+    /// Draw-order fence before the container's children (`order > order_start`).
+    pub order_start: DrawOrder,
+    /// Draw-order fence after the container's children (`order < order_end`).
+    pub order_end: DrawOrder,
+    /// Container clip viewport in device pixels (`ScaledPixels`).
+    pub viewport: Bounds<ScaledPixels>,
+    /// Normalized stretch `(s_x, s_y)` in `[-0.06, 0.06]`.
+    pub stretch: Point<f32>,
+}
+
 #[derive(Default)]
 #[expect(missing_docs)]
 pub struct Scene {
@@ -54,6 +68,8 @@ pub struct Scene {
     pub(crate) sort_scratch: crate::fast::scene::SortScratch,
     pub(crate) fast_rounded_clip: crate::fast::rounded_clip::SceneClips,
     pub layers: crate::fast::layers::scene::SceneLayers,
+    /// Active GPU stretch overscroll region for this frame, if any (MS-449).
+    pub overscroll_stretch: Option<OverscrollStretch>,
 }
 
 #[expect(missing_docs)]
@@ -72,6 +88,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         crate::fast::layers::scene::SceneLayers::clear(&mut self.layers);
+        self.overscroll_stretch = None;
     }
 
     pub fn len(&self) -> usize {
@@ -88,6 +105,31 @@ impl Scene {
     pub fn pop_layer(&mut self) {
         self.layer_stack.pop();
         self.paint_operations.push(PaintOperation::EndLayer);
+    }
+
+    /// Inserts a draw-order fence before an overscrolling scroll container's
+    /// children so the GPU vertex shader stretches only primitives inside it.
+    pub(crate) fn begin_overscroll(&mut self, viewport: Bounds<ScaledPixels>) -> DrawOrder {
+        self.primitive_bounds.insert(viewport)
+    }
+
+    /// Closes the draw-order fence for an overscrolling scroll container and
+    /// records its vertex-stage stretch parameters on the scene.
+    pub(crate) fn end_overscroll(
+        &mut self,
+        viewport: Bounds<ScaledPixels>,
+        order_start: DrawOrder,
+        stretch: Point<f32>,
+    ) {
+        let order_end = self.primitive_bounds.insert(viewport);
+        if stretch.x != 0.0 || stretch.y != 0.0 {
+            self.overscroll_stretch = Some(OverscrollStretch {
+                order_start,
+                order_end,
+                viewport,
+                stretch,
+            });
+        }
     }
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {

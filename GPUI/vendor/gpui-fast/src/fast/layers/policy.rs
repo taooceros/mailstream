@@ -598,7 +598,7 @@ fn new_layer(key: LayerKey, frame: u64) -> Layer {
 
 /// What the scroll container `id` decided in the last frame drawn, if it
 /// was looked at in it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn last_decision(window: &Window, id: &GlobalElementId) -> Option<Decision> {
     let policy = &window.fast_layers.layers.get(id)?.policy;
     (policy.last_seen_frame + 1 == window.fast_layers.frame)

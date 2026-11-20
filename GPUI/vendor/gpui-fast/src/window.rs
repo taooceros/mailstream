@@ -1313,6 +1313,10 @@ pub struct Window {
     last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
     touch_prediction_enabled: bool,
+    // Mailstream patch (MS-449): Android 12+ stretch overscroll state.
+    overscroll_enabled: bool,
+    touch_scroll_active: bool,
+    dispatching_touch_momentum: Option<Point<f32>>,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
@@ -2465,6 +2469,9 @@ impl Window {
                     .map_or_else(GestureTuning::default, |gestures| gestures.tuning()),
             ),
             touch_prediction_enabled: true,
+            overscroll_enabled: cfg!(target_os = "android"),
+            touch_scroll_active: false,
+            dispatching_touch_momentum: None,
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
@@ -6210,6 +6217,31 @@ impl Window {
         self.touch_gestures.cancel_momentum();
     }
 
+    /// Mailstream patch (MS-449): enables or disables edge stretch overscroll
+    /// for scroll containers in this window (enabled by default on Android,
+    /// and automatically active for touch pans/flings on every platform).
+    pub fn set_overscroll_enabled(&mut self, enabled: bool) {
+        self.overscroll_enabled = enabled;
+    }
+
+    #[inline]
+    pub(crate) fn overscroll_active(&self) -> bool {
+        self.overscroll_enabled || self.touch_scroll_active
+    }
+
+    #[inline]
+    pub(crate) fn active_touch_momentum_velocity(&self) -> Option<Point<f32>> {
+        self.dispatching_touch_momentum
+    }
+
+    /// Schedules the next overscroll spring tick at display refresh rate
+    /// without setting `owner_animating`, so Scroll Layers stay in
+    /// `Decision::Composite` with `tiles_dirtied == 0`.
+    pub(crate) fn schedule_overscroll_frame(&self, f: impl FnOnce(&mut Window, &mut App) + 'static) {
+        self.display_rate_frame.set(true);
+        self.on_next_frame(f);
+    }
+
     /// Runs the portable gesture recognizer over a raw touch event and
     /// dispatches whatever it resolves (scroll steps, synthesized taps)
     /// through the ordinary mouse-event path.
@@ -6257,10 +6289,13 @@ impl Window {
             RecognizedTouchGesture::Scroll(scroll_wheel) => {
                 self.mouse_position = scroll_wheel.position;
                 cx.propagate_event = true;
+                let prev_touch_scroll = self.touch_scroll_active;
+                self.touch_scroll_active = true;
                 crate::fast::layers::hover_freeze::note_wheel(self, cx, &scroll_wheel);
                 crate::fast::layers::wheel::begin_dispatch_scroll(self, cx);
                 self.dispatch_mouse_event(&scroll_wheel, cx);
                 crate::fast::layers::wheel::end_dispatch(self, cx);
+                self.touch_scroll_active = prev_touch_scroll;
             }
             RecognizedTouchGesture::Tap { down, up } => {
                 self.mouse_position = up.position;
@@ -6334,6 +6369,7 @@ impl Window {
     fn schedule_touch_momentum_tick(&mut self) {
         self.on_next_frame(|window, cx| {
             let now = window.frame_signal_at.unwrap_or_else(Instant::now);
+            let momentum_vel = window.touch_gestures.momentum_velocity_at(now);
             if let Some(gesture) = window.touch_gestures.tick_momentum_at(now) {
                 let non_zero_move = matches!(
                     &gesture,
@@ -6343,7 +6379,9 @@ impl Window {
                 );
                 let updates_before = window.invalidator.update_count();
                 let dirty_before = window.invalidator.is_dirty();
+                window.dispatching_touch_momentum = momentum_vel;
                 window.dispatch_recognized_touch_gesture(gesture, cx);
+                window.dispatching_touch_momentum = None;
                 // Mailstream patch (MS-431): stop phantom momentum when a
                 // non-zero tick neither moved/invalidated any view nor was
                 // claimed by a listener (e.g. a horizontal swipe over a

@@ -651,6 +651,10 @@ pub struct MailApp {
     pub drawer_gesture_base: std::cell::Cell<f32>,
     /// Whether the drawer was logically open when the current drawer gesture started.
     pub drawer_gesture_started_open: std::cell::Cell<bool>,
+    /// Android 14+ predictive back gesture recognizer (MS-449).
+    pub predictive_back: crate::swipe::PredictiveBack,
+    /// Whether the active predictive back gesture is closing the open compact drawer.
+    pub predictive_back_drawer: bool,
     /// Whether the inline search bar is expanded in compact (small-screen) mode.
     pub compact_search: bool,
     /// Inline Settings overlay shown on compact viewports and single-window mobile hosts (Android).
@@ -807,6 +811,8 @@ impl MailApp {
             drawer_drag: MouseDrag::default(),
             drawer_gesture_base: std::cell::Cell::new(-crate::design::compact::DRAWER_WIDTH),
             drawer_gesture_started_open: std::cell::Cell::new(false),
+            predictive_back: crate::swipe::PredictiveBack::default(),
+            predictive_back_drawer: false,
             compact_search: false,
             settings: None,
             swipe: BackSwipe::default(),

@@ -81,6 +81,9 @@ struct GlobalParams {
     viewport_size: vec2<f32>,
     premultiplied_alpha: u32,
     pad: u32,
+    overscroll_viewport: vec4<f32>,
+    overscroll_stretch: vec2<f32>,
+    overscroll_order: vec2<u32>,
 }
 
 struct GammaParams {
@@ -182,6 +185,62 @@ fn to_device_position_transformed(unit_vertex: vec2<f32>, bounds: Bounds, transf
     //Note: Rust side stores it as row-major, so transposing here
     let transformed = transpose(transform.rotation_scale) * position + transform.translation;
     return to_device_position_impl(transformed);
+}
+
+// Mailstream patch (MS-449): GPU vertex-stage affine stretch for Android 12+
+// Stretch Overscroll, anchored at container viewport top/bottom (or left/right)
+// and clipped strictly within `content_mask` / `viewport`.
+fn overscroll_applies(order: u32, content_mask: Bounds) -> bool {
+    if (globals.overscroll_stretch.x == 0.0 && globals.overscroll_stretch.y == 0.0) {
+        return false;
+    }
+    if (order <= globals.overscroll_order.x || order >= globals.overscroll_order.y) {
+        return false;
+    }
+    let vp = globals.overscroll_viewport;
+    let mask_br = content_mask.origin + content_mask.size;
+    return content_mask.origin.x >= vp.x - 1.5
+        && content_mask.origin.y >= vp.y - 1.5
+        && mask_br.x <= vp.z + 1.5
+        && mask_br.y <= vp.w + 1.5;
+}
+
+fn apply_overscroll(position: vec2<f32>, order: u32, content_mask: Bounds) -> vec2<f32> {
+    if (!overscroll_applies(order, content_mask)) {
+        return position;
+    }
+    let vp = globals.overscroll_viewport;
+    var out = position;
+    let sx = globals.overscroll_stretch.x;
+    if (sx != 0.0) {
+        let anchor_x = select(vp.z, vp.x, sx > 0.0);
+        out.x = anchor_x + (out.x - anchor_x) * (1.0 + abs(sx));
+    }
+    let sy = globals.overscroll_stretch.y;
+    if (sy != 0.0) {
+        let anchor_y = select(vp.w, vp.y, sy > 0.0);
+        out.y = anchor_y + (out.y - anchor_y) * (1.0 + abs(sy));
+    }
+    return out;
+}
+
+fn unapply_overscroll(position: vec2<f32>, order: u32, content_mask: Bounds) -> vec2<f32> {
+    if (!overscroll_applies(order, content_mask)) {
+        return position;
+    }
+    let vp = globals.overscroll_viewport;
+    var out = position;
+    let sx = globals.overscroll_stretch.x;
+    if (sx != 0.0) {
+        let anchor_x = select(vp.z, vp.x, sx > 0.0);
+        out.x = anchor_x + (out.x - anchor_x) / (1.0 + abs(sx));
+    }
+    let sy = globals.overscroll_stretch.y;
+    if (sy != 0.0) {
+        let anchor_y = select(vp.w, vp.y, sy > 0.0);
+        out.y = anchor_y + (out.y - anchor_y) / (1.0 + abs(sy));
+    }
+    return out;
 }
 
 fn to_tile_position(unit_vertex: vec2<f32>, tile: AtlasTile) -> vec2<f32> {
@@ -539,8 +598,13 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let quad = load_quad(instance_id);
 
+    let screen_pos = apply_overscroll(
+        unit_vertex * vec2<f32>(quad.bounds.size) + quad.bounds.origin,
+        quad.order,
+        quad.content_mask
+    );
     var out = QuadVarying();
-    out.position = to_device_position(unit_vertex, quad.bounds);
+    out.position = to_device_position_impl(screen_pos);
 
     let gradient = prepare_gradient_color(
         quad.background.tag,
@@ -553,7 +617,7 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
     out.background_color1 = gradient.color1;
     out.border_color = hsla_to_rgba(quad.border_color);
     out.quad_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
+    out.clip_distances = distance_from_clip_rect_impl(screen_pos, quad.content_mask);
     return out;
 }
 
@@ -565,10 +629,10 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     }
 
     let quad = load_quad(input.quad_id);
+    let frag_pos = unapply_overscroll(input.position.xy, quad.order, quad.content_mask);
 
-    let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
+    let background_color = gradient_color(quad.background, frag_pos, quad.bounds,
         input.background_solid, input.background_color0, input.background_color1);
-
     let unrounded = quad.corner_radii.top_left == 0.0 &&
         quad.corner_radii.bottom_left == 0.0 &&
         quad.corner_radii.top_right == 0.0 &&
@@ -585,7 +649,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     let size = quad.bounds.size;
     let half_size = size / 2.0;
-    let point = input.position.xy - quad.bounds.origin;
+    let point = frag_pos - quad.bounds.origin;
     let center_to_point = point - half_size;
 
     // Signed distance field threshold for inclusion of pixels. 0.5 is the
@@ -984,11 +1048,16 @@ fn vs_shadow(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) ins
         geometry.size += 2.0 * vec2<f32>(margin);
     }
 
+    let screen_pos = apply_overscroll(
+        unit_vertex * vec2<f32>(geometry.size) + geometry.origin,
+        shadow.order,
+        shadow.content_mask
+    );
     var out = ShadowVarying();
-    out.position = to_device_position(unit_vertex, geometry);
+    out.position = to_device_position_impl(screen_pos);
     out.color = hsla_to_rgba(shadow.color);
     out.shadow_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, geometry, shadow.content_mask);
+    out.clip_distances = distance_from_clip_rect_impl(screen_pos, shadow.content_mask);
     return out;
 }
 
@@ -1000,15 +1069,16 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
     }
 
     let shadow = load_shadow(input.shadow_id);
+    let frag_pos = unapply_overscroll(input.position.xy, shadow.order, shadow.content_mask);
     let half_size = shadow.bounds.size / 2.0;
     let center = shadow.bounds.origin + half_size;
-    let center_to_point = input.position.xy - center;
+    let center_to_point = frag_pos - center;
 
     let corner_radius = pick_corner_radius(center_to_point, shadow.corner_radii);
 
     var alpha: f32;
     if (shadow.blur_radius == 0.0) {
-        let distance = quad_sdf(input.position.xy, shadow.bounds, shadow.corner_radii);
+        let distance = quad_sdf(frag_pos, shadow.bounds, shadow.corner_radii);
         alpha = saturate(0.5 - distance);
     } else {
         // The signal is only non-zero in a limited range, so don't waste samples
@@ -1166,11 +1236,16 @@ fn vs_underline(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) 
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let underline = load_underline(instance_id);
 
+    let screen_pos = apply_overscroll(
+        unit_vertex * vec2<f32>(underline.bounds.size) + underline.bounds.origin,
+        underline.order,
+        underline.content_mask
+    );
     var out = UnderlineVarying();
-    out.position = to_device_position(unit_vertex, underline.bounds);
+    out.position = to_device_position_impl(screen_pos);
     out.color = hsla_to_rgba(underline.color);
     out.underline_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, underline.bounds, underline.content_mask);
+    out.clip_distances = distance_from_clip_rect_impl(screen_pos, underline.content_mask);
     return out;
 }
 
@@ -1192,7 +1267,8 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
 
     let half_thickness = underline.thickness * 0.5;
 
-    let st = (input.position.xy - underline.bounds.origin) / underline.bounds.size.y - vec2<f32>(0.0, 0.5);
+    let frag_pos = unapply_overscroll(input.position.xy, underline.order, underline.content_mask);
+    let st = (frag_pos - underline.bounds.origin) / underline.bounds.size.y - vec2<f32>(0.0, 0.5);
     let frequency = M_PI_F * WAVE_FREQUENCY * underline.thickness / underline.bounds.size.y;
     let amplitude = (underline.thickness * WAVE_HEIGHT_RATIO) / underline.bounds.size.y;
 
@@ -1231,12 +1307,15 @@ fn vs_mono_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = load_mono_sprite(instance_id);
 
+    let base_pos = unit_vertex * vec2<f32>(sprite.bounds.size) + sprite.bounds.origin;
+    let transformed = transpose(sprite.transformation.rotation_scale) * base_pos + sprite.transformation.translation;
+    let screen_pos = apply_overscroll(transformed, sprite.order, sprite.content_mask);
     var out = MonoSpriteVarying();
-    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+    out.position = to_device_position_impl(screen_pos);
 
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
-    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    out.clip_distances = distance_from_clip_rect_impl(screen_pos, sprite.content_mask);
     return out;
 }
 
@@ -1279,11 +1358,16 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = load_poly_sprite(instance_id);
 
+    let screen_pos = apply_overscroll(
+        unit_vertex * vec2<f32>(sprite.bounds.size) + sprite.bounds.origin,
+        sprite.order,
+        sprite.content_mask
+    );
     var out = PolySpriteVarying();
-    out.position = to_device_position(unit_vertex, sprite.bounds);
+    out.position = to_device_position_impl(screen_pos);
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.sprite_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    out.clip_distances = distance_from_clip_rect_impl(screen_pos, sprite.content_mask);
     return out;
 }
 
@@ -1296,7 +1380,8 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     }
 
     let sprite = load_poly_sprite(input.sprite_id);
-    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    let frag_pos = unapply_overscroll(input.position.xy, sprite.order, sprite.content_mask);
+    let distance = quad_sdf(frag_pos, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
     if (sprite.grayscale != 0u) {

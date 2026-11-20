@@ -229,6 +229,7 @@ pub struct CalendarPane {
     close: Slide,
     close_swipe: BackSwipe,
     drag: MouseDrag,
+    predictive_back: crate::swipe::PredictiveBack,
     /// The surface `close` belongs to (`top_surface`); another rests.
     close_surface: Option<(EventKey, bool)>,
     /// The top surface's width, as last laid out.
@@ -320,6 +321,7 @@ impl CalendarPane {
             close: Slide::Rest,
             close_swipe: BackSwipe::default(),
             drag: MouseDrag::default(),
+            predictive_back: crate::swipe::PredictiveBack::default(),
             close_surface: None,
             close_width: Rc::new(Cell::new(0.)),
             pane_covers: false,
@@ -1164,6 +1166,47 @@ impl CalendarPane {
     /// Whether an event detail pane or full-window page is open (hides the compact bottom bar).
     pub fn has_open_page(&self) -> bool {
         self.opened.is_some() || self.page
+    }
+
+    /// Whether Calendar currently has an in-app back target (sketch, open event, or detail page).
+    pub fn has_back_target(&self) -> bool {
+        self.sketch.is_some() || self.opened.is_some() || self.page
+    }
+
+    /// Drives Calendar's open event pane/page with Android 14+ predictive back events (MS-449).
+    pub fn handle_predictive_back(
+        &mut self,
+        event: crate::swipe::PredictiveBackEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::swipe::PredictiveBackEvent;
+        if matches!(event, PredictiveBackEvent::Started { .. } | PredictiveBackEvent::Invoked) {
+            window.cancel_touch_momentum();
+        }
+        if self.sketch.is_some() {
+            if matches!(event, PredictiveBackEvent::Invoked) {
+                self.predictive_back.reset();
+                self.sketch = None;
+                cx.notify();
+            }
+            return;
+        }
+        if self.opened.is_some() && self.top_surface().is_some() {
+            if matches!(event, PredictiveBackEvent::Started { .. }) {
+                self.close_surface = self.top_surface();
+            }
+            let width = self.close_width.get().max(1.0);
+            let step = self.predictive_back.feed(event, width);
+            self.follow_close(step, cx);
+            return;
+        }
+        if matches!(event, PredictiveBackEvent::Invoked) {
+            self.predictive_back.reset();
+            self.back(&Back, window, cx);
+        } else if matches!(event, PredictiveBackEvent::Cancelled) {
+            self.predictive_back.reset();
+        }
     }
 
     /// Opens the new-event editor from outside the pane (the compact FAB).

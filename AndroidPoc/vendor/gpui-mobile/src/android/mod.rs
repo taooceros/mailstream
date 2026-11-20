@@ -161,7 +161,7 @@ pub(crate) mod loop_driver;
 pub mod keyboard;
 pub mod platform;
 pub mod platform_view;
-mod text_input;
+pub mod text_input;
 pub mod window;
 
 // ── public re-exports ─────────────────────────────────────────────────────────
