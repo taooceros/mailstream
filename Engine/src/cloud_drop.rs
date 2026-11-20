@@ -344,62 +344,56 @@ impl CloudDrop {
     pub(crate) fn apply_group(&self, namespace: &str, config: Option<&CloudConfig>) -> Result<bool, EngineError> {
         let url = config.and_then(|c| c.url.as_deref()).and_then(|u| worker_url(u).ok());
         let enabled = config.is_some_and(|c| c.enabled) && url.is_some();
+        self.set_group(namespace, enabled, url, false)
+    }
+
+    /// Turns the drop on for `namespace` with the validated Worker at `url`; the next exchange uploads.
+    pub(crate) fn enable_for_group(&self, namespace: &str, url: String) -> Result<(), EngineError> {
+        self.set_group(namespace, true, Some(url), false).map(drop)
+    }
+
+    /// Records the drop as off for `namespace` in `cloud.json`. Call while holding the bridge
+    /// lock right after writing `v1/cloud`, then follow with [`Self::cleanup_disabled_upload`].
+    pub(crate) fn mark_disabled_for_group(&self, namespace: &str, url: Option<String>) -> Result<(), EngineError> {
+        self.set_group(namespace, false, url, true).map(drop)
+    }
+
+    fn set_group(&self, namespace: &str, enabled: bool, url: Option<String>, always_reset: bool) -> Result<bool, EngineError> {
         let mut changed = false;
-        let mut reset_meta = false;
         self.update(|file| {
-            let ns_changed = file.namespace.as_deref() != Some(namespace);
-            let state_changed = file.enabled != enabled || file.url != url;
-            changed = ns_changed || state_changed;
-            reset_meta = changed;
+            changed = file.namespace.as_deref() != Some(namespace) || file.enabled != enabled || file.url != url;
             file.namespace = Some(namespace.to_owned());
             file.enabled = enabled;
             file.url = url;
         })
         .map_err(EngineError::failed)?;
-        if reset_meta {
-            let mut meta = self.meta.lock().expect("cloud meta lock");
+        let mut meta = self.meta.lock().expect("cloud meta lock");
+        if changed || always_reset {
             meta.last_upload = None;
             meta.last_received = None;
+            meta.problem = None;
+        } else if enabled {
             meta.problem = None;
         }
         Ok(changed)
     }
 
-    /// Turns the drop on for `namespace` with the validated Worker at `url`; the next exchange uploads.
-    pub(crate) fn enable_for_group(&self, namespace: &str, url: String) -> Result<(), EngineError> {
-        let mut reset_meta = false;
-        self.update(|file| {
-            reset_meta = file.namespace.as_deref() != Some(namespace) || file.url.as_deref() != Some(url.as_str());
-            file.namespace = Some(namespace.to_owned());
-            file.url = Some(url);
-            file.enabled = true;
-        })
-        .map_err(EngineError::failed)?;
-        let mut meta = self.meta.lock().expect("cloud meta lock");
-        meta.problem = None;
-        if reset_meta {
-            meta.last_upload = None;
-            meta.last_received = None;
-        }
-        Ok(())
-    }
-
-    /// Turns the drop off for `namespace` and deletes this device's copy from the Worker; a copy
-    /// the Worker couldn't delete shows as the problem.
-    pub(crate) async fn disable_for_group(&self, namespace: &str, url: Option<String>) {
+    /// Deletes this device's uploaded copy from the Worker if the drop is still off for `namespace`;
+    /// a copy the Worker couldn't delete shows as the problem.
+    pub(crate) async fn cleanup_disabled_upload(&self, namespace: &str) {
         let _exchanging = self.exchanging.lock().await;
-        let result = match self.update(|file| {
-            file.namespace = Some(namespace.to_owned());
-            file.enabled = false;
-            file.url = url;
-        }) {
-            Ok(()) => self.delete_upload().await,
-            Err(error) => Err(error),
+        let still_disabled = {
+            let file = self.file.lock().expect("cloud file lock");
+            !file.enabled || file.namespace.as_deref() != Some(namespace)
         };
+        if !still_disabled {
+            return;
+        }
+        let result = self.delete_upload().await;
         let mut meta = self.meta.lock().expect("cloud meta lock");
-        meta.last_upload = None;
-        meta.last_received = None;
-        meta.problem = result.err();
+        if let Err(problem) = result {
+            meta.problem = Some(problem);
+        }
     }
 
     /// Deletes the copy `cloud.json` records, if any, and forgets it once the Worker did.

@@ -501,10 +501,10 @@ impl Tagging {
             match self.tagger.tag(batch, &options).await {
                 Ok(verdicts) => {
                     let mut state = self.state();
-                    // A tag the user set meanwhile stays as they set it.
+                    // A tag the user set or another device synced meanwhile stays as it is.
                     let result: HashMap<String, ConversationTag> = verdicts
                         .into_iter()
-                        .filter(|(key, _)| !state.tags.get(key).is_some_and(|tag| tag.manual))
+                        .filter(|(key, _)| !state.tags.contains_key(key))
                         .map(|(key, verdict)| {
                             let tag = match carried.get(&key) {
                                 Some(previous) => carry(previous, verdict),

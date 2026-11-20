@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use super::overlay::Turn;
 use super::undo::Change;
 use super::{Known, Mail, pending, started};
 use crate::answers::{self, BatchFailure, BatchResult, UndoAction};
@@ -98,18 +99,25 @@ pub(super) fn refs(messages: &[MailMessage]) -> HashSet<MessageRef> {
     messages.iter().map(MailMessage::message_ref).collect()
 }
 
-/// Message ids by the mailbox they list under; mail still being sent from here (`pending`) is
-/// not the provider's to change yet.
-fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
-    let mut groups: Vec<(MailboxKey, Vec<String>)> = Vec::new();
+/// Messages grouped by the mailbox they list under; mail still being sent from here (`pending`)
+/// is not the provider's to change yet.
+fn messages_by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<MailMessage>)> {
+    let mut groups: Vec<(MailboxKey, Vec<MailMessage>)> = Vec::new();
     for message in messages.iter().filter(|message| !pending::is_local(message.id())) {
         let key = (*message.key).clone();
         match groups.iter_mut().find(|(known, _)| *known == key) {
-            Some((_, ids)) => ids.push(message.id().to_string()),
-            None => groups.push((key, vec![message.id().to_string()])),
+            Some((_, grouped)) => grouped.push(message.clone()),
+            None => groups.push((key, vec![message.clone()])),
         }
     }
     groups
+}
+
+fn by_mailbox(messages: &[MailMessage]) -> Vec<(MailboxKey, Vec<String>)> {
+    messages_by_mailbox(messages)
+        .into_iter()
+        .map(|(key, grouped)| (key, grouped.into_iter().map(|m| m.id().to_string()).collect()))
+        .collect()
 }
 
 /// Of `targets`, those whose `flag` is not `on` yet: what setting it changes, for undo.
@@ -207,28 +215,12 @@ impl Mail {
             if action == UndoAction::Archive {
                 changes.push(Change::Started(self.archive_started(conversation)));
             }
-            let kept = match flag {
-                Some((flag, on)) => {
-                    // Read and unread show on the whole conversation; a star on the message starred.
-                    let shown = if flag == Flag::Seen || !on { &conversation.messages[..] } else { &plan.flags[..] };
-                    Some(updating(conversation, &refs(shown), |envelope| envelope.set_flag(flag, on)))
-                }
-                None => None,
-            };
-            let mut state = self.state();
-            match kept {
-                Some(conversation) => {
-                    if let Some(known) = state.known.get_mut(&id) {
-                        known.conversation = conversation;
-                    }
-                }
-                None => {
-                    if state.known.remove(&id).is_some() {
-                        state.known_order.retain(|known| *known != id);
-                    }
+            if flag.is_none() {
+                let mut state = self.state();
+                if state.known.remove(&id).is_some() {
+                    state.known_order.retain(|known| *known != id);
                 }
             }
-            drop(state);
             acted.push((plan.known, changes));
             done.push(id);
         }
@@ -344,13 +336,6 @@ impl Mail {
             self.adjust_unread(&targets, if read { -1 } else { 1 });
             self.mutate_flags(targets, Flag::Seen, read).await?;
         }
-        let mut state = self.state();
-        for conversation in conversations {
-            if let Some(known) = state.known.get_mut(&conversation.id) {
-                let all = refs(&conversation.messages);
-                known.conversation = updating(conversation, &all, |envelope| envelope.set_flag(Flag::Seen, read));
-            }
-        }
         Ok(())
     }
 
@@ -363,21 +348,35 @@ impl Mail {
     /// mailbox; a refused request's messages are set back.
     pub(super) async fn set_flags(self: &Arc<Self>, targets: Vec<MailMessage>, flag: Flag, add: bool) -> Refusals {
         self.update_envelopes(&refs(&targets), |envelope| envelope.set_flag(flag, add));
-        let requests = by_mailbox(&targets).into_iter().map(|(key, ids)| {
-            let sent: HashSet<MessageRef> =
-                targets.iter().filter(|message| carried(message, &key, &ids)).map(MailMessage::message_ref).collect();
+        let batches: Vec<_> = messages_by_mailbox(&targets)
+            .into_iter()
+            .map(|(key, messages)| {
+                let ticket = self.state().overlay.begin_flag(&key.account, &messages, flag, add);
+                (key, messages, ticket)
+            })
+            .collect();
+        let requests = batches.into_iter().map(|(key, messages, ticket)| async move {
+            let ids: Vec<String> = messages.iter().map(|m| m.id().to_string()).collect();
             let sending = ids.clone();
-            async move {
-                let result = self
-                    .provider_request(
-                        key.account.clone(),
-                        false,
-                        async move |backend: Arc<Backend>| backend.set_flag(flag, add, &sending).await,
-                        || self.update_envelopes(&sent, |envelope| envelope.set_flag(flag, !add)),
-                    )
-                    .await;
-                result.err().map(|error| (key, ids, error))
-            }
+            let seq = ticket.seq;
+            let result = self
+                .provider_request(
+                    key.account.clone(),
+                    ticket.turn,
+                    false,
+                    async move |backend: Arc<Backend>| backend.set_flag(flag, add, &sending).await,
+                    |ok| {
+                        let rollback = self.state().overlay.finish_flag(&key.account, &messages, flag, seq, ok);
+                        if !rollback.is_empty() {
+                            self.update_envelopes(&refs(&rollback), |envelope| envelope.set_flag(flag, !add));
+                            if flag == Flag::Seen {
+                                self.adjust_unread(&rollback, if add { 1 } else { -1 });
+                            }
+                        }
+                    },
+                )
+                .await;
+            result.err().map(|error| (key, ids, error))
         });
         Refusals(futures::future::join_all(requests).await.into_iter().flatten().collect())
     }
@@ -396,34 +395,42 @@ impl Mail {
         } else {
             self.remove_envelopes(&all);
         }
-        let mut groups: Vec<(MailboxKey, String, Vec<String>)> = Vec::new();
+        let mut groups: Vec<(MailboxKey, String, Vec<MailMessage>)> = Vec::new();
         for (messages, other) in moves {
-            for (key, ids) in by_mailbox(messages) {
+            for (key, grouped) in messages_by_mailbox(messages) {
                 match groups.iter_mut().find(|(known, mailbox, _)| *known == key && mailbox == other) {
-                    Some((_, _, grouped)) => grouped.extend(ids),
-                    None => groups.push((key, other.clone(), ids)),
+                    Some((_, _, existing)) => existing.extend(grouped),
+                    None => groups.push((key, other.clone(), grouped)),
                 }
             }
         }
-        let requests = groups.into_iter().map(|(key, other, ids)| {
-            let returned: Vec<MailMessage> = all.iter().filter(|message| carried(message, &key, &ids)).cloned().collect();
+        let batches: Vec<_> = groups
+            .into_iter()
+            .map(|(key, other, messages)| {
+                let ticket = self.state().overlay.begin_move(&key.account, &messages, !back);
+                (key, other, messages, ticket)
+            })
+            .collect();
+        let requests = batches.into_iter().map(|(key, other, messages, ticket)| async move {
             let (from, to) = if back { (other, key.mailbox.clone()) } else { (key.mailbox.clone(), other) };
+            let ids: Vec<String> = messages.iter().map(|m| m.id().to_string()).collect();
             let sending = ids.clone();
-            async move {
-                let result = self
-                    .provider_request(
-                        key.account.clone(),
-                        true,
-                        async move |backend: Arc<Backend>| backend.move_to(&sending, &from, &to).await,
-                        || {
-                            if back {
-                                self.remove_envelopes(&returned);
-                            }
-                        },
-                    )
-                    .await;
-                result.err().map(|error| (key, ids, error))
-            }
+            let seq = ticket.seq;
+            let result = self
+                .provider_request(
+                    key.account.clone(),
+                    ticket.turn,
+                    true,
+                    async move |backend: Arc<Backend>| backend.move_to(&sending, &from, &to).await,
+                    |ok| {
+                        let rollback = self.state().overlay.finish_move(&key.account, &messages, seq, ok);
+                        if back && !rollback.is_empty() {
+                            self.remove_envelopes(&rollback);
+                        }
+                    },
+                )
+                .await;
+            result.err().map(|error| (key, ids, error))
         });
         Refusals(futures::future::join_all(requests).await.into_iter().flatten().collect())
     }
@@ -434,33 +441,52 @@ impl Mail {
             return Refusals::default();
         }
         self.remove_envelopes(messages);
-        let requests = by_mailbox(messages).into_iter().map(|(key, ids)| {
+        let batches: Vec<_> = messages_by_mailbox(messages)
+            .into_iter()
+            .map(|(key, messages)| {
+                let ticket = self.state().overlay.begin_move(&key.account, &messages, true);
+                (key, messages, ticket)
+            })
+            .collect();
+        let requests = batches.into_iter().map(|(key, messages, ticket)| async move {
+            let ids: Vec<String> = messages.iter().map(|m| m.id().to_string()).collect();
             let sending = ids.clone();
-            async move {
-                let result = self
-                    .provider_request(key.account.clone(), true, async move |backend: Arc<Backend>| backend.delete(&sending).await, || {})
-                    .await;
-                result.err().map(|error| (key, ids, error))
-            }
+            let seq = ticket.seq;
+            let result = self
+                .provider_request(
+                    key.account.clone(),
+                    ticket.turn,
+                    true,
+                    async move |backend: Arc<Backend>| backend.delete(&sending).await,
+                    |ok| {
+                        let _ = self.state().overlay.finish_move(&key.account, &messages, seq, ok);
+                    },
+                )
+                .await;
+            result.err().map(|error| (key, ids, error))
         });
         Refusals(futures::future::join_all(requests).await.into_iter().flatten().collect())
     }
 
-    /// One request for a change already shown. A refusal (signing out included) is rolled back,
-    /// reported, and with `resync` the lists and counts are fetched afresh.
+    /// One request for a change already shown, serialized by its FIFO `turn` so rapid edits reach
+    /// the provider in exact user order. `finish(ok)` settles or rolls back the overlay before
+    /// releasing the turn; a refusal is reported, and with `resync` the lists and counts refresh.
     pub(super) async fn provider_request(
         self: &Arc<Self>,
         account: String,
+        turn: Turn,
         resync: bool,
         call: impl AsyncFnOnce(Arc<Backend>) -> Result<(), ApiError>,
-        rollback: impl FnOnce(),
+        finish: impl FnOnce(bool),
     ) -> Result<(), EngineError> {
+        let _release = turn.acquire().await;
         let result = match self.backend(&account) {
             Some(backend) => call(backend).await,
             None => Err(ApiError::new(0, "The account is no longer signed in.")),
         };
+        finish(result.is_ok());
+        drop(_release);
         let Err(error) = result else { return Ok(()) };
-        rollback();
         self.report(&error, Some(&account));
         if resync {
             self.clone().refresh();
@@ -494,6 +520,11 @@ impl Mail {
                 *envelope = Arc::new(changed);
             }
             self.cache.save_listing(CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() }, &key);
+        }
+        for known in state.known.values_mut() {
+            if known.conversation.messages.iter().any(|message| refs.contains(&message.message_ref())) {
+                known.conversation = updating(&known.conversation, refs, &change);
+            }
         }
         drop(state);
         self.events.emit_soon("conversations");

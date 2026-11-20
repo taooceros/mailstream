@@ -3,6 +3,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::UNIX_EPOCH;
 
 /// Writes `data` to a temporary file next to `path`, then renames it over `path`, creating
 /// `directory` first.
@@ -24,4 +25,15 @@ pub fn replace(directory: &Path, path: &Path, data: &[u8]) -> io::Result<()> {
 pub fn url_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     if cfg!(windows) { format!("/{}", text.replace('\\', "/")) } else { text.into_owned() }
+}
+
+/// Last modification time of `path` in Unix ms, if it exists.
+pub fn modified_ms(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
 }

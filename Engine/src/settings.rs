@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
@@ -400,11 +401,17 @@ pub fn typed_bool(word: &str) -> Option<bool> {
 pub struct SettingsFile {
     directory: PathBuf,
     path: PathBuf,
+    write_lock: Mutex<()>,
 }
 
 impl SettingsFile {
     pub fn new(directory: &Path) -> Self {
-        Self { directory: directory.to_path_buf(), path: directory.join("settings.json") }
+        Self { directory: directory.to_path_buf(), path: directory.join("settings.json"), write_lock: Mutex::new(()) }
+    }
+
+    /// Last modification time of `settings.json` in Unix ms, if present.
+    pub fn modified_ms(&self) -> Option<u64> {
+        files::modified_ms(&self.path)
     }
 
     pub fn path(&self) -> &Path {
@@ -432,68 +439,155 @@ impl SettingsFile {
     /// Valid values by setting, plus a message for each key that is unknown or invalid (those
     /// fall back to their default).
     pub fn read(&self) -> (Values, Vec<String>) {
-        let raw = match self.read_raw() {
-            Ok(raw) => raw,
-            Err(error) => return (Values::new(), vec![error.message]),
-        };
-        let mut values = Values::new();
-        let mut issues = Vec::new();
-        for (key, value) in &raw {
-            let Some(setting) = Setting::named(key) else {
-                if !RETIRED.contains(&key.as_str()) {
-                    issues.push(format!("Unknown setting \"{key}\" is ignored."));
-                }
-                continue;
-            };
-            match setting.validate(value) {
-                Ok(valid) => {
-                    values.insert(setting, valid);
-                }
-                Err(error) => issues.push(format!("{} The default applies.", error.message)),
-            }
+        match self.read_raw() {
+            Ok(raw) => parse_raw(&raw),
+            Err(error) => (Values::new(), vec![error.message]),
         }
-        (values, issues)
     }
 
     /// Sets (or with `None`, removes) one key, keeping everything else in the file as it was but
     /// `RETIRED` keys. Writing a default value removes the key, so the file lists only real changes.
     pub fn update(&self, setting: Setting, value: Option<&Value>) -> Result<(), EngineError> {
+        self.update_returning(setting, value).map(drop)
+    }
+
+    /// Like [`Self::update`], returning `(before, after, values)` from the same locked transaction.
+    fn update_returning(&self, setting: Setting, value: Option<&Value>) -> Result<(Value, Value, Values), EngineError> {
+        let _guard = self.write_lock.lock().expect("settings file lock");
         let mut raw = self.read_raw()?;
+        let before = setting.value(&parse_raw(&raw).0);
         for key in RETIRED {
             raw.remove(key);
         }
         let normalized = value.map(|value| setting.validate(value)).transpose()?;
-        match normalized {
-            Some(normalized) if normalized != setting.default_value() => {
-                raw.insert(setting.key().into(), normalized);
-            }
-            _ => {
-                raw.remove(setting.key());
-            }
+        apply_setting(&mut raw, setting, normalized);
+        self.persist(&raw)?;
+        let values = parse_raw(&raw).0;
+        let after = setting.value(&values);
+        Ok((before, after, values))
+    }
+
+    /// Applies `updates` in one atomic write only if `settings.json` still equals `expected_raw`.
+    /// Returns `Ok(false)` if another writer edited `settings.json` in the meantime.
+    pub(crate) fn update_batch_if_unchanged(
+        &self,
+        expected_raw: &Map<String, Value>,
+        updates: &[(Setting, Value)],
+    ) -> Result<bool, EngineError> {
+        let _guard = self.write_lock.lock().expect("settings file lock");
+        let mut raw = self.read_raw()?;
+        if &raw != expected_raw {
+            return Ok(false);
         }
-        let mut data = crate::json::encode(&raw, true, false);
+        if updates.is_empty() {
+            return Ok(true);
+        }
+        for key in RETIRED {
+            raw.remove(key);
+        }
+        for (setting, value) in updates {
+            let normalized = setting.validate(value)?;
+            apply_setting(&mut raw, *setting, Some(normalized));
+        }
+        self.persist(&raw)?;
+        Ok(true)
+    }
+
+    fn persist(&self, raw: &Map<String, Value>) -> Result<(), EngineError> {
+        let mut data = crate::json::encode(raw, true, false);
         data.push(b'\n');
         files::replace(&self.directory, &self.path, &data).map_err(|error| EngineError::failed(error.to_string()))
     }
+}
+fn parse_raw(raw: &Map<String, Value>) -> (Values, Vec<String>) {
+    let mut values = Values::new();
+    let mut issues = Vec::new();
+    for (key, value) in raw {
+        let Some(setting) = Setting::named(key) else {
+            if !RETIRED.contains(&key.as_str()) {
+                issues.push(format!("Unknown setting \"{key}\" is ignored."));
+            }
+            continue;
+        };
+        match setting.validate(value) {
+            Ok(valid) => {
+                values.insert(setting, valid);
+            }
+            Err(error) => issues.push(format!("{} The default applies.", error.message)),
+        }
+    }
+    (values, issues)
+}
+
+fn apply_setting(raw: &mut Map<String, Value>, setting: Setting, normalized: Option<Value>) {
+    match normalized {
+        Some(normalized) if normalized != setting.default_value() => {
+            raw.insert(setting.key().into(), normalized);
+        }
+        _ => {
+            raw.remove(setting.key());
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum EditKey {
+    Setting(Setting),
+    Trusted(String),
 }
 
 /// The settings in effect, following settings.json as it changes.
 pub struct Settings {
     file: SettingsFile,
     state: Mutex<(Values, Vec<String>)>,
+    /// In-process edit times (Unix ms) recorded by `config.*`.
+    edited_at: Mutex<BTreeMap<EditKey, u64>>,
 }
 
 impl Settings {
     pub fn new(directory: &Path) -> Self {
         let file = SettingsFile::new(directory);
         let state = Mutex::new(file.read());
-        Self { file, state }
+        Self { file, state, edited_at: Mutex::new(BTreeMap::new()) }
     }
 
     pub fn file(&self) -> &SettingsFile {
         &self.file
     }
 
+    /// When `setting` was last modified via `config.*` in this process, in Unix ms.
+    pub(crate) fn setting_edited_at(&self, setting: Setting) -> Option<u64> {
+        self.edited_at.lock().expect("settings edits lock").get(&EditKey::Setting(setting)).copied()
+    }
+
+    /// When `address` (trusted sender) was last added or removed via `config.*` in this process.
+    pub(crate) fn trusted_edited_at(&self, address: &str) -> Option<u64> {
+        self.edited_at
+            .lock()
+            .expect("settings edits lock")
+            .get(&EditKey::Trusted(address.trim().to_lowercase()))
+            .copied()
+    }
+
+    fn write_setting(&self, setting: Setting, value: Option<&Value>) -> Result<Value, EngineError> {
+        let (before, after, values) = self.file.update_returning(setting, value)?;
+        if before != after {
+            let at = now_ms();
+            let mut edits = self.edited_at.lock().expect("settings edits lock");
+            if setting == Setting::TrustedSenders {
+                let norm = |value: &Value| -> Vec<String> {
+                    strings(value).into_iter().map(|a| a.trim().to_lowercase()).collect()
+                };
+                let (old, new) = (norm(&before), norm(&after));
+                for address in old.iter().filter(|a| !new.contains(a)).chain(new.iter().filter(|a| !old.contains(a))) {
+                    edits.insert(EditKey::Trusted(address.clone()), at);
+                }
+            } else {
+                edits.insert(EditKey::Setting(setting), at);
+            }
+        }
+        Ok(answers::json(&setting.entry(&values)))
+    }
     /// Problems with the file as last read: unknown keys, invalid values, broken JSON.
     pub fn issues(&self) -> Vec<String> {
         self.state.lock().expect("settings lock").1.clone()
@@ -534,14 +628,9 @@ impl Settings {
             "config.set" => {
                 let setting = setting()?;
                 let value = setting.parse(args.get("value").and_then(Value::as_str).unwrap_or(""))?;
-                file.update(setting, Some(&value))?;
-                answers::json(&setting.entry(&file.read().0))
+                self.write_setting(setting, Some(&value))?
             }
-            "config.reset" => {
-                let setting = setting()?;
-                file.update(setting, None)?;
-                answers::json(&setting.entry(&file.read().0))
-            }
+            "config.reset" => self.write_setting(setting()?, None)?,
             "config.add" | "config.remove" => {
                 let setting = setting()?;
                 if !matches!(setting.kind(), Kind::Addresses) {
@@ -562,8 +651,7 @@ impl Settings {
                 } else {
                     current.into_iter().filter(|address| !given.contains(address)).collect()
                 };
-                file.update(setting, Some(&json!(next)))?;
-                answers::json(&setting.entry(&file.read().0))
+                self.write_setting(setting, Some(&json!(next)))?
             }
             "config.schema" => Setting::file_schema(),
             "config.path" => json!({ "path": file.path.display().to_string(), "exists": file.path.exists() }),
@@ -574,6 +662,10 @@ impl Settings {
 
 fn strings(value: &Value) -> Vec<String> {
     value.as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
 #[cfg(test)]

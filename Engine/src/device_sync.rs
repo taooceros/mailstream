@@ -18,7 +18,7 @@ use crate::answers::{self, DeviceSyncStatus, SyncDevice, SyncTicket};
 use crate::cloud_drop::{self, CloudDrop};
 use crate::commands::Arguments;
 use crate::peer_mail::PeerMail;
-use crate::peer_sync::{CloudConfig, Network, PeerSync, PeerSyncError, Service, Stored};
+use crate::peer_sync::{CloudConfig, Network, PeerSync, PeerSyncError, Service, Snapshot, Stamped, Stored};
 use crate::settings::{Setting, Settings, Values};
 use crate::signal::{ProcessSignal, next_wake};
 use crate::{EngineError, Events, files, model};
@@ -55,23 +55,62 @@ const SCALAR_SETTINGS: [Setting; 4] = [
 /// comes here, what only this device holds goes to the group, trusted senders end up the union of
 /// both, and where both set a key differently (an address the group untrusted included) the
 /// group's value wins, so joining never changes the other devices' settings.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Bridged {
+    namespace: Option<String>,
+    trusted: BTreeMap<String, Stamped<bool>>,
+    settings: BTreeMap<String, Stamped<Value>>,
+    /// Account records by id as last reconciled (accounts.json's JSON); `None`: removed.
+    accounts: BTreeMap<String, Stamped<Option<Value>>>,
+    /// Set by `sync.join` until the first reconcile with the joined group completes: pushes of
+    /// keys without a bridged value are then stamped [`JOIN_AT`], not now. `join` returns
+    /// before the group's entries have arrived, so "the group doesn't hold it" is unknown there.
+    joining: bool,
+}
+
+/// On-disk layout of `peer-sync/bridged.json`: keeps plain value maps for backward compatibility
+/// with pre-MS-429 files and stores per-key timestamps alongside them.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgedDisk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     namespace: Option<String>,
     #[serde(default)]
     trusted: BTreeMap<String, bool>,
     #[serde(default)]
     settings: BTreeMap<String, Value>,
-    /// Account records by id as last reconciled (accounts.json's JSON); `None`: removed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     accounts: BTreeMap<String, Option<Value>>,
-    /// Set by `sync.join` until the first reconcile with the joined group completes: pushes of
-    /// keys without a bridged value are then stamped [`JOIN_AT`], not now. `join` returns
-    /// before the group's entries have arrived, so "the group doesn't hold it" is unknown there.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    trusted_at: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    settings_at: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    accounts_at: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     joining: bool,
+}
+
+fn unpack_stamped<T>(values: BTreeMap<String, T>, times: &BTreeMap<String, u64>) -> BTreeMap<String, Stamped<T>> {
+    values
+        .into_iter()
+        .map(|(k, value)| {
+            let at = times.get(&k).copied().unwrap_or(0);
+            (k, Stamped { value, at })
+        })
+        .collect()
+}
+
+fn pack_stamped<T: Clone>(entries: &BTreeMap<String, Stamped<T>>) -> (BTreeMap<String, T>, BTreeMap<String, u64>) {
+    let mut values = BTreeMap::new();
+    let mut times = BTreeMap::new();
+    for (k, entry) in entries {
+        values.insert(k.clone(), entry.value.clone());
+        if entry.at > 0 {
+            times.insert(k.clone(), entry.at);
+        }
+    }
+    (values, times)
 }
 
 impl Bridged {
@@ -80,15 +119,37 @@ impl Bridged {
     }
 
     fn read(support_directory: &Path) -> Self {
-        match std::fs::read(Self::path(support_directory)) {
-            Ok(data) => serde_json::from_slice(&data).unwrap_or_default(),
-            Err(_) => Self::default(),
+        let Ok(data) = std::fs::read(Self::path(support_directory)) else {
+            return Self::default();
+        };
+        let Ok(disk) = serde_json::from_slice::<BridgedDisk>(&data) else {
+            return Self::default();
+        };
+        Self {
+            namespace: disk.namespace,
+            trusted: unpack_stamped(disk.trusted, &disk.trusted_at),
+            settings: unpack_stamped(disk.settings, &disk.settings_at),
+            accounts: unpack_stamped(disk.accounts, &disk.accounts_at),
+            joining: disk.joining,
         }
     }
 
     fn write(&self, support_directory: &Path) -> Result<(), EngineError> {
+        let (trusted, trusted_at) = pack_stamped(&self.trusted);
+        let (settings, settings_at) = pack_stamped(&self.settings);
+        let (accounts, accounts_at) = pack_stamped(&self.accounts);
+        let disk = BridgedDisk {
+            namespace: self.namespace.clone(),
+            trusted,
+            settings,
+            accounts,
+            trusted_at,
+            settings_at,
+            accounts_at,
+            joining: self.joining,
+        };
         let dir = support_directory.join("peer-sync");
-        let data = serde_json::to_vec_pretty(self).map_err(|error| EngineError::failed(error.to_string()))?;
+        let data = serde_json::to_vec_pretty(&disk).map_err(|error| EngineError::failed(error.to_string()))?;
         files::replace(&dir, &Self::path(support_directory), &data)
             .map_err(|error| EngineError::failed(error.to_string()))
     }
@@ -469,42 +530,67 @@ impl DeviceSync {
             return Ok(false);
         };
 
-        for _attempt in 0..2 {
+        let persisted = bridge.load(&self.support_directory, &namespace).clone();
+        let joining = persisted.joining;
+        let mut snapshot = sync.snapshot().await.map_err(map_error)?;
+
+        let Some(invalid) = self.reconcile_settings(sync, &mut bridge, &mut snapshot, joining).await? else {
+            return Ok(false);
+        };
+        let accounts_problem = self.reconcile_accounts(sync, &mut bridge, &status.endpoint_id, &namespace, &snapshot, joining).await;
+        let cloud_changed = self.reconcile_cloud(sync, &mut bridge, &namespace, &mut snapshot, joining).await?;
+
+        // Invalid keys or still-downloading remote entries sat out: keep joining until they settle.
+        bridge.bridged.joining = joining && (!invalid.is_empty() || !snapshot.pending.is_empty());
+        if bridge.bridged != persisted {
+            bridge.bridged.write(&self.support_directory)?;
+        }
+        self.meta.lock().expect("meta lock").problem = invalid_problem(&invalid).or(accounts_problem);
+        Ok(cloud_changed)
+    }
+
+    /// Reconciles `settings.json` (scalar settings + trusted senders) against `snapshot`, retrying
+    /// if the file changes mid-pass. Returns `Ok(None)` when `settings.json` is invalid JSON or
+    /// continuously raced (in which case another reconcile pass is queued).
+    async fn reconcile_settings(
+        &self,
+        sync: &PeerSync,
+        bridge: &mut BridgeState,
+        snapshot: &mut Snapshot,
+        joining: bool,
+    ) -> Result<Option<BTreeMap<Setting, String>>, EngineError> {
+        for _attempt in 0..3 {
             // Skip if settings.json is broken right now so we never push defaults over the group.
             let Ok(raw_before) = self.settings.file().read_raw() else {
-                return Ok(false);
+                return Ok(None);
             };
+            let file_mtime = self.settings.file().modified_ms();
             // Validate synced keys from `raw_before` itself: `SettingsFile::read` replaces an
             // invalid key with its default, which bridged as a local edit would reset every
             // paired device (MS-368), and reading the file a second time could race an edit.
             let (local_values, invalid) = synced_values(&raw_before);
             let trusted_valid = !invalid.contains_key(&Setting::TrustedSenders);
-            let prev_bridged = bridge.load(&self.support_directory, &namespace).clone();
-
-            let mut snapshot = sync.snapshot().await.map_err(map_error)?;
             let mut pushed = false;
 
             for setting in SCALAR_SETTINGS {
-                if invalid.contains_key(&setting) {
+                let key = setting.key();
+                if invalid.contains_key(&setting) || snapshot.pending.contains(&format!("v1/setting/{key}")) {
                     continue;
                 }
-                let key = setting.key();
                 let local = setting.value(&local_values);
-                let doc_key = format!("v1/setting/{key}");
-                let remote = snapshot.settings.get(key);
-                let pending = snapshot.pending.contains(&doc_key);
-                let base = prev_bridged.settings.get(key);
-                let should_push = match base {
-                    Some(prev) => *prev != local,
-                    None => local != setting.default_value() && remote.is_none() && !pending,
-                };
-                if should_push {
-                    let at = match base {
-                        Some(_) => bridge.next_at(remote.map_or(0, |r| r.at)),
-                        None if prev_bridged.joining => JOIN_AT,
-                        None => bridge.next_at(0),
-                    };
-                    sync.set_setting(key, local, at).await.map_err(map_error)?;
+                let base = bridge.bridged.settings.get(key);
+                let edit_at = pick_edit_at(self.settings.setting_edited_at(setting), base, file_mtime);
+                if let Some(at) = causal_write_at(
+                    &local,
+                    base,
+                    snapshot.settings.get(key),
+                    edit_at,
+                    joining,
+                    local != setting.default_value(),
+                ) && sync.set_setting(key, local.clone(), at).await.map_err(map_error)?
+                {
+                    bridge.bridged.settings.insert(key.to_string(), Stamped { value: local, at });
+                    bridge.last_at = bridge.last_at.max(at);
                     pushed = true;
                 }
             }
@@ -512,170 +598,178 @@ impl DeviceSync {
             let local_trusted = addresses(&local_values);
             if trusted_valid {
                 let mut all_addresses: BTreeSet<String> = local_trusted.clone();
-                all_addresses.extend(prev_bridged.trusted.keys().cloned());
+                all_addresses.extend(bridge.bridged.trusted.keys().cloned());
                 for address in all_addresses {
+                    if snapshot.pending.contains(&format!("v1/trusted/{address}")) {
+                        continue;
+                    }
                     let in_local = local_trusted.contains(&address);
-                    let doc_key = format!("v1/trusted/{address}");
-                    let remote = snapshot.trusted.get(&address);
-                    let pending = snapshot.pending.contains(&doc_key);
-                    let base = prev_bridged.trusted.get(&address).copied();
-                    let should_push = match base {
-                        Some(prev) => in_local != prev,
-                        None => in_local && remote.is_none() && !pending,
-                    };
-                    if should_push {
-                        let at = match base {
-                            Some(_) => bridge.next_at(remote.map_or(0, |r| r.at)),
-                            None if prev_bridged.joining => JOIN_AT,
-                            None => bridge.next_at(0),
-                        };
-                        sync.set_trusted(&address, in_local, at).await.map_err(map_error)?;
+                    let base = bridge.bridged.trusted.get(&address);
+                    let edit_at = pick_edit_at(self.settings.trusted_edited_at(&address), base, file_mtime);
+                    if let Some(at) = causal_write_at(
+                        &in_local,
+                        base,
+                        snapshot.trusted.get(&address),
+                        edit_at,
+                        joining,
+                        in_local,
+                    ) && sync.set_trusted(&address, in_local, at).await.map_err(map_error)?
+                    {
+                        bridge.bridged.trusted.insert(address, Stamped { value: in_local, at });
+                        bridge.last_at = bridge.last_at.max(at);
                         pushed = true;
                     }
                 }
             }
 
             if pushed {
-                snapshot = sync.snapshot().await.map_err(map_error)?;
+                bridge.bridged.write(&self.support_directory)?;
+                *snapshot = sync.snapshot().await.map_err(map_error)?;
             }
 
-            // Re-check whether settings.json was edited underneath us while pushing to iroh-docs.
-            let Ok(raw_now) = self.settings.file().read_raw() else {
-                return Ok(false);
-            };
-            if raw_now != raw_before {
-                continue;
-            }
-
-            let mut next_bridged = Bridged {
-                namespace: Some(namespace.clone()),
-                // Invalid keys sat out: they merge as joining once the file is fixed.
-                joining: prev_bridged.joining && !invalid.is_empty(),
-                ..Default::default()
-            };
+            let mut next_settings = BTreeMap::new();
             let mut pending_updates: Vec<(Setting, Value)> = Vec::new();
+            let still_joining = joining && (!invalid.is_empty() || !snapshot.pending.is_empty());
 
             for setting in SCALAR_SETTINGS {
                 let key = setting.key();
-                let doc_key = format!("v1/setting/{key}");
-                // Pending or invalid here: keep the old base, so the change is bridged once it
-                // lands or the file is fixed.
-                if snapshot.pending.contains(&doc_key) || invalid.contains_key(&setting) {
-                    if let Some(prev) = prev_bridged.settings.get(key) {
-                        next_bridged.settings.insert(key.to_string(), prev.clone());
+                if snapshot.pending.contains(&format!("v1/setting/{key}")) || invalid.contains_key(&setting) {
+                    if let Some(prev) = bridge.bridged.settings.get(key) {
+                        next_settings.insert(key.to_string(), prev.clone());
                     }
                     continue;
                 }
                 if let Some(stamped) = snapshot.settings.get(key) {
                     let local = setting.value(&local_values);
-                    if stamped.value != local {
+                    let value = if stamped.value != local {
                         match setting.validate(&stamped.value) {
                             Ok(valid) => {
                                 pending_updates.push((setting, valid.clone()));
-                                next_bridged.settings.insert(key.to_string(), valid);
+                                valid
                             }
-                            Err(_) => {
-                                next_bridged.settings.insert(key.to_string(), stamped.value.clone());
-                            }
+                            Err(_) => stamped.value.clone(),
                         }
                     } else {
-                        next_bridged.settings.insert(key.to_string(), local);
-                    }
+                        local
+                    };
+                    next_settings.insert(key.to_string(), Stamped { value, at: stamped.at });
+                } else if !still_joining {
+                    next_settings.insert(key.to_string(), Stamped { value: setting.default_value(), at: 0 });
                 }
             }
 
-            if trusted_valid {
-                let mut desired_trusted = local_trusted.clone();
+            let next_trusted = if trusted_valid {
+                let mut next = BTreeMap::new();
+                let mut desired = local_trusted.clone();
                 for (address, stamped) in &snapshot.trusted {
-                    let doc_key = format!("v1/trusted/{address}");
-                    if snapshot.pending.contains(&doc_key) {
-                        continue;
-                    }
-                    if !is_valid_email(address) {
+                    if snapshot.pending.contains(&format!("v1/trusted/{address}")) || !is_valid_email(address) {
                         continue;
                     }
                     if stamped.value {
-                        desired_trusted.insert(address.clone());
+                        desired.insert(address.clone());
                     } else {
-                        desired_trusted.remove(address);
+                        desired.remove(address);
                     }
-                    next_bridged.trusted.insert(address.clone(), stamped.value);
+                    next.insert(address.clone(), stamped.clone());
                 }
                 for address in &local_trusted {
-                    let doc_key = format!("v1/trusted/{address}");
-                    if snapshot.pending.contains(&doc_key)
-                        && let Some(&prev) = prev_bridged.trusted.get(address)
+                    if snapshot.pending.contains(&format!("v1/trusted/{address}"))
+                        && let Some(prev) = bridge.bridged.trusted.get(address)
                     {
-                        next_bridged.trusted.insert(address.clone(), prev);
+                        next.insert(address.clone(), prev.clone());
                     }
                 }
-                if desired_trusted != local_trusted {
-                    let list: Vec<String> = desired_trusted.into_iter().collect();
+                if desired != local_trusted {
+                    let list: Vec<String> = desired.into_iter().collect();
                     pending_updates.push((Setting::TrustedSenders, json!(list)));
                 }
+                next
             } else {
-                next_bridged.trusted = prev_bridged.trusted.clone();
-            }
+                bridge.bridged.trusted.clone()
+            };
 
-            let mut accounts_problem = None;
-            let mut drop_key = DropKey::without_key(&snapshot);
-            next_bridged.accounts = prev_bridged.accounts.clone();
-            if let Some(host) = self.accounts.get().and_then(Weak::upgrade) {
-                let pass = account_sync::Pass {
-                    sync,
-                    host: &*host,
-                    support_directory: &self.support_directory,
-                    me: &status.endpoint_id,
-                    bridged: &prev_bridged.accounts,
-                    joining: prev_bridged.joining,
-                    join_at: JOIN_AT,
-                };
-                match account_sync::reconcile(pass, &mut |min_at| bridge.next_at(min_at)).await {
-                    Ok(done) => {
-                        next_bridged.accounts = done.bridged;
-                        drop_key = done.drop_key;
-                    }
-                    Err(error) => accounts_problem = Some(format!("Accounts: {}", error.message)),
-                }
+            // Atomically apply remote settings only if settings.json wasn't edited during this pass.
+            if !self.settings.file().update_batch_if_unchanged(&raw_before, &pending_updates)? {
+                continue;
             }
-            *self.drop_key.lock().expect("drop key lock") = Some((namespace.clone(), drop_key));
-
-            // Per-sync-group Cloudflare fallback (MS-419): migrate a pre-MS-419 local `cloud.json`
-            // into the active group once (never while joining another group), then mirror
-            // `v1/cloud` locally.
-            let mut cloud_changed = false;
-            if !snapshot.pending.contains("v1/cloud") {
-                if !prev_bridged.joining
-                    && snapshot.cloud.is_none()
-                    && let Some(url) = self.cloud.legacy_enabled_url()
-                {
-                    let config = CloudConfig { enabled: true, url: Some(url), at: bridge.next_at(0) };
-                    if sync.set_cloud(&config).await.map_err(map_error)? {
-                        snapshot.cloud = Some(config);
-                    }
-                }
-                cloud_changed = self.cloud.apply_group(&namespace, snapshot.cloud.as_ref())?;
-            }
-            if cloud_changed || self.cloud.has_pending_cleanup(&namespace) {
-                self.cloud_wake.notify_one();
-            }
-
-            if !pending_updates.is_empty() {
-                for (setting, value) in &pending_updates {
-                    self.settings.file().update(*setting, Some(value))?;
-                }
-            }
-            if next_bridged != prev_bridged {
-                next_bridged.write(&self.support_directory)?;
-                bridge.bridged = next_bridged;
-            }
+            bridge.bridged.settings = next_settings;
+            bridge.bridged.trusted = next_trusted;
             if !pending_updates.is_empty() && self.settings.reload() {
                 self.events.emit("settings");
             }
-            self.meta.lock().expect("meta lock").problem = invalid_problem(&invalid).or(accounts_problem);
-            return Ok(cloud_changed);
+            return Ok(Some(invalid));
         }
-        Ok(false)
+        let _ = self.wake_tx.send(());
+        Ok(None)
+    }
+
+    async fn reconcile_accounts(
+        &self,
+        sync: &PeerSync,
+        bridge: &mut BridgeState,
+        me: &str,
+        namespace: &str,
+        snapshot: &Snapshot,
+        joining: bool,
+    ) -> Option<String> {
+        let mut problem = None;
+        let mut drop_key = DropKey::without_key(snapshot);
+        if let Some(host) = self.accounts.get().and_then(Weak::upgrade) {
+            let (bridged_accounts, last_at) = (&bridge.bridged.accounts, &mut bridge.last_at);
+            let pass = account_sync::Pass {
+                sync,
+                host: &*host,
+                support_directory: &self.support_directory,
+                me,
+                bridged: bridged_accounts,
+                local_modified_ms: files::modified_ms(&self.support_directory.join("accounts.json")),
+                joining,
+                join_at: JOIN_AT,
+            };
+            let result = account_sync::reconcile(pass, &mut |min_at| {
+                let next = now_ms().max(*last_at + 1).max(min_at + 1);
+                *last_at = next;
+                next
+            })
+            .await;
+            match result {
+                Ok(done) => {
+                    bridge.bridged.accounts = done.bridged;
+                    drop_key = done.drop_key;
+                }
+                Err(error) => problem = Some(format!("Accounts: {}", error.message)),
+            }
+        }
+        *self.drop_key.lock().expect("drop key lock") = Some((namespace.to_string(), drop_key));
+        problem
+    }
+
+    /// Mirrors `v1/cloud` locally, migrating a pre-MS-419 `cloud.json` once (never while joining).
+    async fn reconcile_cloud(
+        &self,
+        sync: &PeerSync,
+        bridge: &mut BridgeState,
+        namespace: &str,
+        snapshot: &mut Snapshot,
+        joining: bool,
+    ) -> Result<bool, EngineError> {
+        let mut cloud_changed = false;
+        if !snapshot.pending.contains("v1/cloud") {
+            if !joining
+                && snapshot.cloud.is_none()
+                && let Some(url) = self.cloud.legacy_enabled_url()
+            {
+                let config = CloudConfig { enabled: true, url: Some(url), at: bridge.next_at(0) };
+                if sync.set_cloud(&config).await.map_err(map_error)? {
+                    snapshot.cloud = Some(config);
+                }
+            }
+            cloud_changed = self.cloud.apply_group(namespace, snapshot.cloud.as_ref())?;
+        }
+        if cloud_changed || self.cloud.has_pending_cleanup(namespace) {
+            self.cloud_wake.notify_one();
+        }
+        Ok(cloud_changed)
     }
 
     pub(crate) async fn run(&self, command: &str, args: &Arguments) -> Result<Value, EngineError> {
@@ -821,7 +915,7 @@ impl DeviceSync {
                     return Err(map_error(PeerSyncError::NoGroup));
                 }
                 self.open_or_err().await?;
-                let (namespace, url) = {
+                {
                     let mut bridge = self.bridge.lock().await;
                     let guard = self.sync.read().await;
                     let sync = guard.as_ref().expect("opened");
@@ -841,9 +935,8 @@ impl DeviceSync {
                     let at = bridge.next_at(min_at);
                     let config = CloudConfig { enabled: true, url: Some(url.clone()), at };
                     sync.set_cloud(&config).await.map_err(map_error)?;
-                    (namespace, url)
-                };
-                self.cloud.enable_for_group(&namespace, url)?;
+                    self.cloud.enable_for_group(&namespace, url)?;
+                }
                 self.cloud_exchange().await;
                 self.close_unless_syncing().await;
                 self.events.emit("deviceSync");
@@ -854,7 +947,7 @@ impl DeviceSync {
                     return Err(map_error(PeerSyncError::NoGroup));
                 }
                 self.open_or_err().await?;
-                let (namespace, url) = {
+                let namespace = {
                     let mut bridge = self.bridge.lock().await;
                     let guard = self.sync.read().await;
                     let sync = guard.as_ref().expect("opened");
@@ -867,9 +960,10 @@ impl DeviceSync {
                     let at = bridge.next_at(min_at);
                     let config = CloudConfig { enabled: false, url: url.clone(), at };
                     sync.set_cloud(&config).await.map_err(map_error)?;
-                    (namespace, url)
+                    self.cloud.mark_disabled_for_group(&namespace, url)?;
+                    namespace
                 };
-                self.cloud.disable_for_group(&namespace, url).await;
+                self.cloud.cleanup_disabled_upload(&namespace).await;
                 self.close_unless_syncing().await;
                 self.events.emit("deviceSync");
                 Ok(answers::json(&self.status_answer().await))
@@ -1037,6 +1131,47 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
+/// Best known edit time (Unix ms) for a local `settings.json` change: the in-process `config.*`
+/// timestamp if newer than the last synced `base.at`, else `settings.json`'s mtime.
+fn pick_edit_at<T>(in_process: Option<u64>, base: Option<&Stamped<T>>, file_mtime: Option<u64>) -> u64 {
+    let floor = base.map_or(0, |b| b.at);
+    in_process.filter(|&at| at > floor).or(file_mtime).unwrap_or_else(now_ms)
+}
+
 fn iso_ms(ms: u64) -> String {
     model::iso8601(model::date_from_unix(ms as f64 / 1000.0))
+}
+
+/// Timestamp to publish a local change under, or `None` when nothing should be pushed.
+///
+/// Single invariant across settings, trusted senders, and accounts:
+/// - A local edit carries its actual time `edit_at`, floored only at `base.at + 1` (the causal
+///   timestamp this device had already observed before editing), NEVER bumped above an unseen
+///   concurrent `remote.at`. Thus `PeerSync`'s LWW rule always respects whichever edit genuinely
+///   happened latest (online, offline, or via CloudDrop), while causal edits after an already
+///   observed clock-skewed remote value still supersede it.
+/// - Joining a group stamps pre-existing local values with [`JOIN_AT`], so the group always wins
+///   join-time conflicts (MS-367).
+pub(crate) fn causal_write_at<T: PartialEq>(
+    local: &T,
+    base: Option<&Stamped<T>>,
+    remote: Option<&Stamped<T>>,
+    edit_at: u64,
+    joining: bool,
+    push_when_unbridged: bool,
+) -> Option<u64> {
+    match base {
+        Some(prev) if prev.value == *local => None,
+        Some(prev) => {
+            let floor = if prev.at > 0 {
+                prev.at
+            } else {
+                remote.filter(|r| r.value == prev.value).map_or(0, |r| r.at)
+            };
+            Some(edit_at.max(floor + 1))
+        }
+        None if !push_when_unbridged => None,
+        None if joining => remote.is_none().then_some(JOIN_AT),
+        None => Some(edit_at.max(1)),
+    }
 }

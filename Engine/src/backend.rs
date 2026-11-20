@@ -67,7 +67,7 @@ pub struct Identity {
 }
 
 /// The flags a change sets or clears.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Flag {
     Seen,
     Flagged,

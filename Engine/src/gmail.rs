@@ -553,9 +553,9 @@ impl Entry {
         envelope
     }
 
-    /// Carries a user label (`Label_…`) `names` lacks: one made since they were read.
-    fn has_unknown_label(&self, names: &HashMap<String, String>) -> bool {
-        self.labels.iter().any(|id| id.starts_with("Label_") && !names.contains_key(id))
+    /// User label ids (`Label_…`) this entry carries that `names` lacks.
+    fn unknown_labels<'a>(&'a self, names: &'a HashMap<String, String>) -> impl Iterator<Item = &'a str> {
+        self.labels.iter().filter(|id| id.starts_with("Label_") && !names.contains_key(*id)).map(String::as_str)
     }
 
     /// The entry as a search hit, in the mailbox its labels list it under: Inbox, Sent or Drafts
@@ -566,10 +566,15 @@ impl Entry {
     }
 }
 
-/// The user labels' names by id, and when they were read.
-type LabelNames = Option<(Arc<HashMap<String, String>>, std::time::Instant)>;
+/// The user labels' names by id, any label ids still absent after that read, and when it ran.
+#[derive(Clone)]
+struct LabelNames {
+    names: Arc<HashMap<String, String>>,
+    missing: HashSet<String>,
+    read: std::time::Instant,
+}
 
-/// Labels unknown to the names read this recently wait for a later read.
+/// Label ids already absent from `GET /labels` wait this long before asking again.
 const NAMES_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Serialize, Deserialize)]
@@ -643,7 +648,7 @@ struct EnvelopeCache {
     imap: Arc<imap::ImapClient>,
     file: PathBuf,
     state: Mutex<CacheState>,
-    names: std::sync::Mutex<LabelNames>,
+    names: std::sync::Mutex<Option<LabelNames>>,
 }
 
 impl EnvelopeCache {
@@ -661,20 +666,34 @@ impl EnvelopeCache {
             .filter(|label| label.kind.as_deref() == Some("user"))
             .map(|label| (label.id.clone(), label.name.clone()))
             .collect();
-        *self.names.lock().expect("label names") = Some((Arc::new(names), std::time::Instant::now()));
+        *self.names.lock().expect("label names") =
+            Some(LabelNames { names: Arc::new(names), missing: HashSet::new(), read: std::time::Instant::now() });
         Ok(labels)
     }
 
-    /// The user labels' names, read once and again when `entries` carry a label they lack.
+    /// The user labels' names, read once and again whenever `entries` carry a user label id not
+    /// yet seen (label ids still absent after a read are throttled for [`NAMES_REFRESH`]).
     async fn names(&self, entries: &[Entry], priority: Priority) -> Result<Arc<HashMap<String, String>>, ApiError> {
         let known = self.names.lock().expect("label names").clone();
-        if let Some((names, read)) = known
-            && (read.elapsed() < NAMES_REFRESH || !entries.iter().any(|entry| entry.has_unknown_label(&names)))
-        {
-            return Ok(names);
+        if let Some(known) = known {
+            let fresh = known.read.elapsed() < NAMES_REFRESH;
+            let needs_refresh = entries.iter().any(|entry| {
+                entry.unknown_labels(&known.names).any(|id| !fresh || !known.missing.contains(id))
+            });
+            if !needs_refresh {
+                return Ok(known.names);
+            }
         }
         self.labels(priority).await?;
-        Ok(self.names.lock().expect("label names").as_ref().map(|(names, _)| names.clone()).unwrap_or_default())
+        let mut slot = self.names.lock().expect("label names");
+        let Some(current) = slot.as_mut() else { return Ok(Arc::default()) };
+        let still_missing: Vec<String> = entries
+            .iter()
+            .flat_map(|entry| entry.unknown_labels(&current.names))
+            .map(str::to_owned)
+            .collect();
+        current.missing.extend(still_missing);
+        Ok(current.names.clone())
     }
 
     /// Reads the disk snapshot once, before anything else touches the entries.
@@ -901,21 +920,34 @@ impl EnvelopeCache {
             let known = self.names.lock().expect("label names").clone();
             let needs_refresh = match &known {
                 None => true,
-                Some((names, read)) => {
-                    read.elapsed() >= NAMES_REFRESH
-                        && messages.iter().flat_map(|msg| msg.user_labels.iter()).any(|name| {
-                            !names.values().any(|known_name| known_name == name || known_name.eq_ignore_ascii_case(name))
-                        })
+                Some(known) => {
+                    let fresh = known.read.elapsed() < NAMES_REFRESH;
+                    messages.iter().flat_map(|msg| msg.user_labels.iter()).any(|name| {
+                        !known.names.values().any(|k| k == name || k.eq_ignore_ascii_case(name))
+                            && (!fresh || !known.missing.contains(&name.to_lowercase()))
+                    })
                 }
             };
             if needs_refresh {
                 self.labels(priority).await?;
-                self.names.lock().expect("label names").as_ref().map(|(names, _)| names.clone()).unwrap_or_default()
+                let mut slot = self.names.lock().expect("label names");
+                if let Some(current) = slot.as_mut() {
+                    let still_missing: Vec<String> = messages
+                        .iter()
+                        .flat_map(|msg| msg.user_labels.iter())
+                        .filter(|name| !current.names.values().any(|k| k == *name || k.eq_ignore_ascii_case(name)))
+                        .map(|name| name.to_lowercase())
+                        .collect();
+                    current.missing.extend(still_missing);
+                    current.names.clone()
+                } else {
+                    Arc::default()
+                }
             } else {
-                known.map(|(names, _)| names).unwrap_or_default()
+                known.map(|k| k.names).unwrap_or_default()
             }
         } else {
-            self.names.lock().expect("label names").as_ref().map(|(names, _)| names.clone()).unwrap_or_default()
+            self.names.lock().expect("label names").as_ref().map(|k| k.names.clone()).unwrap_or_default()
         };
 
         let by_name: HashMap<&str, &str> = names.iter().map(|(id, name)| (name.as_str(), id.as_str())).collect();

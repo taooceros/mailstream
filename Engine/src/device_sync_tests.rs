@@ -607,3 +607,120 @@ fn removing_a_device_withdraws_its_sign_ins_and_stops_its_sync() {
         sync.shutdown().await;
     });
 }
+
+#[test]
+fn causal_write_at_respects_real_edit_time_and_clock_skew() {
+    use crate::device_sync::causal_write_at;
+    use crate::peer_sync::Stamped;
+
+    let stamped = |v: i64, at: u64| Stamped { value: json!(v), at };
+
+    // Unchanged local value pushes nothing.
+    assert_eq!(causal_write_at(&json!(7), Some(&stamped(7, 1000)), Some(&stamped(7, 1000)), 2000, false, true), None);
+
+    // Offline local edit made at 1500 vs concurrent newer remote edit at 2000 (base was 7 @ 1000):
+    // local edit keeps its real time 1500 rather than forcing remote.at + 1, so 2000 wins.
+    assert_eq!(
+        causal_write_at(&json!(14), Some(&stamped(7, 1000)), Some(&stamped(21, 2000)), 1500, false, true),
+        Some(1500)
+    );
+
+    // Offline local edit made at 2500 vs concurrent older remote edit at 2000: 2500 > 2000 wins.
+    assert_eq!(
+        causal_write_at(&json!(14), Some(&stamped(7, 1000)), Some(&stamped(21, 2000)), 2500, false, true),
+        Some(2500)
+    );
+
+    // Causal edit after observing a clock-skewed remote value (base.at == remote.at == 9000):
+    // floored at base.at + 1 so the user's explicit post-sync edit still supersedes it.
+    assert_eq!(
+        causal_write_at(&json!(30), Some(&stamped(21, 9000)), Some(&stamped(21, 9000)), 3000, false, true),
+        Some(9001)
+    );
+
+    // Legacy bridged entry (at == 0) matching remote's value still inherits remote.at as floor.
+    assert_eq!(
+        causal_write_at(&json!(30), Some(&stamped(21, 0)), Some(&stamped(21, 9000)), 3000, false, true),
+        Some(9001)
+    );
+
+    // Joining stamps pre-existing local values at JOIN_AT (1) only when the group lacks the key.
+    assert_eq!(causal_write_at(&json!(14), None, None, 3000, true, true), Some(1));
+    assert_eq!(causal_write_at(&json!(14), None, Some(&stamped(7, 1000)), 3000, true, true), None);
+}
+
+/// MS-429: an older offline edit on one device must never overwrite a newer edit made on another
+/// device when the offline device reconnects, and a newer offline edit must win over an older one.
+#[test]
+fn offline_edit_ordering_respects_newest_change_across_peers() {
+    use std::time::SystemTime;
+
+    let lookup = MemoryLookup::new();
+    let cfg_a = sync_config(&lookup);
+    let cfg_b = sync_config(&lookup);
+
+    let engine_a = Engine::start(cfg_a.clone());
+    let engine_b = Engine::start(cfg_b.clone());
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({}))
+        .unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+
+    // Establish synced baseline (autoRead.days = 7, plus autoRead.enabled at default false).
+    call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "7" })).unwrap();
+    until("both devices to hold baseline autoRead.days = 7", || {
+        setting_value(&engine_b, "autoRead.days") == json!(7)
+    });
+
+    // 1. A goes offline and edits autoRead.days = 14 at T - 60s (older than B's edit at T).
+    drop(engine_a);
+    run_settings_command(
+        &cfg_a.support_directory,
+        "config.set",
+        json!({ "key": "autoRead.days", "value": "14" }).as_object().unwrap(),
+    )
+    .unwrap();
+    let path_a = cfg_a.support_directory.join("settings.json");
+    std::fs::File::options()
+        .write(true)
+        .open(&path_a)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+
+    // B makes a newer edit (autoRead.days = 21) at now.
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "21" })).unwrap();
+
+    // A restarts and reconnects: B's newer 21 must win on both devices.
+    let engine_a = Engine::start(cfg_a.clone());
+    until("A to adopt B's newer autoRead.days = 21", || setting_value(&engine_a, "autoRead.days") == json!(21));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(setting_value(&engine_b, "autoRead.days"), json!(21), "A's older offline edit must not clobber B");
+
+    // 2. Concurrent edit to a previously-default setting: B sets autoRead.enabled = true at T,
+    //    A was offline and edited autoRead.days = 30 at T + 5s (newer than B's 21): A's 30 wins.
+    drop(engine_a);
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "10" })).unwrap();
+    run_settings_command(
+        &cfg_a.support_directory,
+        "config.set",
+        json!({ "key": "autoRead.days", "value": "30" }).as_object().unwrap(),
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path_a)
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+
+    let engine_a = Engine::start(cfg_a.clone());
+    until("B to adopt A's newer autoRead.days = 30", || setting_value(&engine_b, "autoRead.days") == json!(30));
+    assert_eq!(setting_value(&engine_a, "autoRead.days"), json!(30));
+
+    drop(engine_a);
+    drop(engine_b);
+}

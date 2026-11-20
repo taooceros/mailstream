@@ -11,7 +11,7 @@ use crate::model::{Envelope, MessageRef};
 use crate::tagsync::{self, Push};
 
 impl Envelope {
-    fn retag(&mut self, add: &[String], remove: &[String]) {
+    pub(super) fn retag(&mut self, add: &[String], remove: &[String]) {
         let before: Vec<String> = self.tags.iter().cloned().collect();
         self.tags = tagsync::retagged(&before, add, remove).into_iter().collect();
     }
@@ -68,12 +68,19 @@ impl Mail {
         let mut failed: HashSet<String> = HashSet::new();
         for change in &changes {
             self.update_envelopes(&change.refs, |envelope| envelope.retag(&change.add, &change.remove));
+            let ticket = self.state().overlay.begin_tags(&change.account, &change.refs, &change.add, &change.remove);
             let result = self
                 .provider_request(
                     change.account.clone(),
+                    ticket.turn,
                     false,
                     async |backend: Arc<Backend>| backend.set_tags(&change.ids, &change.add, &change.remove).await,
-                    || self.update_envelopes(&change.refs, |envelope| envelope.retag(&change.remove, &change.add)),
+                    |ok| {
+                        let rollback = self.state().overlay.finish_tags(&change.refs, ticket.seq, ok);
+                        if !rollback.is_empty() {
+                            self.update_envelopes(&rollback, |envelope| envelope.retag(&change.remove, &change.add));
+                        }
+                    },
                 )
                 .await;
             if result.is_err() {

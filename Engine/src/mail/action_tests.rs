@@ -791,3 +791,210 @@ fn replies_use_matching_alias_delivered_to_forwarded_account_or_from_override() 
     drop(engine);
     cleanup(&config);
 }
+
+/// MS-429: an in-flight background refresh (listings and unread counts) that started before a
+/// user's read/archive action must not overwrite those edits when its stale server answer lands;
+/// a later refresh started after the action settled still takes fresh server truth.
+#[test]
+fn in_flight_refresh_does_not_clobber_optimistic_actions_or_counts() {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use crate::mail_tests::gmail_batch_with_unread;
+
+    let metadata = gmail_metadata();
+    let tokens = AtomicUsize::new(0);
+    let delay_refresh = Arc::new(AtomicBool::new(false));
+    let list_hit = Arc::new(AtomicBool::new(false));
+    let counts_hit = Arc::new(AtomicBool::new(false));
+    let server_archived_i05 = Arc::new(AtomicBool::new(false));
+    let server_read_i00 = Arc::new(AtomicBool::new(false));
+
+    let (delay_flag, list_flag, counts_flag, arch_flag, read_flag) = (
+        delay_refresh.clone(),
+        list_hit.clone(),
+        counts_hit.clone(),
+        server_archived_i05.clone(),
+        server_read_i00.clone(),
+    );
+    let server = FakeServer::start(move |request| {
+        let path = request.path.as_str();
+        if path == "/token" {
+            return token_reply(&tokens);
+        }
+        if path == "/batch/gmail/v1" {
+            let is_labels = request.text().contains("/labels/");
+            let delayed = is_labels && delay_flag.load(Ordering::SeqCst);
+            if delayed {
+                counts_flag.store(true, Ordering::SeqCst);
+            }
+            let unread = if read_flag.load(Ordering::SeqCst) { 1 } else { 3 };
+            let reply = gmail_batch_with_unread(request, &metadata, unread);
+            return if delayed { reply.after(Duration::from_millis(350)) } else { reply };
+        }
+        if request.method == "POST" {
+            return Reply::json(json!({}));
+        }
+        let Some(resource) = path.strip_prefix("/gmail/v1/users/me/") else {
+            return Reply::status(404, json!({ "error": { "message": "No such path" } }));
+        };
+        match resource {
+            "profile" => Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "100" })),
+            "settings/sendAs" => {
+                Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "displayName": "Me Gmail", "isPrimary": true }] }))
+            }
+            "labels" => Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" }, { "id": "SENT", "name": "SENT", "type": "system" },
+                { "id": "TRASH", "name": "TRASH", "type": "system" }, { "id": "SPAM", "name": "SPAM", "type": "system" },
+            ]})),
+            "history" => Reply::json(json!({ "historyId": "100" })),
+            "messages" => {
+                let delayed = delay_flag.load(Ordering::SeqCst) && request.param("labelIds") == Some("INBOX");
+                if delayed {
+                    list_flag.store(true, Ordering::SeqCst);
+                }
+                let ids: Vec<String> = match request.param("labelIds") {
+                    Some("INBOX") => (0..6)
+                        .map(|n| format!("i{n:02}"))
+                        .filter(|id| !(arch_flag.load(Ordering::SeqCst) && id == "i05"))
+                        .collect(),
+                    Some("SENT") => vec!["s0".into()],
+                    _ => vec![],
+                };
+                let items: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
+                let reply = Reply::json(json!({ "messages": items, "resultSizeEstimate": ids.len() }));
+                if delayed { reply.after(Duration::from_millis(350)) } else { reply }
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
+        }
+    });
+
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    wait_until("initial counts", || call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"][0]["unread"] == json!(3));
+    let listing = call(&engine, "mail.list", json!({ "limit": 10 })).unwrap();
+    let c0 = "me@gmail.com|i00@x";
+    let c1 = "me@gmail.com|i05@x";
+    assert_eq!(conversation(&listing, c0)["unread"], true);
+    assert!(ids(&listing).contains(&c1.to_string()));
+
+    // Start a slow INBOX listing + counts refresh (in flight for 350ms, returning pre-action state).
+    delay_refresh.store(true, Ordering::SeqCst);
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("in-flight refresh reached server", || {
+        list_hit.load(Ordering::SeqCst) && counts_hit.load(Ordering::SeqCst)
+    });
+    delay_refresh.store(false, Ordering::SeqCst);
+
+    // While that refresh is in flight, user marks i00 read and archives i05.
+    let read_res = call(&engine, "mail.read", json!({ "ids": [c0] })).unwrap();
+    assert_eq!(read_res["done"], json!([c0]), "{read_res}");
+    let arch_res = call(&engine, "mail.archive", json!({ "ids": [c1] })).unwrap();
+    assert_eq!(arch_res["done"], json!([c1]), "{arch_res}");
+    let after_act = call(&engine, "mail.list", json!({ "cached": true, "limit": 10 })).unwrap();
+    assert_eq!(conversation(&after_act, c0)["unread"], false);
+    assert!(!ids(&after_act).contains(&c1.to_string()));
+    let unread_after_act = call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"][0]["unread"].as_i64().unwrap();
+    assert!(unread_after_act < 3, "unread count should have dropped, got {unread_after_act}");
+
+    // Wait for the stale in-flight refresh (which still returns i05 in INBOX and unread=3) to finish.
+    wait_until("in-flight refresh finishes", || call(&engine, "status", json!({})).unwrap()["sync"]["loading"] == json!(false));
+    std::thread::sleep(Duration::from_millis(150));
+    // User's edits and unread count MUST survive the stale refresh!
+    let cached = call(&engine, "mail.list", json!({ "cached": true, "limit": 10 })).unwrap();
+    assert_eq!(conversation(&cached, c0)["unread"], false, "stale refresh flipped i00 back to unread");
+    assert!(!ids(&cached).contains(&c1.to_string()), "stale refresh resurrected archived i05");
+    assert_eq!(
+        call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"][0]["unread"],
+        json!(unread_after_act),
+        "stale counts refresh clobbered unread count"
+    );
+
+    // A fresh refresh started AFTER actions settled picks up authoritative server state.
+    server_archived_i05.store(true, Ordering::SeqCst);
+    server_read_i00.store(true, Ordering::SeqCst);
+    call(&engine, "mail.list", json!({ "limit": 10 })).unwrap();
+    call(&engine, "refresh", json!({})).unwrap();
+    wait_until("fresh counts land", || call(&engine, "mailboxes", json!({})).unwrap()["me@gmail.com"][0]["unread"] == json!(1));
+
+    drop(engine);
+    cleanup(&config);
+}
+
+/// MS-429: rapid opposite user actions on the same conversation (`mail.read` then `mail.read
+/// --unread`) reach the provider in exact user-issued order, never out of order.
+#[test]
+fn rapid_opposite_actions_reach_provider_in_user_order() {
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    let metadata = gmail_metadata();
+    let tokens = AtomicUsize::new(0);
+    let modify_count = Arc::new(AtomicUsize::new(0));
+    let modify_bodies: Arc<Mutex<Vec<Value>>> = Arc::default();
+
+    let (count_ref, bodies_ref) = (modify_count.clone(), modify_bodies.clone());
+    let server = FakeServer::start(move |request| {
+        let path = request.path.as_str();
+        if path == "/token" {
+            return token_reply(&tokens);
+        }
+        if path == "/batch/gmail/v1" {
+            return gmail_batch(request, &metadata);
+        }
+        if request.method == "POST" && path.ends_with("/messages/batchModify") {
+            let n = count_ref.fetch_add(1, Ordering::SeqCst);
+            bodies_ref.lock().unwrap().push(json_body(request));
+            let reply = Reply::json(json!({}));
+            return if n == 0 { reply.after(Duration::from_millis(150)) } else { reply };
+        }
+        let Some(resource) = path.strip_prefix("/gmail/v1/users/me/") else {
+            return Reply::status(404, json!({ "error": { "message": "No such path" } }));
+        };
+        match resource {
+            "profile" => Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "100" })),
+            "settings/sendAs" => {
+                Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "displayName": "Me Gmail", "isPrimary": true }] }))
+            }
+            "labels" => Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" }, { "id": "SENT", "name": "SENT", "type": "system" },
+            ]})),
+            "history" => Reply::json(json!({ "historyId": "101" })),
+            "messages" => {
+                let ids: Vec<String> = match request.param("labelIds") {
+                    Some("INBOX") => vec!["i00".into()],
+                    Some("SENT") => vec!["s0".into()],
+                    _ => vec![],
+                };
+                let items: Vec<Value> = ids.iter().map(|id| json!({ "id": id })).collect();
+                Reply::json(json!({ "messages": items, "resultSizeEstimate": ids.len() }))
+            }
+            "labels/INBOX" => Reply::json(json!({ "messagesTotal": 1, "messagesUnread": 1 })),
+            _ => Reply::status(404, json!({ "error": { "message": "Not Found" } })),
+        }
+    });
+
+    let (engine, config) = engine_for(&server, &[("me@gmail.com", "google")]);
+    wait_until("inbox", || {
+        call(&engine, "mail.list", json!({ "limit": 10 })).is_ok_and(|v| !v["conversations"].as_array().unwrap().is_empty())
+    });
+    let c0 = "me@gmail.com|i00@x";
+
+    // Fire `mail.read` then immediately `mail.read --unread` while the first request is delayed.
+    let fut1 = engine.call("mail.read", json!({ "ids": [c0] }));
+    std::thread::sleep(Duration::from_millis(20));
+    let fut2 = engine.call("mail.read", json!({ "ids": [c0], "unread": true }));
+    let (r1, r2) = futures::executor::block_on(async { futures::join!(fut1, fut2) });
+    assert!(r1.is_ok(), "{r1:?}");
+    assert!(r2.is_ok(), "{r2:?}");
+
+    let sent = modify_bodies.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2, "expected both batchModify requests, got {sent:?}");
+    assert_eq!(sent[0]["removeLabelIds"], json!(["UNREAD"]), "read must reach server first: {sent:?}");
+    assert_eq!(sent[1]["addLabelIds"], json!(["UNREAD"]), "unread must reach server second: {sent:?}");
+
+    let cached = call(&engine, "mail.list", json!({ "cached": true, "limit": 10 })).unwrap();
+    assert_eq!(conversation(&cached, c0)["unread"], true, "final state must respect the user's latest unread edit");
+
+    drop(engine);
+    cleanup(&config);
+}

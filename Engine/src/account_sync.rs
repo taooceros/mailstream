@@ -22,6 +22,7 @@
 //! (`v1/drop/<recipient>`), so the drop moves where the removed device can't read it.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -193,8 +194,10 @@ pub(crate) struct Pass<'a> {
     pub support_directory: &'a Path,
     /// This device's endpoint id.
     pub me: &'a str,
-    /// The records as last reconciled (`None`: removed).
-    pub bridged: &'a BTreeMap<String, Option<Value>>,
+    /// The records as last reconciled (`None`: removed), with their group timestamps.
+    pub bridged: &'a BTreeMap<String, crate::peer_sync::Stamped<Option<Value>>>,
+    /// Last modification time of `accounts.json` in Unix ms, if present.
+    pub local_modified_ms: Option<u64>,
     /// Set until this device's first reconcile with a group it joined: records the group lacks
     /// are pushed as older than anything a device wrote ([`crate::device_sync`]'s `JOIN_AT`).
     pub joining: bool,
@@ -203,12 +206,11 @@ pub(crate) struct Pass<'a> {
 
 /// What a pass did.
 pub(crate) struct Reconciled {
-    /// The records to bridge from now on.
-    pub bridged: BTreeMap<String, Option<Value>>,
+    /// The records to bridge from now on, with their group timestamps.
+    pub bridged: BTreeMap<String, crate::peer_sync::Stamped<Option<Value>>>,
     /// The cloud drop's key as this device has it now.
     pub drop_key: DropKey,
 }
-
 /// The cloud drop's key as a device has it (MS-396).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum DropKey {
@@ -253,24 +255,25 @@ pub(crate) async fn reconcile(
         let mine = local.get(id).cloned();
         let remote = snapshot.accounts.get(id);
         let base = pass.bridged.get(id);
+        let edit_at = pass.local_modified_ms.unwrap_or_else(now_ms);
         // Signed in here after another device removed it, or held here without this device ever
         // having synced it: this device's working sign-in wins over the removal.
         let revived = mine.is_some()
             && remote.is_some_and(|remote| {
                 remote.value.is_none() && (base.is_none() || issued.issued.get(id).is_some_and(|at| *at > remote.at))
             });
-        let should_push = revived
-            || match base {
-                Some(previous) => *previous != mine,
-                None => mine.is_some() && remote.is_none(),
-            };
-        if should_push {
-            let at = match base {
-                Some(_) => next_at(remote.map_or(0, |remote| remote.at)),
-                None if revived => next_at(remote.map_or(0, |remote| remote.at)),
-                None if pass.joining => pass.join_at,
-                None => next_at(0),
-            };
+        let at = if revived {
+            let remote_at = remote.map_or(0, |r| r.at);
+            if let Some(base) = base {
+                let sign_in_at = issued.issued.get(id).copied().unwrap_or(edit_at);
+                Some(sign_in_at.max(edit_at).max(base.at + 1).max(remote_at + 1))
+            } else {
+                Some(next_at(remote_at))
+            }
+        } else {
+            crate::device_sync::causal_write_at(&mine, base, remote, edit_at, pass.joining, mine.is_some())
+        };
+        if let Some(at) = at {
             wrote |= sync.set_account(id, mine, at).await.map_err(map_error)?;
         }
     }
@@ -282,8 +285,7 @@ pub(crate) async fn reconcile(
     let mut bridged = BTreeMap::new();
     let mut issued_changed = false;
     for (id, stamped) in &snapshot.accounts {
-        let doc_key = format!("v1/account/{id}");
-        if snapshot.pending.contains(&doc_key) {
+        if snapshot.pending.contains(&format!("v1/account/{id}")) {
             if let Some(previous) = pass.bridged.get(id) {
                 bridged.insert(id.clone(), previous.clone());
             }
@@ -295,7 +297,7 @@ pub(crate) async fn reconcile(
                 if mine.is_some() {
                     pass.host.remove(id.clone()).await.map_err(EngineError::failed)?;
                 }
-                bridged.insert(id.clone(), None);
+                bridged.insert(id.clone(), stamped.clone());
             }
             Some(value) => {
                 let Ok(record) = serde_json::from_value::<AccountRecord>(value.clone()) else { continue };
@@ -310,7 +312,7 @@ pub(crate) async fn reconcile(
                     .filter(|sealed| issued.issued.get(id).is_none_or(|have| sealed.issued > *have))
                     .and_then(|sealed| Some((sealed.issued, key.open::<Credential>(pass.me, id, sealed.sealed.as_deref()?)?)));
                 if mine == Some(value) && credential.is_none() {
-                    bridged.insert(id.clone(), Some(value.clone()));
+                    bridged.insert(id.clone(), stamped.clone());
                     continue;
                 }
                 // A record this device lacks comes with a credential, or not yet.
@@ -323,7 +325,7 @@ pub(crate) async fn reconcile(
                     issued.issued.insert(id.clone(), at);
                     issued_changed = true;
                 }
-                bridged.insert(id.clone(), Some(value.clone()));
+                bridged.insert(id.clone(), stamped.clone());
             }
         }
     }
@@ -498,6 +500,10 @@ fn local_records(host: &dyn AccountHost) -> BTreeMap<String, Value> {
         .into_iter()
         .filter_map(|record| Some((record.id.clone(), serde_json::to_value(&record).ok()?)))
         .collect()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
 fn map_error(error: crate::peer_sync::PeerSyncError) -> EngineError {

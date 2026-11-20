@@ -377,3 +377,60 @@ fn cloud_commands_require_a_sync_group_and_migrate_legacy_cloud_json() {
     drop(engine_b);
     drop(engine_a);
 }
+
+/// MS-429: when an offline device restarts with an older local edit in settings.json, its startup
+/// reconcile must stamp that edit with its real modification time so a newer edit waiting in the
+/// CloudDrop still wins instead of being overwritten by startup's wall clock.
+#[test]
+fn offline_cloud_drop_respects_newer_edit_over_stale_local_startup_push() {
+    use std::time::SystemTime;
+
+    let (server, groups) = worker();
+    let (cfg_a, cfg_b) = (device(), device());
+
+    // Pair A and B, enable CloudDrop, sync baseline autoRead.days = 7 on both, then stop both.
+    let engine_a = Engine::start(cfg_a.clone());
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    call(&engine_a, "sync.cloud_enable", json!({ "url": server.base })).unwrap();
+    call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "7" })).unwrap();
+    call(&engine_a, "sync.now", json!({})).unwrap();
+
+    let code = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    let engine_b = Engine::start(cfg_b.clone());
+    call(&engine_b, "sync.join", json!({ "ticket": code })).unwrap();
+    call(&engine_b, "sync.cloud_enable", json!({ "url": server.base })).unwrap();
+    until("B to hold baseline autoRead.days = 7 and upload", || {
+        call(&engine_b, "config.get", json!({ "key": "autoRead.days" })).unwrap()["value"] == json!(7)
+            && copies(&groups).len() == 2
+    });
+    drop(engine_a);
+    drop(engine_b);
+
+    // A gets an older offline edit (autoRead.days = 14, mtime = now - 60s).
+    crate::run_settings_command(
+        &cfg_a.support_directory,
+        "config.set",
+        json!({ "key": "autoRead.days", "value": "14" }).as_object().unwrap(),
+    )
+    .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(cfg_a.support_directory.join("settings.json"))
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(60))
+        .unwrap();
+
+    // B comes online alone, makes a newer edit (autoRead.days = 21 at now), uploads, and stops.
+    let engine_b = Engine::start(cfg_b.clone());
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "21" })).unwrap();
+    call(&engine_b, "sync.now", json!({})).unwrap();
+    drop(engine_b);
+
+    // A starts alone: startup reconcile runs before CloudDrop exchange, then CloudDrop brings B's
+    // newer 21 which must win over A's older 14.
+    let engine_a = Engine::start(cfg_a.clone());
+    until("A to adopt B's newer autoRead.days = 21 from CloudDrop", || {
+        call(&engine_a, "config.get", json!({ "key": "autoRead.days" })).unwrap()["value"] == json!(21)
+    });
+    drop(engine_a);
+}

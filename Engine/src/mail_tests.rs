@@ -98,6 +98,14 @@ pub(crate) fn gmail_full(id: &str) -> Value {
 
 /// Gmail's batch answer for the sub-requests in `request`'s body.
 pub(crate) fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Value>) -> Reply {
+    gmail_batch_with_unread(request, metadata, 3)
+}
+
+pub(crate) fn gmail_batch_with_unread(
+    request: &FakeRequest,
+    metadata: &HashMap<String, Value>,
+    inbox_unread: i64,
+) -> Reply {
     let text = request.text();
     let mut parts = String::new();
     let mut number = None;
@@ -109,7 +117,7 @@ pub(crate) fn gmail_batch(request: &FakeRequest, metadata: &HashMap<String, Valu
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         let id = path.rsplit('/').next().unwrap();
         let body = if path.contains("/labels/") {
-            Some(json!({ "messagesTotal": 10, "messagesUnread": if id == "INBOX" { 3 } else { 0 } }))
+            Some(json!({ "messagesTotal": 10, "messagesUnread": if id == "INBOX" { inbox_unread } else { 0 } }))
         } else if query.contains("format=full") {
             metadata.get(id).map(|message| {
                 let files = match &message["payload"]["parts"] {

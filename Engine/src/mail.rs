@@ -36,6 +36,7 @@ mod actions;
 mod autoread;
 pub use autoread::AutoReadReason;
 mod contacts;
+mod overlay;
 mod pending;
 mod sending;
 pub use sending::pick_reply_from;
@@ -135,6 +136,8 @@ struct State {
     started: started::Started,
     /// Mail sent from here that Sent doesn't list yet, listed with it.
     pending: Vec<pending::Pending>,
+    /// Local user mutations held over stale listing and unread-count fetches (MS-429).
+    overlay: overlay::LocalOverlay,
 }
 
 type CacheRead = Shared<BoxFuture<'static, ()>>;
@@ -248,6 +251,7 @@ impl Mail {
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("mail lock")
     }
+
 
     /// Mail bodies between this engine and the group's other devices (MS-394), served through
     /// device sync.
@@ -477,6 +481,7 @@ impl Mail {
                 state.listings.retain(|key, _| !removed.contains(&key.account));
                 state.pending.retain(|pending| !removed.contains(&pending.key.account));
                 state.first_page_requests.retain(|key, _| !removed.contains(&key.account));
+                state.overlay.forget_accounts(&removed);
                 state.known.retain(|_, known| !removed.contains(&known.conversation.account));
                 let known = &state.known;
                 let order: VecDeque<String> = state.known_order.iter().filter(|id| known.contains_key(*id)).cloned().collect();
@@ -552,6 +557,7 @@ impl Mail {
 
     async fn load_account(&self, name: &str) {
         let Some(backend) = self.backend(name) else { return };
+        let started_at = self.state().overlay.clock();
         let (identity, fresh) = tokio::join!(backend.identity(), backend.mailboxes(false));
         match fresh {
             Ok(fresh) => {
@@ -559,13 +565,18 @@ impl Mail {
                 if !state.accounts.iter().any(|account| account.name == name) {
                     return;
                 }
+                let keep_unread = state.overlay.unread_stale(name, started_at);
                 let previous: HashMap<String, Mailbox> =
                     state.mailboxes.get(name).into_iter().flatten().map(|mailbox| (mailbox.id.clone(), mailbox.clone())).collect();
                 let built: Vec<Mailbox> = fresh
                     .into_iter()
                     .map(|mut mailbox| {
                         let old = previous.get(&mailbox.id);
-                        mailbox.unread = mailbox.unread.or(old.and_then(|old| old.unread));
+                        mailbox.unread = if keep_unread {
+                            old.and_then(|old| old.unread).or(mailbox.unread)
+                        } else {
+                            mailbox.unread.or(old.and_then(|old| old.unread))
+                        };
                         mailbox.total = mailbox.total.or(old.and_then(|old| old.total));
                         mailbox
                     })
@@ -609,6 +620,7 @@ impl Mail {
         let Some(backend) = self.backend(&name) else { return };
         let mail = self.clone();
         tokio::spawn(async move {
+            let started_at = mail.state().overlay.clock();
             let fresh = match backend.mailboxes(true).await {
                 Ok(fresh) => fresh,
                 Err(error) => {
@@ -621,11 +633,14 @@ impl Mail {
             let counts: HashMap<String, (Option<i64>, Option<i64>)> =
                 fresh.into_iter().map(|mailbox| (mailbox.id, (mailbox.unread, mailbox.total))).collect();
             let mut state = mail.state();
+            let keep_unread = state.overlay.unread_stale(&name, started_at);
             let Some(list) = state.mailboxes.get(&name) else { return };
             let mut updated = list.clone();
             for mailbox in &mut updated {
                 if let Some((unread, total)) = counts.get(&mailbox.id) {
-                    mailbox.unread = unread.or(mailbox.unread);
+                    if !keep_unread {
+                        mailbox.unread = unread.or(mailbox.unread);
+                    }
                     mailbox.total = total.or(mailbox.total);
                 }
             }
@@ -884,14 +899,15 @@ impl Mail {
     /// connects.
     async fn fetch_first_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> HashMap<MailboxKey, ApiError> {
         let mut tickets = HashMap::new();
-        {
+        let started_at = {
             let mut state = self.state();
             for key in keys {
                 let ticket = state.first_page_requests.entry(key.clone()).or_insert(0);
                 *ticket += 1;
                 tickets.insert(key.clone(), *ticket);
             }
-        }
+            state.overlay.clock()
+        };
         let asked: Vec<(MailboxKey, Arc<Backend>)> =
             keys.iter().filter_map(|key| self.backend(&key.account).map(|backend| (key.clone(), backend))).collect();
         // Per account: its pages still out, and whether one was cut off.
@@ -918,7 +934,7 @@ impl Mail {
                 let latest = state.first_page_requests.get(&key) == tickets.get(&key);
                 result.map(|page| {
                     if latest {
-                        let merged = self.merge_first_page(&mut state, page.envelopes, page.next, &key);
+                        let merged = self.merge_first_page(&mut state, page.envelopes, page.next, &key, started_at);
                         let settled = self.settle_pending(&mut state, &key);
                         if (merged || settled) && Self::default_keys(&state).contains(&key) {
                             self.conversations_changed();
@@ -945,7 +961,14 @@ impl Mail {
     }
 
     /// Returns whether anything changed, so an unchanged mailbox costs nothing.
-    fn merge_first_page(&self, state: &mut State, envelopes: Vec<Envelope>, next: Option<String>, key: &MailboxKey) -> bool {
+    fn merge_first_page(
+        &self,
+        state: &mut State,
+        envelopes: Vec<Envelope>,
+        next: Option<String>,
+        key: &MailboxKey,
+        fetch_started_at: u64,
+    ) -> bool {
         let before = state.listings.get(key);
         let mut listing = Listing { envelopes: envelopes.into_iter().map(Arc::new).collect(), next: next.clone(), restart: next.clone() };
         if next.is_some()
@@ -966,7 +989,8 @@ impl Mail {
             }
             listing.envelopes.extend(older);
         }
-        let unchanged = before.is_some_and(|before| {
+        state.overlay.apply(key, &mut listing.envelopes, fetch_started_at, true);
+        let unchanged = state.listings.get(key).is_some_and(|before| {
             before.next == listing.next
                 && before.envelopes.len() == listing.envelopes.len()
                 && before.envelopes.iter().zip(&listing.envelopes).all(|(a, b)| a == b)
@@ -986,11 +1010,13 @@ impl Mail {
     /// the cursor after it; answers the keys whose page failed and whether any mailbox gained new
     /// envelopes (as opposed to only restarting or catching up past already-cached ones).
     async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> (HashMap<MailboxKey, ApiError>, bool) {
-        let jobs: Vec<(MailboxKey, String)> = {
+        let (jobs, started_at): (Vec<(MailboxKey, String)>, u64) = {
             let state = self.state();
-            keys.iter()
+            let jobs = keys
+                .iter()
                 .filter_map(|key| state.listings.get(key).and_then(|listing| listing.next.clone()).map(|next| (key.clone(), next)))
-                .collect()
+                .collect();
+            (jobs, state.overlay.clock())
         };
         let mut running: FuturesUnordered<_> = jobs
             .into_iter()
@@ -1005,7 +1031,8 @@ impl Mail {
         let mut needs_first_page: Vec<(MailboxKey, String)> = Vec::new();
         while let Some((key, cursor, result)) = running.next().await {
             let mut state = self.state();
-            let Some(listing) = state.listings.get_mut(&key) else { continue };
+            let s = &mut *state;
+            let Some(listing) = s.listings.get_mut(&key) else { continue };
             if listing.next.as_deref() != Some(cursor.as_str()) {
                 continue;
             }
@@ -1014,6 +1041,7 @@ impl Mail {
                     let count = listing.envelopes.len();
                     listing.append_unknown(page.envelopes);
                     listing.next = page.next;
+                    s.overlay.apply(&key, &mut listing.envelopes, started_at, false);
                     grew |= listing.envelopes.len() != count;
                     let kept = CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() };
                     self.cache.save_listing(kept, &key);
@@ -1049,6 +1077,7 @@ impl Mail {
         // Mailboxes loaded straight from mail.db had no fresh first page yet: fetch page 1 to
         // replace the stale disk cursor with a live restart token.
         if !needs_first_page.is_empty() {
+            let restart_started_at = self.state().overlay.clock();
             let mut restarts: FuturesUnordered<_> = needs_first_page
                 .into_iter()
                 .filter_map(|(key, stale)| self.backend(&key.account).map(|backend| (key, stale, backend)))
@@ -1061,7 +1090,8 @@ impl Mail {
                 match result {
                     Ok(page) => {
                         let mut state = self.state();
-                        let Some(listing) = state.listings.get_mut(&key) else { continue };
+                        let s = &mut *state;
+                        let Some(listing) = s.listings.get_mut(&key) else { continue };
                         if listing.next.as_deref() != Some(stale.as_str()) {
                             continue;
                         }
@@ -1077,6 +1107,7 @@ impl Mail {
                             .collect();
                         let mut merged = fresh;
                         merged.extend(older);
+                        s.overlay.apply(&key, &mut merged, restart_started_at, false);
                         listing.envelopes = merged;
                         listing.next = page.next.clone();
                         listing.restart = page.next;
