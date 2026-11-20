@@ -10,7 +10,7 @@ crate-type = ["cdylib", "lib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 gpui = { package = "gpui-kit", version = "0.9.1", features = ["gpui-fast", "profiler"] }
-gpui-mobile = { path = "vendor/gpui-mobile", default-features = false, features = ["url_launcher", "clipboard"] }
+gpui-mobile = { path = "vendor/gpui-mobile", default-features = false, features = ["url_launcher", "clipboard", "vibration"] }
 mailstream-gpui = { path = "../GPUI" }
 mailstream = { path = "../FFI", default-features = false, features = ["blitz"] }
 mailstream-engine = { path = "../Engine" }

@@ -706,7 +706,7 @@ impl MailApp {
             return;
         }
         if self.chat_view.is_some()
-            && self.chat.update(cx, |chat, cx| chat.close_video_lightbox(window, cx))
+            && self.chat.update(cx, |chat, cx| chat.close_message_sheet(cx) || chat.close_video_lightbox(window, cx))
         {
             return;
         }

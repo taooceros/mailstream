@@ -93,9 +93,16 @@ mod android_entry {
         let _ = mailstream::configure_engine(config);
     }
 
+    fn android_long_press_haptic() {
+        let _ = gpui_mobile::packages::vibration::haptic_feedback(
+            gpui_mobile::packages::vibration::HapticFeedback::Heavy,
+        );
+    }
+
     fn launch_mailstream_ui(cx: &mut App) {
         mailstream_gpui::design::compact::set_safe_area_provider(android_safe_area_insets);
         mailstream_gpui::design::compact::set_font_scale_provider(android_font_scale);
+        mailstream_gpui::design::compact::set_long_press_haptic_provider(android_long_press_haptic);
         mailstream_gpui::init(cx);
         let (window, app) = mailstream_gpui::open_window(mailstream_gpui::mobile_window_options(), cx);
         window

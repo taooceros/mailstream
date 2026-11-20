@@ -733,6 +733,7 @@ impl MailApp {
                 this.search_mail_with(address.clone(), window, cx)
             }),
             cx.subscribe(&chat, |this, _, _: &crate::chat::ChatOpenDrawer, cx| this.open_drawer(cx)),
+            cx.subscribe(&chat, |this, _, toast: &crate::chat::ChatToast, cx| this.show_toast(toast.0.clone(), cx)),
             cx.subscribe(&calendar, |this, _, toast: &CalendarToast, cx| this.show_toast(toast.0.clone(), cx)),
             cx.subscribe(&calendar, |this, _, _: &crate::calendar::CalendarOpenDrawer, cx| this.open_drawer(cx)),
             cx.observe(&calendar, |_, _, cx| cx.notify()),

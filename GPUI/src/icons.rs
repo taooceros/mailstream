@@ -32,6 +32,7 @@ icons! {
     Check => "check",
     Close => "close",
     Compose => "edit_square",
+    Copy => "content_copy",
     Delete => "delete",
     Disclosure => "chevron_right",
     Download => "download",

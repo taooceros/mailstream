@@ -27,12 +27,13 @@ use chrono::{DateTime, Utc};
 use gpui::component::input::{EditorState, Enter, Escape, InputEvent, InputState};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Div, ElementId, Entity, EntityInputHandler as _, EventEmitter,
-    FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, ImgResourceLoader, InteractiveElement,
-    InteractiveText, IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent,
-    NavigationDirection, ObjectFit, ParentElement, Pixels, Point, Render, Resource, ScrollEvent, ScrollStrategy,
-    SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled, StyledImage, StyledText, Subscription,
-    TouchPhase, UniformListScrollHandle, Window, actions, canvas, div, img, list, px, relative, uniform_list,
+    AnyElement, App, AppContext, ClickEvent, ClipboardItem, Context, DispatchPhase, Div, ElementId, Entity,
+    EntityInputHandler as _, EventEmitter, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle,
+    HitboxBehavior, ImgResourceLoader, InteractiveElement, InteractiveText, IntoElement, KeyBinding, ListAlignment,
+    ListState, LongPressEvent, MouseButton, MouseDownEvent, NavigationDirection, ObjectFit, ParentElement, Pixels,
+    Point, Render, Resource, ScrollEvent, ScrollStrategy, SharedString, StatefulInteractiveElement,
+    StrikethroughStyle, Styled, StyledImage, StyledText, Subscription, TouchPhase, UniformListScrollHandle, Window,
+    actions, canvas, div, hsla, img, list, px, relative, uniform_list,
 };
 
 use crate::avatars;
@@ -41,7 +42,7 @@ use crate::controls::{
     icon_button, island, list_header, list_row, mark_dot, notice, page_scrim, page_toolbar, pill, raised_capsule,
     row_layout, scrim, search_field_for,
 };
-use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, log as log_metrics, radius, space, stroke, text};
+use crate::design::{self, AttachmentKind, Palette, chat as metrics, icon as icon_size, layout, list as rows, log as log_metrics, radius, space, stroke, text};
 use crate::message_log;
 use crate::icons::{Icon, icon};
 use crate::engine::{MailError, engine};
@@ -196,6 +197,11 @@ impl EventEmitter<MailWith> for ChatPane {}
 pub struct ChatOpenDrawer;
 
 impl EventEmitter<ChatOpenDrawer> for ChatPane {}
+
+/// Chat asks the window to show a transient toast (e.g. "Copied", MS-436).
+pub struct ChatToast(pub String);
+
+impl EventEmitter<ChatToast> for ChatPane {}
 
 #[derive(Clone, PartialEq)]
 struct User {
@@ -432,6 +438,31 @@ impl Body {
 
     fn is_empty(&self) -> bool {
         self.pieces.is_empty()
+    }
+
+    /// Plain text of the message body, for copying and the mobile action sheet preview (MS-436).
+    fn plain_text(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for piece in &self.pieces {
+            match &piece.kind {
+                PieceKind::Rule => {}
+                PieceKind::Table(rows) => {
+                    for row in rows {
+                        let line = row.iter().map(|cell| cell.text.as_ref()).collect::<Vec<_>>().join("\t");
+                        if !line.trim().is_empty() {
+                            lines.push(line);
+                        }
+                    }
+                }
+                PieceKind::Text | PieceKind::Heading(_) | PieceKind::Code => {
+                    let text = piece.inline.text.as_ref();
+                    if !text.is_empty() {
+                        lines.push(text.to_owned());
+                    }
+                }
+            }
+        }
+        lines.join("\n")
     }
 
     /// The blocks, `id` naming their links' elements.
@@ -923,6 +954,14 @@ enum SwipeTarget {
     Thread,
 }
 
+/// The message whose Android/mobile action sheet is open (MS-436).
+#[derive(Clone, PartialEq, Eq)]
+struct MessageSheet {
+    key: Key,
+    surface: Surface,
+    message_id: SharedString,
+}
+
 pub struct ChatPane {
     focus: FocusHandle,
     composer: Entity<EditorState>,
@@ -979,6 +1018,8 @@ pub struct ChatPane {
     logs: HashMap<Key, Log>,
     /// The message under the pointer, and where.
     hovered_message: Option<(Surface, SharedString)>,
+    /// The message whose Android/mobile action sheet is open (MS-436).
+    message_sheet: Option<MessageSheet>,
     files: HashMap<FileKey, FileState>,
     /// Files to open in the system's default app once downloaded.
     open_when_ready: HashSet<FileKey>,
@@ -1000,6 +1041,13 @@ impl Focusable for ChatPane {
 
 impl ChatPane {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut this = Self::new_without_load(window, cx);
+        this.load_spaces(cx);
+        this.background(cx, async { Preferences::read() }, |this, preferences, _| this.swipe.preferences = preferences);
+        this
+    }
+
+    fn new_without_load(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let composer = Self::new_composer("Message", window, cx);
         let thread_composer = Self::new_composer("Reply in thread", window, cx);
         let people_input = cx.new(|cx| InputState::new(window, cx).placeholder("Name or email address"));
@@ -1016,7 +1064,7 @@ impl ChatPane {
                 cx.notify();
             }),
         ];
-        let mut this = Self {
+        Self {
             focus: cx.focus_handle(),
             composer,
             thread_composer,
@@ -1053,6 +1101,7 @@ impl ChatPane {
             head_height: Rc::new(Cell::new(0.)),
             logs: HashMap::new(),
             hovered_message: None,
+            message_sheet: None,
             files: HashMap::new(),
             open_when_ready: HashSet::new(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1062,10 +1111,7 @@ impl ChatPane {
             form: NewChatForm::default(),
             pending_serial: 0,
             _subscriptions: subscriptions,
-        };
-        this.load_spaces(cx);
-        this.background(cx, async { Preferences::read() }, |this, preferences, _| this.swipe.preferences = preferences);
-        this
+        }
     }
 
     /// A composer: a field growing with its text that sends on Return, its Google Chat markup
@@ -1410,6 +1456,7 @@ impl ChatPane {
         self.slide = if opening { Slide::opening() } else { Slide::Rest };
         self.slide_target = opening.then_some(SwipeTarget::Page);
         self.hovered_message = None;
+        self.message_sheet = None;
         self.log_top = ReaderTop::Top;
         // Downloads that failed are tried again.
         self.files.retain(|_, file| !matches!(file, FileState::Failed(_)));
@@ -1436,6 +1483,7 @@ impl ChatPane {
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.cancel_touch_momentum();
         self.close_video_lightbox(window, cx);
+        self.message_sheet = None;
         self.leave_space(cx);
         self.view = View::Spaces;
         self.slide = Slide::Rest;
@@ -1451,6 +1499,7 @@ impl ChatPane {
         let View::Space(key) = &self.view else { return };
         let Some(log) = self.logs.get_mut(key) else { return };
         let opening = log.thread.is_none() || closing_thread;
+        self.message_sheet = None;
         if log.thread.as_ref().is_none_or(|view| view.id != thread) {
             log.open_thread(thread);
             self.thread_composer.update(cx, |input, cx| input.clean(window, cx));
@@ -1467,6 +1516,7 @@ impl ChatPane {
     fn close_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.cancel_touch_momentum();
         let View::Space(key) = &self.view else { return };
+        self.message_sheet = None;
         if let Some(log) = self.logs.get_mut(key) {
             log.thread = None;
         }
@@ -1808,6 +1858,9 @@ impl ChatPane {
     /// open, ↑/↓ page through the spaces in it, Return comes back and Esc closes it, as mail's
     /// reader); over the list it closes the space. In the thread's composer it closes the thread.
     fn composer_escape(&mut self, surface: Surface, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_message_sheet(cx) {
+            return;
+        }
         if surface == Surface::Thread {
             self.slide_off(SwipeTarget::Thread, window, cx);
         } else if self.two_pane {
@@ -1990,6 +2043,9 @@ impl ChatPane {
     /// Closes the open space or the new-chat form (⌘W, which the window binds); nothing on the
     /// space list.
     pub fn close_space(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_message_sheet(cx) {
+            return;
+        }
         if self.close_video_lightbox(window, cx) {
             return;
         }
@@ -2029,6 +2085,41 @@ impl ChatPane {
         false
     }
 
+    /// Closes the message action sheet (MS-436) and returns `true` if one was open.
+    pub fn close_message_sheet(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.message_sheet.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    fn message_for(&self, sheet: &MessageSheet) -> Option<(&Log, &Msg)> {
+        let log = self.logs.get(&sheet.key)?;
+        let message = log.messages.iter().chain(log.pending.iter()).find(|m| m.id == sheet.message_id)?;
+        Some((log, message))
+    }
+
+    fn message_has_sheet_actions(surface: Surface, message: &Msg) -> bool {
+        let can_reply = surface == Surface::Log && matches!(message.status, Status::Sent) && message.thread.is_some();
+        let can_copy = !message.body.plain_text().trim().is_empty();
+        let failed = matches!(message.status, Status::Failed(_));
+        can_reply || can_copy || failed
+    }
+
+    /// Opens the mobile/context action sheet for `message_id` when it has at least one action.
+    fn open_message_sheet(&mut self, key: Key, surface: Surface, message_id: SharedString, cx: &mut Context<Self>) -> bool {
+        let sheet = MessageSheet { key, surface, message_id };
+        let Some((_, message)) = self.message_for(&sheet) else { return false };
+        if !Self::message_has_sheet_actions(surface, message) {
+            return false;
+        }
+        self.hovered_message = None;
+        self.message_sheet = Some(sheet);
+        cx.notify();
+        true
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn open_video_lightbox(&mut self, video: Entity<ChatVideo>, window: &mut Window, cx: &mut Context<Self>) {
         if self.video_lightbox.as_ref().is_some_and(|open| open.read(cx).video() == &video) {
@@ -2052,6 +2143,9 @@ impl ChatPane {
     /// takes it.
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
         window.cancel_touch_momentum();
+        if self.close_message_sheet(cx) {
+            return;
+        }
         self.finish_closing(window, cx);
         if self.has_open_thread() {
             self.slide_off(SwipeTarget::Thread, window, cx);
@@ -2178,16 +2272,17 @@ impl ChatPane {
     }
 
     fn peek_swipe(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
+        let blocked = self.has_video_lightbox() || self.message_sheet.is_some();
         if event.touch_phase == TouchPhase::Started {
             *self.gesture_target.borrow_mut() =
-                (!self.has_video_lightbox()).then(|| at.and_then(|at| self.target_at(f32::from(at.x)))).flatten();
+                (!blocked).then(|| at.and_then(|at| self.target_at(f32::from(at.x)))).flatten();
         }
-        let can_start = self.gesture_target.borrow().is_some() && !self.has_video_lightbox();
+        let can_start = self.gesture_target.borrow().is_some() && !blocked;
         self.swipe.feed(event, can_start)
     }
 
     fn press_surface(&mut self, target: SwipeTarget, at: Point<Pixels>) {
-        let live = !self.has_video_lightbox() && self.surface_live(target);
+        let live = !self.has_video_lightbox() && self.message_sheet.is_none() && self.surface_live(target);
         *self.gesture_target.borrow_mut() = live.then_some(target);
         self.drag.press(at, live);
     }
@@ -2405,6 +2500,7 @@ impl Render for ChatPane {
             .child(body)
             .child(swipe)
             .child(drag_over.absolute().size_0())
+            .children(self.render_message_sheet(p, window, cx))
     }
 }
 
@@ -2831,12 +2927,20 @@ impl ChatPane {
             Surface::Log => "",
             Surface::Thread => "thread:",
         };
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        // Touch / mobile never shows desktop hover washes or floating "Reply in Thread" capsules
+        // (MS-436); actions live in the long-press bottom sheet instead.
+        let touch_mode = compact || window.last_input_was_touch() || cfg!(target_os = "android");
         let continued = run.continued;
-        let hovered = self.hovered_message.as_ref().is_some_and(|(at, id)| *at == surface && *id == message.id);
+        let sheet_selected = self.message_sheet.as_ref().is_some_and(|sheet| {
+            sheet.key == *key && sheet.surface == surface && sheet.message_id == message.id
+        });
+        let hovered = !touch_mode && self.hovered_message.as_ref().is_some_and(|(at, id)| *at == surface && *id == message.id);
+        let highlighted = hovered || sheet_selected;
         let hover_id = message.id.clone();
 
         let lead = if continued {
-            let color = if hovered { p.muted } else { gpui::transparent_black() };
+            let color = if highlighted { p.muted } else { gpui::transparent_black() };
             message_log::run_time(message.time.clone(), color, false).into_any_element()
         } else {
             // The user's own address is the account's when Chat doesn't give it.
@@ -2923,10 +3027,10 @@ impl ChatPane {
             );
         }
         if let (Surface::Log, Some(replies)) = (surface, log.replies(message)) {
-            content.push(self.thread_summary(message, replies, p, cx));
+            content.push(self.thread_summary(message, replies, compact, p, cx));
         }
 
-        let reply = thread.map(|thread| {
+        let reply = (!touch_mode).then_some(thread).flatten().map(|thread| {
             raised_capsule(p)
                 .child(button(ElementId::Name(format!("reply:{}", message.id).into()), "Reply in Thread", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(
                     cx.listener(move |this, _: &ClickEvent, window, cx| this.open_thread(thread.clone(), window, cx)),
@@ -2934,12 +3038,56 @@ impl ChatPane {
                 .into_any_element()
         });
 
-        let row = message_log::Row { id: ElementId::Name(format!("chat-msg:{tag}{}", message.id).into()), mine: message.mine, continued, hovered };
+        let lp_entity = cx.entity();
+        let (lp_key, lp_id) = (key.clone(), message.id.clone());
+        let long_press = canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |_bounds, hitbox, window, _| {
+                let lp_entity = lp_entity.clone();
+                let lp_key = lp_key.clone();
+                let lp_id = lp_id.clone();
+                window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Bubble
+                        && event.phase == TouchPhase::Started
+                        && !window.default_prevented()
+                        && hitbox.is_hovered(window)
+                    {
+                        let opened = lp_entity.update(cx, |this, cx| {
+                            this.open_message_sheet(lp_key.clone(), surface, lp_id.clone(), cx)
+                        });
+                        if opened {
+                            design::compact::haptic_long_press();
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
+
+        let (rc_key, rc_id) = (key.clone(), message.id.clone());
+        let row = message_log::Row { id: ElementId::Name(format!("chat-msg:{tag}{}", message.id).into()), mine: message.mine, continued, hovered: highlighted };
+        let debug_msg_id = format!("chat-msg:{tag}{}", message.id);
         let row = message_log::message(row, lead, head, content, reply, p)
+            .debug_selector(move || debug_msg_id.clone())
+            .child(long_press)
             .when(matches!(message.status, Status::Sending), |d| d.opacity(metrics::PENDING_OPACITY))
-            .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, _, cx| {
+                    if this.open_message_sheet(rc_key.clone(), surface, rc_id.clone(), cx) {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_hover(cx.listener(move |this, hovering: &bool, window, cx| {
+                let touch_mode = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH
+                    || window.last_input_was_touch()
+                    || cfg!(target_os = "android");
                 let here = this.hovered_message.as_ref().is_some_and(|(at, id)| *at == surface && *id == hover_id);
-                if *hovering {
+                if *hovering && !touch_mode {
                     this.hovered_message = Some((surface, hover_id.clone()));
                 } else if here {
                     this.hovered_message = None;
@@ -2949,7 +3097,6 @@ impl ChatPane {
                 cx.notify();
             }));
 
-        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         Self::column(
             surface,
             compact,
@@ -2967,7 +3114,7 @@ impl ChatPane {
 
     /// Under the first message of a thread with replies, as Google Chat shows it: the faces of
     /// who replied, how many replies and when the last came; a click opens the thread (MS-329).
-    fn thread_summary(&self, message: &Msg, replies: &Replies, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn thread_summary(&self, message: &Msg, replies: &Replies, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let count = replies.entries.len();
         let label = if count == 1 { "1 reply".to_owned() } else { format!("{count} replies") };
         let faces = div().flex().children(replies.faces.iter().enumerate().map(|(index, (email, avatar))| {
@@ -2985,7 +3132,7 @@ impl ChatPane {
             // The wash reaches past the faces, the text staying in line with the message's.
             .map(|d| if message.mine { d.mr(px(-space::S6)) } else { d.ml(px(-space::S6)) })
             .px(px(space::S6))
-            .py(px(space::S2))
+            .py(px(if compact { space::S6 } else { space::S2 }))
             .flex()
             .items_center()
             .gap(px(space::S8))
@@ -2998,6 +3145,196 @@ impl ChatPane {
             .when(!replies.last.is_empty(), |d| d.child(div().text_color(p.muted).child(format!("Last reply {}", replies.last))))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open_thread(thread.clone(), window, cx)))
             .into_any_element()
+    }
+
+    /// Android/mobile-style bottom action sheet opened by long-pressing (or right-clicking) a chat
+    /// message (MS-436): shows a compact preview of the message and large touch-friendly actions
+    /// (Reply in Thread, Copy Text, Retry/Delete on failed sends).
+    fn render_message_sheet(&self, p: &'static Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let sheet = self.message_sheet.as_ref()?.clone();
+        let (log, message) = self.message_for(&sheet)?;
+        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let ts = design::type_scale(compact);
+        let plain_text = message.body.plain_text();
+        let preview_text: SharedString = {
+            let trimmed = plain_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !trimmed.is_empty() {
+                trimmed.into()
+            } else if message.attachments.len() == 1 {
+                "Attachment".into()
+            } else if !message.attachments.is_empty() {
+                format!("{} attachments", message.attachments.len()).into()
+            } else {
+                "Message".into()
+            }
+        };
+        let row_h = if compact { design::compact::drawer_row_height() } else { 42. };
+        let glyph_size = if compact { 20. } else { icon_size::TOOLBAR };
+
+        let action_row = |id: &'static str, glyph: Icon, glyph_color: gpui::Hsla, label: &'static str, label_color: gpui::Hsla, trailing: Option<SharedString>| {
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .h(px(row_h))
+                .px(px(space::S12))
+                .rounded(px(radius::CONTROL))
+                .flex()
+                .items_center()
+                .gap(px(space::S12))
+                .cursor_pointer()
+                .hover(|s| s.bg(p.hover))
+                .active(|s| s.bg(p.selection))
+                .child(icon(glyph, glyph_size, glyph_color))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(ts.body))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(label_color)
+                        .child(label),
+                )
+                .when_some(trailing, |d, note| {
+                    d.child(div().flex_shrink_0().text_size(px(ts.footnote)).text_color(p.muted).child(note))
+                        .child(icon(Icon::Disclosure, icon_size::INLINE, p.muted))
+                })
+        };
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if sheet.surface == Surface::Log
+            && matches!(message.status, Status::Sent)
+            && let Some(thread) = message.thread.clone()
+        {
+            let reply_count = log.replies(message).map(|r| {
+                let n = r.entries.len();
+                SharedString::from(if n == 1 { "1 reply".to_owned() } else { format!("{n} replies") })
+            });
+            rows.push(
+                action_row("chat-sheet-reply", Icon::Reply, p.accent, "Reply in Thread", p.text, reply_count)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.close_message_sheet(cx);
+                        this.open_thread(thread.clone(), window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !plain_text.trim().is_empty() {
+            let copy_text = plain_text.clone();
+            rows.push(
+                action_row("chat-sheet-copy", Icon::Copy, p.glyph, "Copy Text", p.text, None)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                        this.close_message_sheet(cx);
+                        cx.emit(ChatToast("Copied".into()));
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if matches!(message.status, Status::Failed(_)) {
+            let (retry_key, retry_id) = (sheet.key.clone(), sheet.message_id.clone());
+            let (discard_key, discard_id) = (sheet.key.clone(), sheet.message_id.clone());
+            rows.push(
+                action_row("chat-sheet-retry", Icon::Refresh, p.accent, "Retry", p.text, None)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.close_message_sheet(cx);
+                        this.retry(&retry_key, &retry_id, window, cx);
+                    }))
+                    .into_any_element(),
+            );
+            rows.push(
+                action_row("chat-sheet-delete", Icon::Delete, p.danger, "Delete", p.danger, None)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.close_message_sheet(cx);
+                        this.discard(&discard_key, &discard_id, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if rows.is_empty() {
+            return None;
+        }
+
+        let scrim_alpha = if p.dark { 0.54 } else { 0.32 };
+        let bottom_inset = if compact { design::compact::safe_area_insets().1 + space::S12 } else { space::S8 };
+        let panel = div()
+            .id("chat-message-sheet-panel")
+            .debug_selector(|| "chat-message-sheet-panel".into())
+            .flex()
+            .flex_col()
+            .bg(p.window)
+            .border(px(stroke::HAIRLINE))
+            .border_color(p.island_rim)
+            .shadow(p.popover_shadow.clone())
+            .overflow_hidden()
+            .pb(px(bottom_inset))
+            .map(|d| {
+                if compact {
+                    d.w_full().rounded_t(px(radius::PANE + 8.))
+                } else {
+                    d.w(px(360.)).max_w(relative(0.92)).rounded(px(radius::PANE + 4.))
+                }
+            })
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .w_full()
+                    .pt(px(space::S10))
+                    .pb(px(space::S6))
+                    .flex()
+                    .justify_center()
+                    .child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.muted.opacity(0.32))),
+            )
+            .child(
+                div()
+                    .px(px(space::S16))
+                    .pt(px(space::S2))
+                    .pb(px(space::S12))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S4))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(space::S6))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(ts.footnote))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(p.text)
+                                    .child(message.name.clone()),
+                            )
+                            .when(!message.time.is_empty(), |d| {
+                                d.child(div().flex_shrink_0().text_size(px(ts.caption)).text_color(p.muted).child(message.time.clone()))
+                            }),
+                    )
+                    .child(div().w_full().min_w_0().truncate().text_size(px(ts.footnote)).text_color(p.muted).child(preview_text)),
+            )
+            .child(hairline(p))
+            .child(div().p(px(space::S8)).flex().flex_col().gap(px(space::S2)).children(rows));
+
+        Some(
+            div()
+                .id("chat-message-sheet-backdrop")
+                .debug_selector(|| "chat-message-sheet".into())
+                .absolute()
+                .inset_0()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .when(!compact, |d| d.items_center().pb(px(space::S20)))
+                .bg(hsla(0., 0., 0., scrim_alpha))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.close_message_sheet(cx);
+                }))
+                .child(panel)
+                .into_any_element(),
+        )
     }
 
     /// The log's head, under the toolbar's band: the space's heading (as the reader's title, in the
@@ -3925,6 +4262,262 @@ mod tests {
         });
         pane.read_with(cx, |chat, _| {
             assert!(matches!(chat.view, View::Spaces), "right swipe-back should exit Chat space to space list");
+        });
+    }
+
+    fn test_message(id: &str, text: &str, thread: Option<&str>) -> Msg {
+        let blocks = mailstream::chat_body(text.into(), Default::default());
+        Msg {
+            id: id.into(),
+            sender_id: "users/1".into(),
+            name: "Alex".into(),
+            avatar: mailstream::Avatar::default(),
+            email: "alex@example.com".into(),
+            created: None,
+            time: "10:14".into(),
+            thread: thread.map(Into::into),
+            thread_reply: false,
+            mine: false,
+            body: Body::new(&blocks, false),
+            attachments: Vec::new(),
+            status: Status::Sent,
+            draft: None,
+        }
+    }
+
+    fn seed_chat_pane<'a>(cx: &'a mut TestAppContext, width: f32, height: f32) -> (Entity<ChatPane>, &'a mut gpui::VisualTestContext, Key) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            avatars::init(cx);
+            design::sync_kit_theme(gpui::WindowAppearance::Light, cx);
+            bind_keys(cx);
+        });
+        let key = Key { account: "sam@example.com".into(), space: "spaces/design".into() };
+        let (pane, cx) = cx.add_window_view(|window, cx| ChatPane::new_without_load(window, cx));
+        cx.update(|window, cx| {
+            window.resize(gpui::size(px(width), px(height)));
+            window.bounds_changed(cx);
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.set_split(width, layout::MIN_LIST, width >= layout::COMPACT_WIDTH, cx);
+            pane.view = View::Space(key.clone());
+            let mut log = Log::new();
+            log.loaded = true;
+            log.title = Some("Design team".into());
+            log.messages = vec![test_message("m1", "Can you take a look at the PR?", Some("spaces/design/threads/t1"))];
+            log.relayout();
+            pane.logs.insert(key.clone(), log);
+            window.focus(&pane.focus, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (pane, cx, key)
+    }
+
+    #[test]
+    fn plain_text_extracts_paragraphs_and_tables() {
+        let blocks = mailstream::chat_body("Hello *world*\n\n| A | B |\n|---|---|\n| 1 | 2 |".into(), Default::default());
+        let body = Body::new(&blocks, false);
+        assert_eq!(body.plain_text(), "Hello world\nA\tB\n1\t2");
+    }
+
+    #[gpui::test]
+    fn touch_input_suppresses_on_hover_listeners(cx: &mut TestAppContext) {
+        use gpui::{PlatformInput, TouchEvent, TouchId, point};
+        use std::cell::RefCell;
+
+        struct TouchHoverView {
+            transitions: Rc<RefCell<Vec<bool>>>,
+        }
+
+        impl Render for TouchHoverView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let transitions = self.transitions.clone();
+                div().size_full().child(
+                    div()
+                        .id("touch-hover-target")
+                        .ml(px(40.))
+                        .mt(px(40.))
+                        .size(px(80.))
+                        .on_hover(move |hovered, _, _| transitions.borrow_mut().push(*hovered)),
+                )
+            }
+        }
+
+        let transitions = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let transitions = transitions.clone();
+            move |_, _| TouchHoverView { transitions }
+        });
+        let pos = point(px(60.), px(60.));
+
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            for phase in [TouchPhase::Started, TouchPhase::Ended] {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(1),
+                        phase,
+                        position: pos,
+                        predicted_position: None,
+                        force: None,
+                        timestamp: None,
+                    }),
+                    cx,
+                );
+            }
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        assert!(transitions.borrow().is_empty(), "touch tap must not trigger on_hover");
+
+        // Mouse hover activates; subsequent touch clears it.
+        cx.simulate_mouse_move(pos, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(*transitions.borrow(), [true]);
+
+        cx.update(|window, cx| {
+            for phase in [TouchPhase::Started, TouchPhase::Ended] {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(2),
+                        phase,
+                        position: pos,
+                        predicted_position: None,
+                        force: None,
+                        timestamp: None,
+                    }),
+                    cx,
+                );
+            }
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(*transitions.borrow(), [true, false]);
+    }
+
+    #[gpui::test]
+    fn touch_tap_never_triggers_hover_or_reply_capsule(cx: &mut TestAppContext) {
+        use gpui::{PlatformInput, TouchEvent, TouchId};
+
+        let (pane, cx, _) = seed_chat_pane(cx, 390., 844.);
+        let pos = cx.debug_bounds("chat-msg:m1").expect("chat message row bounds").center();
+        cx.update(|window, cx| {
+            for phase in [TouchPhase::Started, TouchPhase::Ended] {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(1),
+                        phase,
+                        position: pos,
+                        predicted_position: None,
+                        force: None,
+                        timestamp: None,
+                    }),
+                    cx,
+                );
+            }
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        pane.read_with(cx, |pane, _| {
+            assert!(pane.hovered_message.is_none(), "touch tap must not set hovered_message");
+            assert!(pane.message_sheet.is_none(), "light touch tap must not open action sheet");
+        });
+        assert!(cx.debug_bounds("chat-message-sheet").is_none());
+    }
+
+    #[gpui::test]
+    fn long_press_opens_message_sheet_copy_and_reply_in_thread(cx: &mut TestAppContext) {
+        use gpui::PlatformInput;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (pane, cx, key) = seed_chat_pane(cx, 390., 844.);
+        let copied_toast = Arc::new(AtomicBool::new(false));
+        let toast_flag = copied_toast.clone();
+        let _sub = cx.update(|_, cx| {
+            cx.subscribe(&pane, move |_, toast: &ChatToast, _| {
+                if toast.0 == "Copied" {
+                    toast_flag.store(true, Ordering::SeqCst);
+                }
+            })
+        });
+
+        // Long-press on the message opens the bottom action sheet (not hover reply capsule).
+        let pos = cx.debug_bounds("chat-msg:m1").expect("chat message row bounds").center();
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::LongPress(LongPressEvent {
+                    phase: TouchPhase::Started,
+                    start_position: pos,
+                    position: pos,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+
+        pane.read_with(cx, |pane, _| {
+            assert!(pane.message_sheet.is_some(), "long-press should open message action sheet");
+        });
+        assert!(cx.debug_bounds("chat-message-sheet").is_some(), "sheet backdrop should render");
+        let copy_bounds = cx.debug_bounds("chat-sheet-copy").expect("Copy Text action should render");
+        assert!(cx.debug_bounds("chat-sheet-reply").is_some(), "Reply in Thread action should render");
+
+        // Tapping Copy Text copies plain text, emits Copied toast, and closes the sheet.
+        cx.simulate_click(copy_bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert!(pane.message_sheet.is_none(), "Copy Text should close sheet");
+        });
+        assert!(copied_toast.load(Ordering::SeqCst), "Copy Text should emit Copied toast");
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(clipboard.as_deref(), Some("Can you take a look at the PR?"));
+
+        // Re-open via long-press, then Back closes the sheet without leaving the space.
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::LongPress(LongPressEvent {
+                    phase: TouchPhase::Started,
+                    start_position: pos,
+                    position: pos,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-message-sheet").is_some());
+
+        pane.update_in(cx, |pane, window, cx| pane.back(&Back, window, cx));
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert!(pane.message_sheet.is_none(), "Back should dismiss the sheet first");
+            assert!(matches!(&pane.view, View::Space(open) if *open == key), "space should remain open");
+        });
+
+        // Re-open and tap Reply in Thread -> opens thread and dismisses sheet.
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::LongPress(LongPressEvent {
+                    phase: TouchPhase::Started,
+                    start_position: pos,
+                    position: pos,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        let reply_bounds = cx.debug_bounds("chat-sheet-reply").expect("Reply in Thread row");
+        cx.simulate_click(reply_bounds.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert!(pane.message_sheet.is_none(), "Reply in Thread should close sheet");
+            let thread = pane.logs.get(&key).and_then(|log| log.thread.as_ref());
+            assert_eq!(thread.map(|t| t.id.as_ref()), Some("spaces/design/threads/t1"));
         });
     }
 }

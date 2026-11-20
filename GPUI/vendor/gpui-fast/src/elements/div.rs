@@ -1788,16 +1788,17 @@ pub(crate) type BackGestureListener =
 
 pub(crate) type ClickListener = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-/// Controls how [`StatefulInteractiveElement::on_hover`] responds to key presses while the mouse
-/// is stationary.
+/// Controls how [`StatefulInteractiveElement::on_hover`] responds to keyboard and touch input
+/// while the mouse is stationary.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum HoverListenerMode {
-    /// Use input-modality-aware hit testing. Keyboard input suppresses hover until the mouse moves
-    /// again, unless pointer capture or an active mouse-down interaction keeps the listener hovered.
+    /// Use input-modality-aware hit testing. Keyboard and touch input suppress hover until the
+    /// mouse moves again, unless pointer capture or an active mouse-down interaction keeps the
+    /// listener hovered.
     #[default]
     InputModalityAware,
-    /// Use hit testing even when the last input was from the keyboard. This changes only
-    /// keyboard-modality filtering; all other [`StatefulInteractiveElement::on_hover`] behavior
+    /// Use hit testing even when the last input was from the keyboard or touch. This changes only
+    /// input-modality filtering; all other [`StatefulInteractiveElement::on_hover`] behavior
     /// remains unchanged.
     InputModalityIndependent,
 }
@@ -1805,7 +1806,9 @@ pub enum HoverListenerMode {
 impl HoverListenerMode {
     pub(crate) fn is_hovered(self, hitbox: &Hitbox, window: &Window) -> bool {
         match self {
-            Self::InputModalityAware => hitbox.is_hovered(window),
+            Self::InputModalityAware => {
+                !window.last_input_was_touch() && hitbox.is_hovered(window)
+            }
             Self::InputModalityIndependent => hitbox.id.is_hovered_ignoring_last_input(window),
         }
     }
@@ -4767,6 +4770,108 @@ mod tests {
         key_down(cx, any_window, "a");
         cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true, false]);
+    }
+
+    #[gpui::test]
+    fn default_hover_listener_suppressed_for_touch(cx: &mut TestAppContext) {
+        use crate::{PlatformInput, TouchEvent, TouchId, TouchPhase};
+
+        struct TouchHoverView {
+            hover_transitions: Rc<RefCell<Vec<bool>>>,
+        }
+
+        impl Render for TouchHoverView {
+            fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let hover_transitions = self.hover_transitions.clone();
+                div().size_full().child(
+                    div()
+                        .id("touch-hover-target")
+                        .ml(px(40.))
+                        .mt(px(40.))
+                        .size(px(80.))
+                        .on_hover(move |is_hovered, _, _| {
+                            hover_transitions.borrow_mut().push(*is_hovered);
+                        }),
+                )
+            }
+        }
+
+        let hover_transitions = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let hover_transitions = hover_transitions.clone();
+            move |_, _| TouchHoverView { hover_transitions }
+        });
+        let any_window = AnyWindowHandle::from(window);
+        let pos = point(px(60.), px(60.));
+
+        // Initial draw and a touch tap must not fire hover transitions.
+        cx.update_window(any_window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                PlatformInput::Touch(TouchEvent {
+                    id: TouchId(1),
+                    phase: TouchPhase::Started,
+                    position: pos,
+                    predicted_position: None,
+                    force: None,
+                    timestamp: None,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::Touch(TouchEvent {
+                    id: TouchId(1),
+                    phase: TouchPhase::Ended,
+                    position: pos,
+                    predicted_position: None,
+                    force: None,
+                    timestamp: None,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(hover_transitions.borrow().is_empty());
+
+        // Mouse movement enters hover; a subsequent touch clears it.
+        cx.update_window(any_window, |_, window, cx| {
+            window.simulate_mouse_move(pos, cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(*hover_transitions.borrow(), [true]);
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::Touch(TouchEvent {
+                    id: TouchId(2),
+                    phase: TouchPhase::Started,
+                    position: pos,
+                    predicted_position: None,
+                    force: None,
+                    timestamp: None,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::Touch(TouchEvent {
+                    id: TouchId(2),
+                    phase: TouchPhase::Ended,
+                    position: pos,
+                    predicted_position: None,
+                    force: None,
+                    timestamp: None,
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
         assert_eq!(*hover_transitions.borrow(), [true, false]);
     }
 

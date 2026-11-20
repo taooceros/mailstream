@@ -19,6 +19,8 @@
 //! click X Y [right|double] [secondary|shift|alt]...
 //!                            move the pointer there and click, holding those keys (secondary:
 //!                            ⌘ on the Mac, Ctrl elsewhere)
+//! touch X Y                  tap via raw touch events (verifies touch suppresses hover)
+//! longpress X Y              long-press via raw touch events (holds past the 500 ms threshold)
 //! move X Y                   move the pointer there (hover)
 //! drag X1 Y1 X2 Y2 [hold]    press at X1 Y1, move to X2 Y2, release (`hold`: keep the button
 //!                            down, for a shot mid-drag, until `release`)
@@ -77,8 +79,8 @@ use std::time::{Duration, Instant};
 use gpui::test::TestWindowExt;
 use gpui::{
     AnyWindowHandle, Bounds, HeadlessAppContext, InputEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, Point, ScrollDelta, ScrollEvent, TouchPhase, Window,
-    WindowAppearance, point, px, size,
+    MouseMoveEvent, MouseUpEvent, OperatingSystem, Pixels, PlatformInput, Point, ScrollDelta, ScrollEvent,
+    TouchEvent, TouchId, TouchPhase, Window, WindowAppearance, point, px, size,
 };
 
 use crate::text_checking::{self, InlinePrediction, TextAssistance};
@@ -202,7 +204,7 @@ impl Shots {
         })
         .ok();
 
-        let mut run = Run { cx, window, main: window, appearance: if self.dark { "dark" } else { "light" }, out: self.out, pointer: point(px(0.), px(0.)), assistance: TextAssistance::default() };
+        let mut run = Run { cx, window, main: window, appearance: if self.dark { "dark" } else { "light" }, out: self.out, pointer: point(px(0.), px(0.)), next_touch_id: 1, assistance: TextAssistance::default() };
         run.pass(START);
         let mut failed = false;
         for (line, command) in commands {
@@ -281,6 +283,8 @@ enum Command {
     Wait(Duration),
     Shot(String),
     Click(Point<Pixels>, MouseButton, usize, Modifiers),
+    Touch(Point<Pixels>),
+    LongPress(Point<Pixels>),
     Move(Point<Pixels>),
     Drag(Point<Pixels>, Point<Pixels>, bool),
     Release,
@@ -331,6 +335,8 @@ impl Command {
                 }
                 Command::Click(spot(0)?, button, count, modifiers)
             }
+            "touch" => Command::Touch(spot(0)?),
+            "longpress" => Command::LongPress(spot(0)?),
             "move" => Command::Move(spot(0)?),
             "drag" => match words.get(4).copied() {
                 None => Command::Drag(spot(0)?, spot(2)?, false),
@@ -407,6 +413,7 @@ struct Run {
     appearance: &'static str,
     out: PathBuf,
     pointer: Point<Pixels>,
+    next_touch_id: u64,
     /// What `misspelled` and `predict` had the platform find so far.
     assistance: TextAssistance,
 }
@@ -538,6 +545,38 @@ impl Run {
                     self.event(MouseDownEvent { button, position, modifiers, click_count, first_mouse: false });
                     self.event(MouseUpEvent { button, position, modifiers, click_count });
                 }
+            }
+            Command::Touch(position) => {
+                let id = TouchId(self.next_touch_id);
+                self.next_touch_id += 1;
+                self.pointer = position;
+                let touch = |phase| PlatformInput::Touch(TouchEvent { id, phase, position, predicted_position: None, force: None, timestamp: None });
+                self.on_window(|window, cx| {
+                    window.dispatch_event(touch(TouchPhase::Started), cx);
+                    window.dispatch_event(touch(TouchPhase::Ended), cx);
+                });
+                self.cx.run_until_parked();
+                self.on_window(|window, cx| {
+                    window.draw(cx).clear(cx);
+                });
+            }
+            Command::LongPress(position) => {
+                let id = TouchId(self.next_touch_id);
+                self.next_touch_id += 1;
+                self.pointer = position;
+                let touch = |phase| PlatformInput::Touch(TouchEvent { id, phase, position, predicted_position: None, force: None, timestamp: None });
+                self.on_window(|window, cx| {
+                    window.dispatch_event(touch(TouchPhase::Started), cx);
+                });
+                // Hold past GPUI's default 500 ms long-press duration so the recognizer fires LongPressEvent.
+                self.pass(Duration::from_millis(580));
+                self.on_window(|window, cx| {
+                    window.dispatch_event(touch(TouchPhase::Ended), cx);
+                });
+                self.cx.run_until_parked();
+                self.on_window(|window, cx| {
+                    window.draw(cx).clear(cx);
+                });
             }
             Command::Move(position) => self.pointer_to(position, None),
             Command::Drag(from, to, hold) => {

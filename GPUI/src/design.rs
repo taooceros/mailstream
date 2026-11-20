@@ -800,6 +800,7 @@ pub mod compact {
     pub const SEARCH_HEIGHT: f32 = 40.0;
     static SAFE_AREA: std::sync::OnceLock<fn() -> (f32, f32, f32, f32)> = std::sync::OnceLock::new();
     static FONT_SCALE: std::sync::OnceLock<fn() -> f32> = std::sync::OnceLock::new();
+    static LONG_PRESS_HAPTIC: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
     /// Registers the platform safe-area inset provider (top, bottom, left, right in logical points).
     pub fn set_safe_area_provider(provider: fn() -> (f32, f32, f32, f32)) {
@@ -820,6 +821,18 @@ pub mod compact {
     pub fn font_scale() -> f32 {
         let scale = FONT_SCALE.get().map_or(1.0, |f| f());
         if scale.is_finite() && scale > 0.0 { scale.clamp(0.75, 2.0) } else { 1.0 }
+    }
+
+    /// Registers the platform long-press haptic callback (Android `HapticFeedbackConstants.LONG_PRESS`).
+    pub fn set_long_press_haptic_provider(provider: fn()) {
+        let _ = LONG_PRESS_HAPTIC.set(provider);
+    }
+
+    /// Triggers a native long-press haptic tick when the platform registered one.
+    pub fn haptic_long_press() {
+        if let Some(f) = LONG_PRESS_HAPTIC.get() {
+            f();
+        }
     }
 
     /// Clamped font scale for fixed-height chrome (top bar, bottom dock, reply bar).
