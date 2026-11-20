@@ -1328,7 +1328,7 @@ impl WgpuRenderer {
                     width: DevicePixels(frame.texture.width() as i32),
                     height: DevicePixels(frame.texture.height() as i32),
                 };
-                core.prepare_target_for_size(size, premultiplied_alpha)?;
+                core.prepare_target_for_size(scene, size, premultiplied_alpha)?;
                 let frame_view = frame
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1594,7 +1594,12 @@ impl WgpuRendererCore {
         )
     }
 
-    fn write_frame_globals(&mut self, size: Size<DevicePixels>, premultiplied_alpha: bool) {
+    fn write_frame_globals(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+        premultiplied_alpha: bool,
+    ) {
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
             grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
@@ -1636,6 +1641,7 @@ impl WgpuRendererCore {
 
     fn prepare_target_for_size(
         &mut self,
+        scene: &Scene,
         size: Size<DevicePixels>,
         premultiplied_alpha: bool,
     ) -> Result<()> {
@@ -1650,7 +1656,7 @@ impl WgpuRendererCore {
             self.max_texture_size
         );
         self.current_frame_size = size;
-        self.write_frame_globals(size, premultiplied_alpha);
+        self.write_frame_globals(scene, size, premultiplied_alpha);
         Ok(())
     }
 
@@ -1667,7 +1673,7 @@ impl WgpuRendererCore {
         self.atlas.before_frame();
         if configured_size.width.0 > 0 && configured_size.height.0 > 0 {
             self.current_frame_size = configured_size;
-            self.write_frame_globals(configured_size, premultiplied_alpha);
+            self.write_frame_globals(scene, configured_size, premultiplied_alpha);
         }
         crate::fast::frame::record_with_deferred_acquire(self, scene, clear_color, acquire_target)
             .inspect_err(|_| {
@@ -1705,7 +1711,7 @@ impl WgpuRendererCore {
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
         self.atlas.before_frame();
-        self.prepare_target_for_size(size, premultiplied_alpha)?;
+        self.prepare_target_for_size(scene, size, premultiplied_alpha)?;
 
         self.record_frame(scene, target_view, target_texture, clear_color)
             .inspect_err(|_| {
