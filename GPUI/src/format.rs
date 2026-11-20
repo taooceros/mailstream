@@ -82,7 +82,7 @@ pub fn fold(text: &str) -> (String, Option<String>) {
         }
         lines.push(line.to_owned());
     }
-    let history = lines.iter().skip(1).position(|line| folds(line.trim_start())).map_or(lines.len(), |i| i + 1);
+    let history = (1..lines.len()).find(|&i| folds_at(&lines, i)).unwrap_or(lines.len());
     // The quotes (and blank lines) just above it join it; the first line never folds.
     let mut cut = history;
     while cut > 1 && (lines[cut - 1].starts_with('>') || lines[cut - 1].is_empty()) {
@@ -104,8 +104,26 @@ fn wrapped(line: &str, next: &str) -> bool {
         && next.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '(')
 }
 
-/// Whether quoted history or a signature starts at `line` (without its indentation). `>` quotes
-/// are `fold`'s own concern.
+/// Whether quoted history or a signature starts at `lines[index]`. `>` quotes are `fold`'s own
+/// concern.
+fn folds_at(lines: &[String], index: usize) -> bool {
+    let line = lines[index].trim_start();
+    if folds(line) {
+        return true;
+    }
+    let lower = line.to_ascii_lowercase();
+    if ["from:", "发件人:", "发件人："].iter().any(|p| lower.starts_with(p)) {
+        let next = lines[index + 1..].iter().map(|s| s.trim_start()).find(|s| !s.is_empty());
+        if let Some(next) = next {
+            let next_lower = next.to_ascii_lowercase();
+            if ["sent:", "date:", "发送时间:", "发送时间：", "日期:", "日期："].iter().any(|p| next_lower.starts_with(p)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn folds(line: &str) -> bool {
     let lower = line.to_lowercase();
     let length = line.chars().count();
@@ -193,6 +211,12 @@ mod tests {
         assert_eq!(fold("Hi\n-----Original Message-----\nFrom: x").1.as_deref(), Some("-----Original Message-----\nFrom: x"));
         assert_eq!(fold("Thanks\n-- \nPriya").1.as_deref(), Some("--\nPriya"));
         assert_eq!(fold("Thanks\nSent from my iPhone").1.as_deref(), Some("Sent from my iPhone"));
+        assert_eq!(
+            fold("Sounds good.\n\nFrom: Alex <alex@example.org>\nSent: Mon, Nov 16, 2026\nSubject: Sync\nOld text"),
+            ("Sounds good.".into(), Some("From: Alex <alex@example.org>\nSent: Mon, Nov 16, 2026\nSubject: Sync\nOld text".into()))
+        );
+        // A lone "From:" line in normal prose without a following Sent:/Date: stays unfolded.
+        assert_eq!(fold("Note:\nFrom: the team\nSee details below.").1, None);
         // The first line never folds, so a body is never only a toggle; mail without quotes keeps
         // everything.
         assert_eq!(fold("> all quote\n> more"), ("> all quote".into(), Some("> more".into())));

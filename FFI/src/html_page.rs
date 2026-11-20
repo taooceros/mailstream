@@ -1027,6 +1027,108 @@ fn rgba(colour: &style::color::AbsoluteColor) -> Rgba {
     Rgba { r, g, b, a }
 }
 
+/// Plain text of `id` with `<br>`, `<p>` and `<div>` boundaries as line breaks, capped at `limit`
+/// bytes, for checking desktop Outlook's reply header block.
+fn block_text(doc: &BaseDocument, id: NodeId, limit: usize) -> String {
+    fn walk(doc: &BaseDocument, id: NodeId, out: &mut String, limit: usize) {
+        if out.len() >= limit {
+            return;
+        }
+        let Some(node) = doc.get_node(id) else { return };
+        if let Some(text) = node.text_data() {
+            out.push_str(&text.content);
+            return;
+        }
+        if !node.is_element() {
+            return;
+        }
+        if node.data.is_element_with_tag_name(&local_name!("br")) {
+            out.push('\n');
+            return;
+        }
+        let block = node.data.is_element_with_tag_name(&local_name!("p")) || node.data.is_element_with_tag_name(&local_name!("div"));
+        if block {
+            out.push('\n');
+        }
+        for &child in &node.children {
+            walk(doc, child, out, limit);
+            if out.len() >= limit {
+                return;
+            }
+        }
+        if block {
+            out.push('\n');
+        }
+    }
+    let mut out = String::new();
+    walk(doc, id, &mut out, limit);
+    out
+}
+
+fn contains_table_or_blockquote(doc: &BaseDocument, id: NodeId) -> bool {
+    let mut stack = vec![id];
+    while let Some(cur) = stack.pop() {
+        let Some(node) = doc.get_node(cur) else { continue };
+        if cur != id
+            && (node.data.is_element_with_tag_name(&local_name!("table"))
+                || node.data.is_element_with_tag_name(&local_name!("blockquote")))
+        {
+            return true;
+        }
+        stack.extend(node.children.iter().copied());
+    }
+    false
+}
+
+fn is_outlook_header_div(doc: &BaseDocument, id: NodeId) -> bool {
+    let Some(node) = doc.get_node(id) else { return false };
+    if !node.data.is_element_with_tag_name(&local_name!("div")) {
+        return false;
+    }
+    let Some(style) = node.attr(local_name!("style")) else { return false };
+    if !mail_html::has_visible_border_top(style) || contains_table_or_blockquote(doc, id) {
+        return false;
+    }
+    mail_html::is_outlook_header_text(&block_text(doc, id, 3000))
+}
+
+fn is_tail_marker(doc: &BaseDocument, id: NodeId) -> bool {
+    let Some(node) = doc.get_node(id) else { return false };
+    if node.attr(local_name!("id")).is_some_and(|id| mail_html::TAIL_QUOTE_IDS.contains(&id)) {
+        return true;
+    }
+    is_outlook_header_div(doc, id)
+}
+
+/// Whether `id` (directly or through a chain of single-element wrapper `<div>`s) is a tail-cutoff
+/// boundary whose node and all following siblings in its parent are quoted history.
+fn is_tail_cutoff(doc: &BaseDocument, mut id: NodeId) -> bool {
+    loop {
+        if is_tail_marker(doc, id) {
+            return true;
+        }
+        let Some(node) = doc.get_node(id) else { return false };
+        if !node.data.is_element_with_tag_name(&local_name!("div")) {
+            return false;
+        }
+        let mut sole = None;
+        for &child_id in &node.children {
+            let Some(child) = doc.get_node(child_id) else { continue };
+            if child.text_data().is_some_and(|data| !data.content.trim().is_empty()) {
+                return false;
+            }
+            if child.is_element() {
+                if sole.is_some() {
+                    return false;
+                }
+                sole = Some(child_id);
+            }
+        }
+        let Some(next) = sole else { return false };
+        id = next;
+    }
+}
+
 /// Leaves `part` of the body: `Main` without its quoted history, `Quoted` only that (moved to the
 /// body, in order, under the mail's own head), `Whole` all of it. Mail whose body is nothing but
 /// quotes (no text or image outside them) has none to fold and stays whole. Whether it has some.
@@ -1036,18 +1138,51 @@ fn cut_quotes(doc: &mut BaseDocument, part: HtmlPart) -> bool {
     let mut quotes = Vec::new();
     // Outside the quotes: whether there is text, or an image.
     let (mut text, mut image) = (false, false);
-    let mut stack = vec![body];
-    while let Some(id) = stack.pop() {
-        let Some(node) = doc.get_node(id) else { continue };
-        if id != body && starts.contains(&id) {
-            quotes.push(id);
-            continue;
+    fn collect(
+        doc: &BaseDocument,
+        parent: NodeId,
+        starts: &HashSet<NodeId>,
+        quotes: &mut Vec<NodeId>,
+        text: &mut bool,
+        image: &mut bool,
+    ) {
+        let Some(node) = doc.get_node(parent) else { return };
+        let children = &node.children;
+        let mut prev_element = None;
+        for (index, &child_id) in children.iter().enumerate() {
+            let Some(child) = doc.get_node(child_id) else { continue };
+            if child.is_element() && is_tail_cutoff(doc, child_id) {
+                if let Some(prev_id) = prev_element
+                    && doc.get_node(prev_id).is_some_and(|prev| prev.data.is_element_with_tag_name(&local_name!("hr")))
+                    && !quotes.contains(&prev_id)
+                {
+                    quotes.push(prev_id);
+                }
+                for &sib_id in &children[index..] {
+                    if let Some(sib) = doc.get_node(sib_id)
+                        && (sib.is_element() || sib.text_data().is_some_and(|data| !data.content.trim().is_empty()))
+                    {
+                        quotes.push(sib_id);
+                    }
+                }
+                return;
+            }
+            if starts.contains(&child_id) {
+                quotes.push(child_id);
+                if child.is_element() {
+                    prev_element = Some(child_id);
+                }
+                continue;
+            }
+            *text |= child.text_data().is_some_and(|data| !data.content.trim().is_empty());
+            *image |= child.data.is_element_with_tag_name(&local_name!("img"));
+            if child.is_element() {
+                prev_element = Some(child_id);
+                collect(doc, child_id, starts, quotes, text, image);
+            }
         }
-        text |= node.text_data().is_some_and(|data| !data.content.trim().is_empty());
-        image |= node.data.is_element_with_tag_name(&local_name!("img"));
-        // In document order once popped.
-        stack.extend(node.children.iter().rev().copied());
     }
+    collect(doc, body, &starts, &mut quotes, &mut text, &mut image);
     if quotes.is_empty() || !(text || image) {
         return false;
     }
@@ -1951,6 +2086,96 @@ mod tests {
         for quote in ["<div class=\"yahoo_quoted\">Old</div>", "<blockquote type=\"CITE\">Old</blockquote>"] {
             let main = part(&format!("<p>New</p>{quote}"), HtmlPart::Main);
             assert!(main.quoted && main.text() == "New", "{quote}");
+        }
+    }
+
+    #[test]
+    fn outlook_spark_and_spike_quoted_history_folds_cleanly() {
+        // Desktop Outlook (Word HTML): reply body followed by a border-top From/Sent/To/Subject
+        // header div and the quoted thread as following siblings.
+        let outlook_desktop = concat!(
+            r#"<div class="WordSection1">"#,
+            r#"<p class="MsoNormal">Thanks, let's meet Thursday.</p>"#,
+            r#"<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">"#,
+            r#"<p class="MsoNormal"><b><span>From:</span></b> Alex &lt;alex@example.org&gt;<br>"#,
+            r#"<b>Sent:</b> Monday, November 16, 2026 9:00 AM<br>"#,
+            r#"<b>To:</b> Sam &lt;sam@example.org&gt;<br>"#,
+            r#"<b>Subject:</b> Re: Roadmap</p></div>"#,
+            r#"<p class="MsoNormal">&nbsp;</p>"#,
+            r#"<div><p class="MsoNormal">Earlier thread message one.</p></div>"#,
+            r#"<div><p class="MsoNormal">Earlier thread message two.</p></div>"#,
+            r#"</div>"#,
+        );
+        let main = part(outlook_desktop, HtmlPart::Main);
+        assert!(main.quoted);
+        assert_eq!(main.text(), "Thanks, let's meet Thursday.");
+        let quoted = part(outlook_desktop, HtmlPart::Quoted);
+        assert!(quoted.quoted);
+        let qtext = quoted.text();
+        assert!(qtext.contains("From:") && qtext.contains("Earlier thread message one.") && qtext.contains("Earlier thread message two."), "{qtext}");
+        assert!(!qtext.contains("Thanks, let's meet Thursday."), "{qtext}");
+
+        // Desktop Outlook when the border-top header div is wrapped in a single-child <div>.
+        let outlook_wrapped = concat!(
+            r#"<div class="WordSection1">"#,
+            r#"<p class="MsoNormal">Looks good to me.</p>"#,
+            r#"<div><div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">"#,
+            r#"<p class="MsoNormal"><b>From:</b> Alex<br><b>Sent:</b> Mon<br><b>Subject:</b> Sync</p>"#,
+            r#"</div></div>"#,
+            r#"<div name="messageBodySection"><p>Old reply body</p></div>"#,
+            r#"<div name="messageReplySection"><blockquote>Older nested quote</blockquote></div>"#,
+            r#"</div>"#,
+        );
+        let main = part(outlook_wrapped, HtmlPart::Main);
+        assert!(main.quoted);
+        assert_eq!(main.text(), "Looks good to me.");
+        let qtext = part(outlook_wrapped, HtmlPart::Quoted).text();
+        assert!(qtext.contains("Old reply body") && qtext.contains("Older nested quote"), "{qtext}");
+        assert!(!qtext.contains("Looks good to me."), "{qtext}");
+
+        // Outlook Web: <hr> + #divRplyFwdMsg + trailing siblings, and #appendonsend + trailing siblings.
+        let owa = concat!(
+            r#"<div><p>Sounds great.</p></div>"#,
+            r#"<hr>"#,
+            r#"<div id="divRplyFwdMsg"><b>From:</b> Dan<br><b>Sent:</b> Tue</div>"#,
+            r#"<div><p>Original body after divRplyFwdMsg</p></div>"#,
+        );
+        let main = part(owa, HtmlPart::Main);
+        assert!(main.quoted && main.text() == "Sounds great.", "{}", main.text());
+        let qtext = part(owa, HtmlPart::Quoted).text();
+        assert!(qtext.contains("From: Dan") && qtext.contains("Original body after divRplyFwdMsg"), "{qtext}");
+
+        let append_on_send = concat!(
+            r#"<div><p>On it.</p></div>"#,
+            r#"<div id="appendonsend"></div><hr>"#,
+            r#"<div id="divRplyFwdMsg">From: Dan</div>"#,
+            r#"<div><p>Trailing history</p></div>"#,
+        );
+        let main = part(append_on_send, HtmlPart::Main);
+        assert!(main.quoted && main.text() == "On it.", "{}", main.text());
+        assert!(part(append_on_send, HtmlPart::Quoted).text().contains("Trailing history"));
+
+        // Spark (div[name="messageReplySection"]), Spike/Hop (.hop_extra), ProtonMail and Outlook for Mac.
+        for quote in [
+            r#"<div name="messageReplySection"><div>On Mon, Alex wrote:</div><blockquote>Old Spark</blockquote></div>"#,
+            r#"<div class="hop_extra">On Mon, Alex wrote:<blockquote class="hop_quote">Old Spike</blockquote></div>"#,
+            r#"<div class="protonmail_quote">Old Proton</div>"#,
+            r#"<div id="OLK_SRC_BODY_SECTION">Old Outlook Mac</div>"#,
+        ] {
+            let main = part(&format!("<div>Reply</div>{quote}"), HtmlPart::Main);
+            assert!(main.quoted && main.text() == "Reply", "{quote}: {}", main.text());
+        }
+
+        // False-positive guards: normal bordered prose, border-top:none, table-containing card,
+        // and bare forward (nothing above header) must not fold.
+        for keep_whole in [
+            r#"<p>Intro</p><div style="border-top:1px solid #ddd"><p>From: the product team<br>Here is this week's digest.</p></div>"#,
+            r#"<p>Intro</p><div style="border-top:none"><p>From: Alex<br>Sent: Mon</p></div><p>After</p>"#,
+            r#"<p>Intro</p><div style="border-top:1px solid #ddd"><p>From: Alex<br>Sent: Mon</p><table><tr><td>Card</td></tr></table></div>"#,
+            r#"<div style="border-top:solid #E1E1E1 1.0pt"><p><b>From:</b> Alex<br><b>Sent:</b> Mon</p></div><div><p>Bare forward body</p></div>"#,
+        ] {
+            let main = part(keep_whole, HtmlPart::Main);
+            assert!(!main.quoted, "should not fold: {keep_whole}");
         }
     }
 

@@ -441,6 +441,39 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
     );
     all.push((quoted, tag("people", &["Engineering"], false)));
 
+    let mut outlook_quoted = Mail::new(OUTLOOK, "outlook-history", ALEX, "Re: Q4 build schedule");
+    outlook_quoted.minutes_ago = 18.;
+    outlook_quoted.text = Some(
+        "Thursday afternoon works for me. I'll share the updated rollout checklist before the meeting.\n\n\
+         From: Sam Lee <sam@northwind.example>\n\
+         Sent: Monday, November 16, 2026 9:15 AM\n\
+         To: Alex Rivera <alex@northwind.example>\n\
+         Subject: Re: Q4 build schedule\n\n\
+         Can we move the dry run to Thursday afternoon so the Linux runners finish first?"
+            .into(),
+    );
+    outlook_quoted.html = Some(
+        concat!(
+            r#"<div class="WordSection1">"#,
+            r#"<p class="MsoNormal">Thursday afternoon works for me. I'll share the updated rollout checklist before the meeting.</p>"#,
+            r#"<p class="MsoNormal">Best,<br>Alex</p>"#,
+            r#"<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">"#,
+            r#"<p class="MsoNormal"><b><span>From:</span></b> Sam Lee &lt;sam@northwind.example&gt;<br>"#,
+            r#"<b>Sent:</b> Monday, November 16, 2026 9:15 AM<br>"#,
+            r#"<b>To:</b> Alex Rivera &lt;alex@northwind.example&gt;<br>"#,
+            r#"<b>Subject:</b> Re: Q4 build schedule</p></div>"#,
+            r#"<p class="MsoNormal">&nbsp;</p>"#,
+            r#"<div><p class="MsoNormal">Can we move the dry run to Thursday afternoon so the Linux runners finish first?</p></div>"#,
+            r#"<div name="messageReplySection">"#,
+            r#"<div>On Sun, Nov 15, 2026 at 6:40 PM Alex Rivera wrote:</div>"#,
+            r#"<blockquote style="margin:5px 0;padding-left:10px;border-left:1px solid #ccc">"#,
+            r#"<p>Drafting the Q4 build schedule now — let me know which window works best for the dry run.</p>"#,
+            r#"</blockquote></div></div>"#,
+        )
+        .into(),
+    );
+    all.push((outlook_quoted, tag("people", &["Engineering"], false)));
+
     let mut photos = Mail::new(GMAIL, "hike", ALEX, "Photos from the hike");
     photos.minutes_ago = 5. * 24. * 60.;
     photos.text = Some("Here are the best ones from Saturday. The view from the ridge!".into());

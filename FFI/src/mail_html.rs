@@ -15,11 +15,54 @@ pub(crate) mod colours;
 
 use colours::Rgba;
 
-/// Elements that start quoted history, the outermost one matching: Gmail's, Thunderbird's and
-/// Yahoo's quote containers, Outlook's reply header, Apple Mail's cited blockquote and the quotes
-/// the engine makes of plain text's `>` lines (`text::plain_to_html`).
+/// Elements that start quoted history, the outermost one matching: Gmail's, Thunderbird's,
+/// Yahoo's, Spark's, Spike/Hop's and ProtonMail's quote containers, Outlook's reply headers,
+/// Apple Mail's cited blockquote and the quotes the engine makes of plain text's `>` lines
+/// (`text::plain_to_html`).
 pub const QUOTES: &str = ".gmail_quote, .gmail_quote_container, .moz-cite-prefix, .yahoo_quoted, #divRplyFwdMsg, \
-    #appendonsend, blockquote[type=\"cite\" i], blockquote.ms-quote";
+    #appendonsend, #OLK_SRC_BODY_SECTION, div[name=\"messageReplySection\"], .hop_extra, blockquote.hop_quote, \
+    .protonmail_quote, blockquote[type=\"cite\" i], blockquote.ms-quote";
+
+/// Element ids whose element and all following siblings in the same parent are quoted history
+/// (Outlook Web / OWA reply and forward boundaries).
+pub(crate) const TAIL_QUOTE_IDS: &[&str] = &["divRplyFwdMsg", "appendonsend"];
+
+/// Whether an inline `style` attribute sets a visible top border (as desktop Outlook's reply
+/// header divider does, e.g. `border:none;border-top:solid #E1E1E1 1.0pt`).
+pub(crate) fn has_visible_border_top(style: &str) -> bool {
+    for decl in style.split(';') {
+        let Some((name, value)) = decl.split_once(':') else { continue };
+        if name.trim().eq_ignore_ascii_case("border-top") {
+            let value = value.trim().to_ascii_lowercase();
+            if !value.is_empty() && !matches!(value.as_str(), "none" | "0" | "0px" | "0pt") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `text` (with `<br>` and block tags turned into line breaks) is a desktop-Outlook-style
+/// reply header block: first non-empty line starts with `From:` (or localized equivalent) and a
+/// subsequent non-empty line starts with `Sent:`/`Date:`/`To:`/`Subject:` (or localized equivalent).
+pub(crate) fn is_outlook_header_text(text: &str) -> bool {
+    const FROM: &[&str] = &["from:", "发件人:", "发件人：", "寄件者:", "寄件者：", "von:", "de:", "差出人:", "差出人："];
+    const OTHER: &[&str] = &[
+        "sent:", "date:", "to:", "subject:",
+        "发送时间:", "发送时间：", "日期:", "日期：", "收件人:", "收件人：", "主题:", "主题：",
+        "gesendet:", "datum:", "envoyé:", "送信日時:", "送信日時：", "件名:", "件名：",
+    ];
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(first) = lines.next() else { return false };
+    let first_lower = first.to_ascii_lowercase();
+    if !FROM.iter().any(|prefix| first_lower.starts_with(prefix)) {
+        return false;
+    }
+    lines.any(|line| {
+        let lower = line.to_ascii_lowercase();
+        OTHER.iter().any(|prefix| lower.starts_with(prefix))
+    })
+}
 
 /// The reader's look over the mail's own styles, in every renderer (its text colour only where the
 /// mail sets none on `body`), and the look of the markup the engine makes of plain text
@@ -177,9 +220,74 @@ pub fn mail_web_script(view: MailWebView) -> String {
   const style = doc.createElement('style');
   style.textContent = {css};
   (doc.head || root).appendChild(style);
+  const hasBorderTop = (el) => {{
+    const st = el.getAttribute('style') || '';
+    for (const d of st.split(';')) {{
+      const i = d.indexOf(':');
+      if (i < 0 || d.slice(0, i).trim().toLowerCase() !== 'border-top') continue;
+      const v = d.slice(i + 1).trim().toLowerCase();
+      if (v && v !== 'none' && v !== '0' && v !== '0px' && v !== '0pt') return true;
+    }}
+    return false;
+  }};
+  const blockText = (el) => {{
+    let out = '';
+    const walk = (n) => {{
+      if (out.length > 3000) return;
+      if (n.nodeType === 3) {{ out += n.data; return; }}
+      if (n.nodeType !== 1) return;
+      const t = n.localName;
+      if (t === 'br') {{ out += '\\n'; return; }}
+      const blk = t === 'p' || t === 'div';
+      if (blk) out += '\\n';
+      for (const c of n.childNodes) walk(c);
+      if (blk) out += '\\n';
+    }};
+    walk(el);
+    return out;
+  }};
+  const fromRe = /^(from:|发件人[:：]|寄件者[:：]|von:|de:|差出人[:：])/i;
+  const otherRe = /^(sent:|date:|to:|subject:|发送时间[:：]|日期[:：]|收件人[:：]|主题[:：]|gesendet:|datum:|envoyé:|送信日時[:：]|件名[:：])/i;
+  const isOutlookHeader = (el) => {{
+    if (el.localName !== 'div' || !hasBorderTop(el) || el.querySelector('table, blockquote')) return false;
+    const lines = blockText(el).split('\\n').map((s) => s.trim()).filter(Boolean);
+    return lines.length >= 2 && fromRe.test(lines[0]) && lines.slice(1).some((l) => otherRe.test(l));
+  }};
+  const isTailMarker = (el) => el.id === 'divRplyFwdMsg' || el.id === 'appendonsend' || isOutlookHeader(el);
+  const isTailCutoff = (el) => {{
+    let cur = el;
+    while (cur && cur.nodeType === 1) {{
+      if (isTailMarker(cur)) return true;
+      if (cur.localName !== 'div') return false;
+      let sole = null;
+      for (const c of cur.childNodes) {{
+        if (c.nodeType === 3 && c.data.trim()) return false;
+        if (c.nodeType === 1) {{ if (sole) return false; sole = c; }}
+      }}
+      cur = sole;
+    }}
+    return false;
+  }};
   const quotes = [];
   const collect = (el) => {{
-    for (const child of el.children) child.matches({quotes}) ? quotes.push(child) : collect(child);
+    for (const child of Array.from(el.children)) {{
+      if (isTailCutoff(child)) {{
+        const prev = child.previousElementSibling;
+        if (prev && prev.localName === 'hr' && !quotes.includes(prev)) quotes.push(prev);
+        for (let s = child; s; s = s.nextSibling) {{
+          if (s.nodeType === 1) quotes.push(s);
+          else if (s.nodeType === 3 && s.data.trim()) {{
+            const span = doc.createElement('span');
+            s.parentNode.insertBefore(span, s);
+            span.appendChild(s);
+            quotes.push(span);
+          }}
+        }}
+        return;
+      }}
+      if (child.matches({quotes})) quotes.push(child);
+      else collect(child);
+    }}
   }};
   if (body) collect(body);
   quotes.forEach((quote) => quote.setAttribute('data-mailstream-quote', ''));
@@ -555,10 +663,28 @@ mod tests {
         for view in [MailWebView::WebKit, MailWebView::WebView2] {
             let script = mail_web_script(view);
             assert!(script.contains("blockquote.ms-quote") && script.contains("#divRplyFwdMsg"));
+            assert!(script.contains("messageReplySection") && script.contains(".hop_extra"));
+            assert!(script.contains("isTailCutoff") && script.contains("isOutlookHeader"));
             assert!(script.contains("-apple-system, \\\"Segoe UI\\\""));
         }
         assert!(mail_web_script(MailWebView::WebKit).contains("fit-content"));
         assert!(mail_web_script(MailWebView::WebView2).contains("display: flex"));
+    }
+
+    #[test]
+    fn outlook_header_div_helpers_match_headers_without_false_positives() {
+        assert!(has_visible_border_top("border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in"));
+        assert!(has_visible_border_top("BORDER-TOP: 1px solid #B5C4DF"));
+        assert!(!has_visible_border_top("border:none;border-top:none"));
+        assert!(!has_visible_border_top("border-top: 0pt; padding: 3pt"));
+        assert!(!has_visible_border_top("border-left: 1px solid #ccc"));
+
+        assert!(is_outlook_header_text("From: Alex <alex@example.org>\nSent: Monday, Nov 16, 2026 9:00 AM\nTo: Sam\nSubject: Sync"));
+        assert!(is_outlook_header_text("发件人：林明 <ming@example.org>\n发送时间：2026年11月16日\n主题：周会"));
+        // Normal prose starting with "From:" or missing a second header line must not match.
+        assert!(!is_outlook_header_text("From: the engineering team\nWe are excited to share this update."));
+        assert!(!is_outlook_header_text("Sent: 5 items\nTo: warehouse"));
+        assert!(!is_outlook_header_text("From: Alex <alex@example.org>"));
     }
 
     #[test]
