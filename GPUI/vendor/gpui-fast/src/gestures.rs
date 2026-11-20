@@ -513,7 +513,8 @@ const VELOCITY_WINDOW: Duration = Duration::from_millis(100);
 /// reports movement every 8–16ms while the finger is in motion.
 const VELOCITY_ASSUME_STOPPED_GAP: Duration = Duration::from_millis(40);
 
-const VELOCITY_MAX_SAMPLES: usize = 20;
+/// Covers the full 100 ms trailing window even on 360–480 Hz touch panels.
+const VELOCITY_MAX_SAMPLES: usize = 64;
 
 /// The portable recognizer behind raw touch input: it watches the
 /// [`TouchEvent`] stream for one touch at a time and resolves it into either
@@ -2384,6 +2385,26 @@ mod tests {
         assert!(step1.is_some() && step2.is_some());
     }
 
+
+    #[test]
+    fn high_rate_touch_retains_full_velocity_window() {
+        // 480 Hz (~2.08 ms) touch panel over 100 ms produces ~48 samples, which
+        // must not truncate the velocity window before 100 ms.
+        let mut tracker = VelocityTracker::default();
+        let t0 = Instant::now();
+        let speed = 1200.0_f32;
+        for step in 0..=48u64 {
+            let micros = step * 2_083;
+            let y = speed * (micros as f32 / 1_000_000.0);
+            tracker.push(t0 + Duration::from_micros(micros), point(px(0.), px(y)));
+        }
+        let v = tracker.velocity();
+        assert!(
+            (v.y - speed).abs() < 15.0,
+            "expected ~{speed} px/s across 480 Hz samples, got {}",
+            v.y
+        );
+    }
     fn touch_event(id: TouchId, phase: TouchPhase, x: f32, y: f32) -> TouchEvent {
         TouchEvent {
             id,

@@ -188,28 +188,66 @@ pub(crate) fn monotonic_nanos_now() -> i64 {
     }
 }
 
+/// Cached `(Instant, CLOCK_MONOTONIC ns)` anchor so consecutive hardware touch
+/// and `AChoreographer` timestamps map onto the exact same epoch with zero
+/// per-sample syscall jitter.
+static CLOCK_ANCHOR: parking_lot::Mutex<Option<(Instant, i64)>> = parking_lot::Mutex::new(None);
+
 /// Converts a `CLOCK_MONOTONIC` nanosecond timestamp (`AChoreographer` vsync or
 /// `AMotionEvent` event time) to `std::time::Instant`.
 pub(crate) fn monotonic_nanos_to_instant(nanos: i64) -> Instant {
-    let now = Instant::now();
     if nanos <= 0 {
+        return Instant::now();
+    }
+    let (anchor_instant, anchor_ns) = {
+        let mut guard = CLOCK_ANCHOR.lock();
+        match *guard {
+            Some(anchor) => anchor,
+            None => {
+                let now = Instant::now();
+                let now_ns = monotonic_nanos_now();
+                if now_ns <= 0 {
+                    return now;
+                }
+                *guard = Some((now, now_ns));
+                (now, now_ns)
+            }
+        }
+    };
+    let elapsed_ns = anchor_instant.elapsed().as_nanos() as i128;
+    let now_ns_est = (anchor_ns as i128) + elapsed_ns;
+    let age_ns = now_ns_est - (nanos as i128);
+    if !(-100_000_000..=500_000_000).contains(&age_ns) {
+        // Re-anchor once in case the process resumed after a long suspend or
+        // clock shift, then validate again.
+        let now = Instant::now();
+        let now_ns = monotonic_nanos_now();
+        if now_ns <= 0 {
+            return now;
+        }
+        *CLOCK_ANCHOR.lock() = Some((now, now_ns));
+        let delta_ns = (now_ns as i128) - (nanos as i128);
+        if (0..=500_000_000).contains(&delta_ns) {
+            return now
+                .checked_sub(Duration::from_nanos(delta_ns as u64))
+                .unwrap_or(now);
+        } else if (-100_000_000..0).contains(&delta_ns) {
+            return now
+                .checked_add(Duration::from_nanos((-delta_ns) as u64))
+                .unwrap_or(now);
+        }
         return now;
     }
-    let now_ns = monotonic_nanos_now();
-    if now_ns <= 0 {
-        return now;
+    let offset_ns = (nanos as i128) - (anchor_ns as i128);
+    if offset_ns >= 0 {
+        anchor_instant
+            .checked_add(Duration::from_nanos(offset_ns as u64))
+            .unwrap_or_else(Instant::now)
+    } else {
+        anchor_instant
+            .checked_sub(Duration::from_nanos((-offset_ns) as u64))
+            .unwrap_or_else(Instant::now)
     }
-    let delta_ns = (now_ns as i128) - (nanos as i128);
-    if (0..=500_000_000).contains(&delta_ns) {
-        if let Some(instant) = now.checked_sub(Duration::from_nanos(delta_ns as u64)) {
-            return instant;
-        }
-    } else if (-100_000_000..0).contains(&delta_ns) {
-        if let Some(instant) = now.checked_add(Duration::from_nanos((-delta_ns) as u64)) {
-            return instant;
-        }
-    }
-    now
 }
 
 /// Updates the active display refresh interval (from `Display.getRefreshRate()`).

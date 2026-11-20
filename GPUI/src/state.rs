@@ -1141,10 +1141,24 @@ impl MailApp {
         let weak = cx.weak_entity();
         state.set_scroll_handler(move |event, _, cx| {
             if event.count > 0 && event.visible_range.end + MORE_AHEAD >= event.count {
-                let _ = weak.update(cx, |this, cx| {
-                    let shown = this.view_item_count(view);
-                    this.load_more(view, shown, false, cx);
-                });
+                // Read-only precheck so scrolling near the bottom (or in short mailboxes with no
+                // next page) never bumps MailApp's entity write generation and invalidates Scroll
+                // Layers on every frame.
+                let can_load = weak
+                    .read_with(cx, |this, _| {
+                        let shown = this.view_item_count(view);
+                        this.lists
+                            .get(&this.key())
+                            .and_then(|list| list.next_cursor(view, shown, false))
+                            .is_some()
+                    })
+                    .unwrap_or(false);
+                if can_load {
+                    let _ = weak.update(cx, |this, cx| {
+                        let shown = this.view_item_count(view);
+                        this.load_more(view, shown, false, cx);
+                    });
+                }
             }
         });
         state

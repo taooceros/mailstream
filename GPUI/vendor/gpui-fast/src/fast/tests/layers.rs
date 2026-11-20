@@ -3956,6 +3956,72 @@ mod input {
             );
         }
     }
+
+    #[crate::test]
+    fn touch_pan_release_and_fling_catch_do_not_rebuild_layer_for_input(cx: &mut TestAppContext) {
+        use std::time::Duration;
+        if !crate::fast::layers::COMPILED {
+            return;
+        }
+        let handle = input_page(cx);
+        let window: AnyWindowHandle = handle.into();
+        // Promote the scroll layer into composited mode.
+        assert_eq!(
+            scroll_five_times(cx, window),
+            vec![Some(Decision::Composite); 3]
+        );
+        let t0 = scheduler::Instant::now();
+        let touch = |id: u64, phase: TouchPhase, y: f32, ms: u64| {
+            crate::PlatformInput::Touch(crate::TouchEvent {
+                id: crate::TouchId(id),
+                phase,
+                position: point(px(50.), px(y)),
+                predicted_position: None,
+                force: None,
+                timestamp: Some(t0 + Duration::from_millis(ms)),
+            })
+        };
+
+        // Start a touch pan (the initial Started on an idle recognizer may
+        // refresh stale hitboxes before it knows whether this is a tap).
+        frame_after(cx, window, |cx| {
+            dispatch(cx, window, [touch(1, TouchPhase::Started, 180., 0)]);
+        });
+        for step in 1..=4u64 {
+            frame_after(cx, window, |cx| {
+                dispatch(
+                    cx,
+                    window,
+                    [touch(1, TouchPhase::Moved, 180. - step as f32 * 25., step * 8)],
+                );
+            });
+        }
+        assert_eq!(decision(cx, window), Some(Decision::Composite));
+        let before_release = rebuilds(cx, window);
+
+        // Releasing a pan to launch a fling must NOT trigger a synchronous
+        // layer rebuild before the fling starts.
+        frame_after(cx, window, |cx| {
+            dispatch(cx, window, [touch(1, TouchPhase::Ended, 80., 34)]);
+        });
+        assert_eq!(
+            rebuilds(cx, window),
+            before_release,
+            "lifting finger to start a fling must not rebuild the scroll layer"
+        );
+        let has_momentum = with_window(cx, window, |window, _| window.has_touch_momentum());
+        assert!(has_momentum, "fast release should launch momentum");
+
+        // Catching the active fling with a new touch must NOT rebuild either.
+        frame_after(cx, window, |cx| {
+            dispatch(cx, window, [touch(2, TouchPhase::Started, 120., 50)]);
+        });
+        assert_eq!(
+            rebuilds(cx, window),
+            before_release,
+            "catching active momentum must not rebuild the scroll layer"
+        );
+    }
 }
 
 /// Tests of the streams working together, found by measuring and verifying

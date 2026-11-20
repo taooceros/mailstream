@@ -183,7 +183,14 @@ pub(crate) fn before_dispatch(window: &mut Window, cx: &mut App, event: &Platfor
     let reaches: &dyn Fn(&Window, &Layer) -> bool = match event {
         PlatformInput::Scroll(_) => return,
         PlatformInput::Touch(touch)
-            if touch.phase == crate::TouchPhase::Moved && window.is_touch_panning() =>
+            if (window.is_touch_panning()
+                && matches!(
+                    touch.phase,
+                    crate::TouchPhase::Moved
+                        | crate::TouchPhase::Ended
+                        | crate::TouchPhase::Cancelled
+                ))
+                || (touch.phase == crate::TouchPhase::Started && window.has_touch_momentum()) =>
         {
             return;
         }

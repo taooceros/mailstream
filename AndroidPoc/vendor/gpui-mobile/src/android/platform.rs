@@ -979,21 +979,21 @@ impl AndroidPlatform {
 
 /// Android's feel constants for GPUI's portable gesture recognizers.
 ///
-/// Without this GPUI falls back to [`GestureTuning::default`], whose scroll
-/// physics are `UIScrollView`'s — an exponential decay that coasts noticeably
-/// longer than Android's, so a fling reads as unresponsive to anyone used to
-/// the platform.
+/// Uses smooth exponential deceleration (`0.9975` per ms) rather than AOSP's
+/// legacy 2010 `OverScroller` friction spline (`0.015`): the legacy spline's
+/// super-linear distance curve (`∝ v^1.74`) stops gentle-to-medium flicks dead
+/// (< 1 row at 500 dp/s) while overshooting on hard flicks, whereas exponential
+/// decay glides proportionally at every flick speed and matches modern Android
+/// (HyperOS / Compose / Chrome) and Mailstream desktop (`0.998`/ms) while
+/// staying crisper with a shorter sub-pixel tail.
 struct AndroidGestures;
 
 impl PlatformGestures for AndroidGestures {
     fn tuning(&self) -> GestureTuning {
         GestureTuning {
-            // AOSP's `OverScroller` friction spline. GPUI flings in logical
-            // pixels, and this window's scale factor is Android's display
-            // density, so logical pixels are density-independent pixels and
-            // the nominal 160 dpi pairing this constructor documents is the
-            // right one.
-            scroll_physics: ScrollPhysics::android(),
+            scroll_physics: ScrollPhysics::Exponential {
+                decay_per_ms: 0.9975,
+            },
             // The rest of `ViewConfiguration` (touch slop, tap timeouts) is
             // close enough to GPUI's defaults to leave alone; reading the real
             // values over JNI is a separate change.
@@ -1778,5 +1778,16 @@ mod tests {
     #[test]
     fn tick_no_panic() {
         headless().tick();
+    }
+
+    #[test]
+    fn android_gestures_use_smooth_exponential_scroll_physics() {
+        let gestures = headless().gestures().expect("Android exposes PlatformGestures");
+        assert_eq!(
+            gestures.tuning().scroll_physics,
+            ScrollPhysics::Exponential {
+                decay_per_ms: 0.9975,
+            }
+        );
     }
 }

@@ -1054,4 +1054,83 @@ mod tests {
             assert_eq!(host.taps, 1, "first tap after unclaimed horizontal swipe must not be swallowed");
         });
     }
+
+    struct ScrollListHost {
+        scroll: gpui::ScrollHandle,
+    }
+
+    impl gpui::Render for ScrollListHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px};
+            div()
+                .id("scroll-host")
+                .size_full()
+                .bg(gpui::rgb(0xffffff))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .children((0..60).map(|i| div().id(i).h(px(40.)).w_full().bg(gpui::rgb(0xf4f4f4))))
+        }
+    }
+
+    #[gpui::test]
+    fn touch_pan_release_and_fling_catch_keep_scroll_layer_composited(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, point, px, size};
+
+        let scroll = gpui::ScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            move |_, _| ScrollListHost { scroll }
+        });
+        cx.simulate_resize(size(px(390.), px(600.)));
+        cx.run_until_parked();
+
+        let t0 = Instant::now();
+        let touch = |id: u64, phase: TouchPhase, y: f32, micros: u64| TouchEvent {
+            id: TouchId(id),
+            phase,
+            position: point(px(120.), px(y)),
+            predicted_position: None,
+            force: None,
+            timestamp: Some(t0 + Duration::from_micros(micros)),
+        };
+
+        // Drive a fast 480 Hz upward touch pan (~1600 dp/s over 80 ms, ~39 samples) to promote
+        // the scroll layer and exercise the enlarged VELOCITY_MAX_SAMPLES window.
+        cx.simulate_event(touch(1, TouchPhase::Started, 500., 0));
+        cx.run_until_parked();
+        for step in 1..=39u64 {
+            let micros = step * 2_083;
+            let y = 500. - 1600. * (micros as f32 / 1_000_000.);
+            cx.simulate_event(touch(1, TouchPhase::Moved, y, micros));
+            if step % 4 == 0 {
+                cx.run_until_parked();
+            }
+        }
+        let rebuilds_before_release = cx.update(|window, _| window.layout_stats().layer_rebuilds_for_input);
+        let offset_before_release = scroll.offset().y;
+        assert!(offset_before_release < px(-80.), "pan must scroll content: {offset_before_release:?}");
+
+        // Finger lifts to launch fling momentum: must NOT trigger a synchronous layer rebuild.
+        let end_y = 500. - 1600. * (39. * 2_083. / 1_000_000.);
+        cx.simulate_event(touch(1, TouchPhase::Ended, end_y, 39 * 2_083 + 2_000));
+        let rebuilds_after_release = cx.update(|window, _| window.layout_stats().layer_rebuilds_for_input);
+        assert_eq!(
+            rebuilds_after_release, rebuilds_before_release,
+            "lifting finger to start a fling must not synchronously rebuild the scroll layer"
+        );
+
+        // Tick one momentum frame and verify scroll advances further.
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        // Catching the active fling with a new touch must NOT rebuild the scroll layer either.
+        cx.simulate_event(touch(2, TouchPhase::Started, 300., 110_000));
+        let rebuilds_after_catch = cx.update(|window, _| window.layout_stats().layer_rebuilds_for_input);
+        assert_eq!(
+            rebuilds_after_catch, rebuilds_before_release,
+            "catching active momentum must not synchronously rebuild the scroll layer"
+        );
+    }
 }

@@ -6190,6 +6190,10 @@ impl Window {
         self.touch_gestures.is_panning()
     }
 
+    pub(crate) fn has_touch_momentum(&self) -> bool {
+        self.touch_gestures.has_momentum()
+    }
+
     /// Sets whether recognized touch pans may use the platform's predicted
     /// touch positions. Disabling drops [`TouchEvent::predicted_position`]
     /// before gesture recognition, so pans track only raw touch positions.
