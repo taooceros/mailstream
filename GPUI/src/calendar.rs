@@ -917,7 +917,8 @@ impl CalendarPane {
 
     /// Esc and ⌘[: a new event being dragged out is dropped, else the page slides back off its
     /// view, else the open event slides off.
-    fn back(&mut self, _: &Back, _: &mut Window, cx: &mut Context<Self>) {
+    fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         if self.sketch.take().is_some() {
             cx.notify();
         } else if self.opened.is_some() && self.top_surface().is_some() {

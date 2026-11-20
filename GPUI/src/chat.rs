@@ -1400,6 +1400,7 @@ impl ChatPane {
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         self.close_video_lightbox(window, cx);
         self.leave_space(cx);
         self.view = View::Spaces;
@@ -2001,6 +2002,7 @@ impl ChatPane {
     /// Esc on the list: the open space or form closes, else the search ends, else the window
     /// takes it.
     fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         match self.view {
             View::Space(_) | View::NewChat => self.close(window, cx),
             View::Spaces if !self.query.is_empty() => self.cancel_search(&Escape, window, cx),

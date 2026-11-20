@@ -427,6 +427,7 @@ impl Settings {
 
     pub(crate) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.subpage.take().is_some() {
+            window.cancel_touch_momentum();
             window.focus(&self.focus, cx);
             cx.notify();
             true
@@ -436,6 +437,7 @@ impl Settings {
     }
 
     fn close_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         self.subpage = None;
         if let Some(on_close) = self.on_close.clone() {
             on_close(window, cx);

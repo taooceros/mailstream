@@ -1035,6 +1035,13 @@ impl TouchGestureRecognizer {
         self.momentum.is_some()
     }
 
+    /// Mailstream patch (MS-431): cancels any in-flight post-fling scroll
+    /// momentum so a subsequent tap after a back swipe or navigation transition
+    /// is never swallowed as a fling-catching touch (`TouchGestureState::Caught`).
+    pub(crate) fn cancel_momentum(&mut self) -> bool {
+        self.momentum.take().is_some()
+    }
+
     /// Advances post-fling momentum by one frame, returning the scroll step
     /// to dispatch, or `None` when no momentum is in progress. The final step
     /// carries [`TouchPhase::Ended`] to close the synthetic scroll stream.

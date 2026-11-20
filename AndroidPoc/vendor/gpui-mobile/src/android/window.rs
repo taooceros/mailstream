@@ -1503,33 +1503,49 @@ impl PlatformWindow for AndroidPlatformWindow {
                     3 => gpui::TouchPhase::Cancelled,
                     _ => return,
                 };
-                let id = if phase == gpui::TouchPhase::Started {
-                    // Android pointer IDs are reused after release.
-                    let id = next_touch_id();
-                    active_touches.insert(touch.id, id);
-                    id
-                } else {
-                    let Some(id) = active_touches.get(&touch.id).copied() else {
-                        return;
-                    };
-                    id
-                };
                 let Some(window) = window.upgrade() else {
                     return;
                 };
                 let scale = window.scale_factor();
+                let position = gpui::point(gpui::px(touch.x / scale), gpui::px(touch.y / scale));
                 let predicted_position = touch
                     .predicted
                     .map(|(px_x, px_y)| gpui::point(gpui::px(px_x / scale), gpui::px(px_y / scale)));
+                let (id, stale_id) = if phase == gpui::TouchPhase::Started {
+                    // If Android started a fresh touch on a reused pointer ID without
+                    // delivering UP/CANCEL for the previous contact (e.g. across a system
+                    // gesture), cancel the orphaned contact first so GPUI's recognizer
+                    // returns to Idle instead of ignoring the new tap.
+                    let stale = active_touches.remove(&touch.id);
+                    // Android pointer IDs are reused after release.
+                    let id = next_touch_id();
+                    active_touches.insert(touch.id, id);
+                    (id, stale)
+                } else {
+                    let Some(id) = active_touches.get(&touch.id).copied() else {
+                        return;
+                    };
+                    (id, None)
+                };
+                let mut cb = cb.lock();
+                if let Some(stale_id) = stale_id {
+                    cb(gpui::PlatformInput::Touch(gpui::TouchEvent {
+                        id: stale_id,
+                        phase: gpui::TouchPhase::Cancelled,
+                        position,
+                        predicted_position: None,
+                        force: None,
+                        timestamp: touch.timestamp,
+                    }));
+                }
                 let event = gpui::TouchEvent {
                     id,
                     phase,
-                    position: gpui::point(gpui::px(touch.x / scale), gpui::px(touch.y / scale)),
+                    position,
                     predicted_position,
                     force: None,
                     timestamp: touch.timestamp,
                 };
-                let mut cb = cb.lock();
                 cb(gpui::PlatformInput::Touch(event));
                 if matches!(phase, gpui::TouchPhase::Ended | gpui::TouchPhase::Cancelled) {
                     active_touches.remove(&touch.id);

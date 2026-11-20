@@ -470,9 +470,16 @@ pub fn scroll_capture<T: 'static>(
                 let at = hitbox.should_handle_scroll(window).then(|| event.position - bounds.origin);
                 match peek(host.read(cx), event, at) {
                     Step::Pass => {}
-                    Step::Consume => cx.stop_propagation(),
+                    Step::Consume => {
+                        window.cancel_touch_momentum();
+                        cx.stop_propagation();
+                    }
                     step => {
+                        let ends = matches!(step, Step::Release { .. } | Step::Cancel(_));
                         if host.update(cx, |this, cx| follow(this, step, cx)) {
+                            if ends {
+                                window.cancel_touch_momentum();
+                            }
                             cx.stop_propagation();
                         }
                     }
@@ -865,6 +872,186 @@ mod tests {
             assert_eq!(host.follow_calls, 0, "vertical scroll must not call Entity::update via scroll_capture");
             assert!(host.dragged.is_empty());
             assert_eq!(host.released, None);
+        });
+    }
+
+    struct TouchBackHost {
+        swipe: BackSwipe,
+        open: bool,
+        taps: usize,
+    }
+
+    impl TouchBackHost {
+        fn peek(&self, event: &ScrollEvent, at: Option<Point<Pixels>>) -> Step {
+            self.swipe.feed(event, at.is_some() && self.open)
+        }
+
+        fn follow(&mut self, step: Step, cx: &mut Context<Self>) -> bool {
+            match step {
+                Step::Pass => false,
+                Step::Consume => true,
+                Step::Drag(_) => true,
+                Step::Release { offset, velocity } => {
+                    if settle(offset, velocity, 400.0).0 {
+                        self.open = false;
+                    }
+                    cx.notify();
+                    true
+                }
+                Step::Cancel(_) => true,
+            }
+        }
+    }
+
+    impl gpui::Render for TouchBackHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+            use gpui::{ClickEvent, InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div};
+            let swipe = scroll_capture(cx.entity(), Self::peek, Self::follow).absolute().inset_0();
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    div()
+                        .id("underneath-row")
+                        .size_full()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.taps += 1;
+                            cx.notify();
+                        })),
+                )
+                .child(swipe)
+        }
+    }
+
+    #[gpui::test]
+    fn first_tap_after_touch_swipe_back_is_not_swallowed_by_fling_momentum(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, size};
+
+        let (host, cx) = cx.add_window_view(|_, _| TouchBackHost {
+            swipe: BackSwipe::default(),
+            open: true,
+            taps: 0,
+        });
+        cx.simulate_resize(size(px(400.), px(800.)));
+        cx.run_until_parked();
+
+        let t0 = Instant::now() - Duration::from_millis(80);
+        let touch = |id, phase, x, y, ms| TouchEvent {
+            id: TouchId(id),
+            phase,
+            position: point(px(x), px(y)),
+            predicted_position: None,
+            force: None,
+            timestamp: Some(t0 + Duration::from_millis(ms)),
+        };
+
+        // Fast horizontal touch swipe right past 1/3 width (~2500 px/s, well above min_fling_velocity).
+        cx.simulate_event(touch(1, TouchPhase::Started, 40., 300., 0));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 70., 300., 12));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 140., 300., 24));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 230., 300., 36));
+        cx.simulate_event(touch(1, TouchPhase::Ended, 230., 300., 48));
+        cx.run_until_parked();
+
+        host.read_with(cx, |host, _| {
+            assert!(!host.open, "swipe-back must close the open page");
+        });
+
+        // Immediately tap a row underneath — must fire on_click on the very first tap.
+        cx.simulate_event(touch(2, TouchPhase::Started, 200., 300., 60));
+        cx.simulate_event(touch(2, TouchPhase::Ended, 200., 300., 75));
+        cx.run_until_parked();
+
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.taps, 1, "first tap after swipe-back must not be swallowed");
+        });
+    }
+
+    #[gpui::test]
+    fn first_tap_after_back_during_vertical_fling_is_not_swallowed(cx: &mut TestAppContext) {
+        use gpui::{KeyDownEvent, Keystroke, Modifiers, TouchEvent, TouchId, size};
+
+        let (host, cx) = cx.add_window_view(|_, _| TouchBackHost {
+            swipe: BackSwipe::default(),
+            open: false,
+            taps: 0,
+        });
+        cx.simulate_resize(size(px(400.), px(800.)));
+        cx.run_until_parked();
+
+        let t0 = Instant::now() - Duration::from_millis(80);
+        let touch = |id, phase, x, y, ms| TouchEvent {
+            id: TouchId(id),
+            phase,
+            position: point(px(x), px(y)),
+            predicted_position: None,
+            force: None,
+            timestamp: Some(t0 + Duration::from_millis(ms)),
+        };
+
+        // Vertical fling (leaves TouchGestureRecognizer momentum active).
+        cx.simulate_event(touch(1, TouchPhase::Started, 200., 500., 0));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 200., 440., 16));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 200., 360., 32));
+        cx.simulate_event(touch(1, TouchPhase::Ended, 200., 300., 48));
+
+        // Simulate Android system Back (`escape` keystroke -> Keyboard modality) + cancelling momentum.
+        cx.simulate_event(KeyDownEvent {
+            keystroke: Keystroke { key: "escape".into(), key_char: None, modifiers: Modifiers::default() },
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.update(|window, _| window.cancel_touch_momentum());
+
+        // First tap on the uncovered view must register immediately.
+        cx.simulate_event(touch(2, TouchPhase::Started, 200., 300., 60));
+        cx.simulate_event(touch(2, TouchPhase::Ended, 200., 300., 75));
+        cx.run_until_parked();
+
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.taps, 1, "first tap after back navigation during fling must not be swallowed");
+        });
+    }
+
+    #[gpui::test]
+    fn first_tap_after_unclaimed_horizontal_swipe_is_not_swallowed(cx: &mut TestAppContext) {
+        use gpui::{TouchEvent, TouchId, size};
+
+        let (host, cx) = cx.add_window_view(|_, _| TouchBackHost {
+            swipe: BackSwipe::default(),
+            open: false,
+            taps: 0,
+        });
+        cx.simulate_resize(size(px(400.), px(800.)));
+        cx.run_until_parked();
+
+        let t0 = Instant::now() - Duration::from_millis(80);
+        let touch = |id, phase, x, y, ms| TouchEvent {
+            id: TouchId(id),
+            phase,
+            position: point(px(x), px(y)),
+            predicted_position: None,
+            force: None,
+            timestamp: Some(t0 + Duration::from_millis(ms)),
+        };
+
+        // Horizontal swipe when no page is open and nothing scrolls horizontally.
+        cx.simulate_event(touch(1, TouchPhase::Started, 40., 300., 0));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 90., 300., 16));
+        cx.simulate_event(touch(1, TouchPhase::Moved, 160., 300., 32));
+        cx.simulate_event(touch(1, TouchPhase::Ended, 200., 300., 48));
+
+        // Advance one frame so the momentum tick observes no scroll consumer and stops.
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+
+        cx.simulate_event(touch(2, TouchPhase::Started, 200., 300., 90));
+        cx.simulate_event(touch(2, TouchPhase::Ended, 200., 300., 120));
+        cx.run_until_parked();
+
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.taps, 1, "first tap after unclaimed horizontal swipe must not be swallowed");
         });
     }
 }

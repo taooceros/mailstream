@@ -705,6 +705,11 @@ fn process_input_events(app: &AndroidApp) {
                             let event_instant =
                                 super::frame_source::monotonic_nanos_to_instant(event_time_ns);
 
+                            if matches!(action, MotionAction::Down) {
+                                // `ACTION_DOWN` always starts a new gesture with no other active pointers.
+                                TOUCH_RESAMPLER.with(|slot| slot.borrow_mut().clear());
+                            }
+
                             for i in 0..pointer_count {
                                 let pointer = motion_event.pointer_at_index(i);
 
@@ -773,7 +778,7 @@ fn process_input_events(app: &AndroidApp) {
                                             super::frame_source::schedule_frame();
                                         }
                                     }
-                                    AMOTION_EVENT_ACTION_UP | AMOTION_EVENT_ACTION_CANCEL => {
+                                    AMOTION_EVENT_ACTION_UP => {
                                         let mut pending = Vec::new();
                                         TOUCH_RESAMPLER.with(|slot| {
                                             slot.borrow_mut().on_up_or_cancel(pointer_id, |m| {
@@ -798,7 +803,20 @@ fn process_input_events(app: &AndroidApp) {
                                             id: pointer_id,
                                             x: pointer.x(),
                                             y: pointer.y(),
-                                            action: touch_action,
+                                            action: AMOTION_EVENT_ACTION_UP,
+                                            predicted: None,
+                                            timestamp: Some(event_instant),
+                                        });
+                                    }
+                                    AMOTION_EVENT_ACTION_CANCEL => {
+                                        TOUCH_RESAMPLER.with(|slot| {
+                                            slot.borrow_mut().on_cancel(pointer_id);
+                                        });
+                                        win.handle_touch(crate::android::TouchPoint {
+                                            id: pointer_id,
+                                            x: pointer.x(),
+                                            y: pointer.y(),
+                                            action: AMOTION_EVENT_ACTION_CANCEL,
                                             predicted: None,
                                             timestamp: Some(event_instant),
                                         });

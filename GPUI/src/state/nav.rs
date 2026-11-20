@@ -153,6 +153,7 @@ impl MailApp {
 
     /// Esc in the search field clears it, ends the search and gives the keys back to the list.
     pub fn cancel_search(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         self.search.update(cx, |search, cx| search.clean(window, cx));
         self.compact_search = false;
         self.end_search(cx);
@@ -530,6 +531,7 @@ impl MailApp {
 
     pub fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.settings.take().is_some() {
+            window.cancel_touch_momentum();
             crate::settings::unregister_inline(cx);
             window.focus(&self.focus, cx);
             cx.notify();
@@ -694,6 +696,7 @@ impl MailApp {
 
     /// Esc: ends a selection (MS-305), else the top layer goes, else the search.
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         if let Some(settings) = &self.settings
             && settings.update(cx, |s, cx| s.go_back(window, cx))
         {
@@ -733,6 +736,7 @@ impl MailApp {
     /// The list's ‹ (its title row): the open bundle goes, a conversation beside the list staying
     /// open (MS-307); without a bundle, as Back.
     pub fn list_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.cancel_touch_momentum();
         self.finish_closing();
         let Some(index) = self.layers.iter().rposition(|layer| matches!(layer, Layer::Bundle(_) | Layer::Search)) else {
             return self.back(&Back, window, cx);

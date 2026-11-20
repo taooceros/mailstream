@@ -106,7 +106,10 @@ impl CalendarPane {
                     .child(self.expand_button(index, p, cx))
                     .child(
                         icon_button("calendar-popover-close", Icon::Close, "Close (Esc)", true, p.glyph)
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_event(cx))),
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                window.cancel_touch_momentum();
+                                this.close_event(cx);
+                            })),
                     ),
             )
             .child(self.render_event(index, Surface::Popover, p, cx))
@@ -147,7 +150,10 @@ impl CalendarPane {
                     icon_label_button("calendar-page-back", Some(Icon::Back), back, ButtonKind::Plain(p.text), ControlSize::Regular, true, p)
                         .debug_selector(|| "calendar-page-back".into())
                         .tooltip(format!("Back to {back} (Esc)"))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.slide_off(cx))),
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            window.cancel_touch_momentum();
+                            this.slide_off(cx);
+                        })),
                 ),
             )
             .child(div().flex_1())
@@ -329,7 +335,10 @@ impl CalendarPane {
             .gap(px(space::S8))
             .child(capsule(p).child(
                 icon_button("calendar-close", close_icon, close_tip, true, p.glyph)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.slide_off(cx))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        window.cancel_touch_momentum();
+                        this.slide_off(cx);
+                    })),
             ))
             .child(div().flex_1())
             .when_some(self.edit_buttons(index, p, cx), |d, buttons| d.child(capsule(p).children(buttons)))

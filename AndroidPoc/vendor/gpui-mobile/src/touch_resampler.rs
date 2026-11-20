@@ -203,6 +203,18 @@ impl TouchResampler {
             }
         }
     }
+
+    /// Drop all buffered samples for `id` without emitting them (used on
+    /// `ACTION_CANCEL`, e.g. when Android's system back gesture pilfers a touch).
+    pub(crate) fn on_cancel(&mut self, id: i32) {
+        self.pointers.remove(&id);
+    }
+
+    /// Clear all tracked pointers (called on `ACTION_DOWN`, which begins a fresh
+    /// Android touch stream with no prior active pointers).
+    pub(crate) fn clear(&mut self) {
+        self.pointers.clear();
+    }
 }
 
 fn resample_position(
@@ -318,5 +330,17 @@ mod tests {
         assert_eq!(out[0].raw_y, 450.0);
         assert_eq!(out[0].predicted, None);
         assert!(!r.needs_next_vsync(6 * MS, REFRESH_120HZ));
+    }
+
+    #[test]
+    fn cancel_drops_pending_samples_without_emitting_moves() {
+        let mut r = TouchResampler::new();
+        r.on_down(0, 0, 50.0, 500.0);
+        r.on_move(0, 5 * MS, 80.0, 500.0);
+        r.on_cancel(0);
+        let mut out = Vec::new();
+        r.flush_for_vsync(10 * MS, REFRESH_120HZ, |m| out.push(m));
+        assert!(out.is_empty());
+        assert!(!r.needs_next_vsync(10 * MS, REFRESH_120HZ));
     }
 }

@@ -6197,6 +6197,15 @@ impl Window {
         self.touch_prediction_enabled = enabled;
     }
 
+    /// Mailstream patch (MS-431): cancels any in-flight post-release touch
+    /// scroll momentum. Callers that run their own transition physics (such as
+    /// a page back-swipe) or dismiss a scrollable surface (navigating back)
+    /// call this so the next tap on the uncovered view is never swallowed
+    /// trying to catch a fling on the dismissed or stationary screen.
+    pub fn cancel_touch_momentum(&mut self) {
+        self.touch_gestures.cancel_momentum();
+    }
+
     /// Runs the portable gesture recognizer over a raw touch event and
     /// dispatches whatever it resolves (scroll steps, synthesized taps)
     /// through the ordinary mouse-event path.
@@ -6322,7 +6331,27 @@ impl Window {
         self.on_next_frame(|window, cx| {
             let now = window.frame_signal_at.unwrap_or_else(Instant::now);
             if let Some(gesture) = window.touch_gestures.tick_momentum_at(now) {
+                let non_zero_move = matches!(
+                    &gesture,
+                    RecognizedTouchGesture::Scroll(scroll)
+                        if scroll.touch_phase == crate::TouchPhase::Moved
+                            && !scroll.delta.pixel_delta(px(16.)).is_zero()
+                );
+                let updates_before = window.invalidator.update_count();
+                let dirty_before = window.invalidator.is_dirty();
                 window.dispatch_recognized_touch_gesture(gesture, cx);
+                // Mailstream patch (MS-431): stop phantom momentum when a
+                // non-zero tick neither moved/invalidated any view nor was
+                // claimed by a listener (e.g. a horizontal swipe over a
+                // vertical-only list or a scroll already at its boundary).
+                if non_zero_move
+                    && cx.propagate_event
+                    && !dirty_before
+                    && !window.invalidator.is_dirty()
+                    && window.invalidator.update_count() == updates_before
+                {
+                    window.touch_gestures.cancel_momentum();
+                }
             }
             if window.touch_gestures.has_momentum() {
                 window.schedule_touch_momentum_tick();

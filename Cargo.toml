@@ -42,6 +42,10 @@ resolver = "3"
 # surfaces without blocking scroll hitboxes or GPUI scroll bubbling for OS-managed native views
 # that forward wheel events back to GPUI (`WKWebView`), and scroll layers (`src/fast/layers/paint.rs`)
 # bypass compositing for scroll containers intersecting a visible native surface.
+# With MS-431: `Window::cancel_touch_momentum` (`src/window.rs`, `src/gestures.rs`) lets back
+# swipes and back navigation clear post-fling touch momentum, and `schedule_touch_momentum_tick`
+# stops phantom momentum ticks that neither move/invalidate any view nor are claimed, so the first
+# tap after navigating back on Android is never swallowed by `TouchGestureState::Caught`.
 # `GPUI/vendor/gpui-fast-macos` is GPUI Fast's Mac platform 0.1.14 spreading each mouse-wheel step
 # over a short ease-out instead of applying it in one frame (MS-225, `src/wheel_motion.rs` and its
 # use in `window.rs`, marked "Mailstream patch"); touchpads and Magic Mice keep AppKit's own deltas
