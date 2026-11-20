@@ -2211,6 +2211,7 @@ impl WgpuRenderer {
         };
         surface.configure(&core.resources.device, &self.surface_config);
         core.resources.invalidate_intermediate_textures();
+        crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
         self.state = RendererState::Ready { surface, core };
 
         Ok(())

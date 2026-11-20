@@ -182,6 +182,11 @@ pub(crate) fn before_dispatch(window: &mut Window, cx: &mut App, event: &Platfor
     };
     let reaches: &dyn Fn(&Window, &Layer) -> bool = match event {
         PlatformInput::Scroll(_) => return,
+        PlatformInput::Touch(touch)
+            if touch.phase == crate::TouchPhase::Moved && window.is_touch_panning() =>
+        {
+            return;
+        }
         PlatformInput::KeyDown(_)
         | PlatformInput::KeyUp(_)
         | PlatformInput::ModifiersChanged(_) => &focus_inside,

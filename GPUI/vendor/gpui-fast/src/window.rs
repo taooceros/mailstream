@@ -6186,6 +6186,10 @@ impl Window {
         self.touch_prediction_enabled
     }
 
+    pub(crate) fn is_touch_panning(&self) -> bool {
+        self.touch_gestures.is_panning()
+    }
+
     /// Sets whether recognized touch pans may use the platform's predicted
     /// touch positions. Disabling drops [`TouchEvent::predicted_position`]
     /// before gesture recognition, so pans track only raw touch positions.
@@ -6240,7 +6244,10 @@ impl Window {
             RecognizedTouchGesture::Scroll(scroll_wheel) => {
                 self.mouse_position = scroll_wheel.position;
                 cx.propagate_event = true;
+                crate::fast::layers::hover_freeze::note_wheel(self, cx, &scroll_wheel);
+                crate::fast::layers::wheel::begin_dispatch_scroll(self, cx);
                 self.dispatch_mouse_event(&scroll_wheel, cx);
+                crate::fast::layers::wheel::end_dispatch(self, cx);
             }
             RecognizedTouchGesture::Tap { down, up } => {
                 self.mouse_position = up.position;

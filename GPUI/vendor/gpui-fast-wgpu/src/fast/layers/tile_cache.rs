@@ -18,6 +18,9 @@ use crate::fast::frame::FrameTarget;
 use crate::wgpu_renderer::{GlobalParams, WgpuRendererCore};
 
 /// How much tile texture memory a window keeps, by default (spec §5.6).
+#[cfg(target_os = "android")]
+pub(crate) const DEFAULT_BUDGET_BYTES: u64 = 24 * 1024 * 1024;
+#[cfg(not(target_os = "android"))]
 pub(crate) const DEFAULT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Frames a layer that no frame composites keeps its tiles for; the core

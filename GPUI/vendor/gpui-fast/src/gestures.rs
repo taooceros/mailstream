@@ -631,6 +631,13 @@ impl TouchGestureRecognizer {
         self.handle_event_at(event, event.timestamp.unwrap_or_else(Instant::now))
     }
 
+    pub(crate) fn is_panning(&self) -> bool {
+        matches!(
+            self.state,
+            TouchGestureState::Panning { .. } | TouchGestureState::Caught(_)
+        )
+    }
+
     fn handle_event_at(
         &mut self,
         event: &TouchEvent,

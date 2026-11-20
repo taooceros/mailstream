@@ -48,19 +48,26 @@ struct Before {
     scroll_notifies: FxHashMap<EntityId, u64>,
 }
 
-/// Notes where the counts stand as `event` begins to be dispatched, if it is
-/// a wheel event and the window has a layer whose view's notifications are
-/// counted. Called before the event's listeners run.
-pub(crate) fn begin_dispatch(window: &mut Window, cx: &App, event: &PlatformInput) {
-    let before = (COMPILED
-        && matches!(event, PlatformInput::Scroll(_))
-        && !window.fast_layers.layers.is_empty())
-    .then(|| Before {
+/// Notes where the counts stand as a scroll event begins to be dispatched, if
+/// the window has a layer whose view's notifications are counted.
+pub(crate) fn begin_dispatch_scroll(window: &mut Window, cx: &App) {
+    let before = (COMPILED && !window.fast_layers.layers.is_empty()).then(|| Before {
         changes: crate::fast::dependencies::change_count(cx),
         notifies: crate::fast::layers::invalidate::watched_notifies(),
         scroll_notifies: window.fast_layers.scrolls.scroll_notifies.clone(),
     });
     window.fast_layers.wheel = WheelDispatch(before);
+}
+
+/// Notes where the counts stand as `event` begins to be dispatched, if it is
+/// a wheel event and the window has a layer whose view's notifications are
+/// counted. Called before the event's listeners run.
+pub(crate) fn begin_dispatch(window: &mut Window, cx: &App, event: &PlatformInput) {
+    if matches!(event, PlatformInput::Scroll(_)) {
+        begin_dispatch_scroll(window, cx);
+    } else {
+        window.fast_layers.wheel = WheelDispatch(None);
+    }
 }
 
 /// Counts, once the event [`begin_dispatch`] saw has been dispatched, the
