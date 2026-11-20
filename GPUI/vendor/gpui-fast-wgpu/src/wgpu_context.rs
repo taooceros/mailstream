@@ -325,7 +325,7 @@ impl WgpuContext {
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
 
-        Self {
+        let context = Self {
             instance,
             adapter,
             device: Arc::new(device),
@@ -335,7 +335,9 @@ impl WgpuContext {
             color_texture_format,
             errors,
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
-        }
+        };
+        crate::fast::dynamic_textures::register_upload_platform(&context);
+        context
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -436,6 +438,7 @@ impl WgpuContext {
             errors,
             fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         };
+        crate::fast::dynamic_textures::register_upload_platform(&context);
         Ok(PreparedWebGraphics { context, surface })
     }
 

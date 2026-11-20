@@ -23,13 +23,14 @@
 //! disk for as long as their answers allow ([`ResourceCache`]), and each page registers its fonts
 //! in a copy of its own of the system font collection, so one mail's font never changes another's.
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Ordering as CmpOrdering;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyrender::{PaintScene as _, render_to_buffer};
@@ -222,8 +223,21 @@ impl HtmlPage {
 
     /// Like [`HtmlPage::tile`], with `base_zoom` matching [`HtmlPage::layout_scaled`].
     pub async fn tile_scaled(&self, width: f64, scale: f64, base_zoom: f32, top: f64, height: f64) -> Option<HtmlTile> {
+        self.tile_scaled_prioritized(width, scale, base_zoom, top, height, 1).await
+    }
+
+    /// Like [`HtmlPage::tile_scaled`], with `priority` (`1` = visible in viewport, `0` = prefetch).
+    pub async fn tile_scaled_prioritized(
+        &self,
+        width: f64,
+        scale: f64,
+        base_zoom: f32,
+        top: f64,
+        height: f64,
+        priority: u8,
+    ) -> Option<HtmlTile> {
         let (reply, answer) = oneshot::channel();
-        send(Job::Tile { id: self.id, width, scale, base_zoom, top, height, reply });
+        send(Job::Tile { id: self.id, width, scale, base_zoom, top, height, priority, reply });
         answer.await.ok().flatten()
     }
 
@@ -307,7 +321,16 @@ enum Job {
     LoadRemote { id: u64 },
     Close { id: u64 },
     Layout { id: u64, width: f64, scale: f64, base_zoom: f32, reply: oneshot::Sender<Option<HtmlSize>> },
-    Tile { id: u64, width: f64, scale: f64, base_zoom: f32, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
+    Tile {
+        id: u64,
+        width: f64,
+        scale: f64,
+        base_zoom: f32,
+        top: f64,
+        height: f64,
+        priority: u8,
+        reply: oneshot::Sender<Option<HtmlTile>>,
+    },
     LinkAt { id: u64, x: f64, y: f64, reply: oneshot::Sender<Option<String>> },
     Select { id: u64, from: (f64, f64), to: (f64, f64), reply: oneshot::Sender<bool> },
     ClearSelection { id: u64, reply: oneshot::Sender<bool> },
@@ -357,6 +380,105 @@ fn send(job: Job) {
     // The thread lives as long as the process; a send fails only while it exits.
     let _ = PAGES.send(job);
 }
+
+/// Recorded tile scene ready for CPU rasterization on a `mail-html-raster-*` worker thread (MS-450).
+struct RasterTask {
+    priority: u8,
+    seq: u64,
+    generation: u64,
+    page_gen: Arc<AtomicU64>,
+    scene: anyrender::recording::Scene,
+    white: bool,
+    pixel_width: u32,
+    pixel_height: u32,
+    reply: oneshot::Sender<Option<HtmlTile>>,
+}
+
+impl PartialEq for RasterTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.priority == other.priority && self.seq == other.seq
+    }
+}
+
+impl Eq for RasterTask {}
+
+impl PartialOrd for RasterTask {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RasterTask {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // Higher priority first; within same priority, smaller seq (FIFO) first.
+        self.priority.cmp(&other.priority).then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+struct RasterPool {
+    queue: Arc<(Mutex<BinaryHeap<RasterTask>>, Condvar)>,
+    next_seq: AtomicU64,
+}
+
+impl RasterPool {
+    fn new() -> Self {
+        let queue = Arc::new((Mutex::new(BinaryHeap::<RasterTask>::new()), Condvar::new()));
+        let workers = std::thread::available_parallelism().map(|n| n.get().clamp(2, 3)).unwrap_or(2);
+        for idx in 0..workers {
+            let queue = Arc::clone(&queue);
+            std::thread::Builder::new()
+                .name(format!("mail-html-raster-{idx}"))
+                .spawn(move || Self::worker(queue))
+                .expect("the mail HTML raster worker starts");
+        }
+        Self { queue, next_seq: AtomicU64::new(0) }
+    }
+
+    fn submit(&self, mut task: RasterTask) {
+        task.seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let (lock, cvar) = &*self.queue;
+        let mut heap = lock.lock().unwrap_or_else(|e| e.into_inner());
+        heap.push(task);
+        cvar.notify_one();
+    }
+
+    fn worker(queue: Arc<(Mutex<BinaryHeap<RasterTask>>, Condvar)>) {
+        let (lock, cvar) = &*queue;
+        loop {
+            let task = {
+                let mut heap = lock.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if let Some(task) = heap.pop() {
+                        break task;
+                    }
+                    heap = cvar.wait(heap).unwrap_or_else(|e| e.into_inner());
+                }
+            };
+            if task.reply.is_canceled() || task.page_gen.load(Ordering::Relaxed) != task.generation {
+                continue;
+            }
+            let RasterTask { scene, white, pixel_width, pixel_height, reply, .. } = task;
+            let rendered = panic::catch_unwind(AssertUnwindSafe(move || {
+                let pixels = render_to_buffer::<VelloCpuImageRenderer, _>(
+                    |painter| {
+                        if white {
+                            let all = Rect::new(0.0, 0.0, pixel_width as f64, pixel_height as f64);
+                            painter.fill(Fill::NonZero, Default::default(), Color::WHITE, None, &all);
+                        }
+                        painter.append_scene(scene, peniko::kurbo::Affine::IDENTITY);
+                    },
+                    pixel_width,
+                    pixel_height,
+                );
+                HtmlTile { width: pixel_width, height: pixel_height, pixels }
+            }))
+            .ok();
+            let _ = reply.send(rendered);
+        }
+    }
+}
+
+static RASTER_POOL: LazyLock<RasterPool> = LazyLock::new(RasterPool::new);
 
 /// Remote images, stylesheets and fonts: fetched on a runtime of their own, so a slow server never
 /// holds the pages' thread.
@@ -413,6 +535,9 @@ struct Page {
     paper: bool,
     /// The elements [`Page::recolour`] gave colours, with the `style` attribute each had.
     recoloured: Vec<(NodeId, Option<String>)>,
+    /// Incremented whenever layout, selection, or page liveness changes so queued raster tasks
+    /// for older states cancel before running `VelloCpuImageRenderer` (MS-450).
+    raster_gen: Arc<AtomicU64>,
 }
 
 impl Pages {
@@ -436,19 +561,47 @@ impl Pages {
     }
 
     fn run(mut self, queue: Receiver<Job>) {
+        let mut high = VecDeque::<Job>::new();
+        let mut tiles = VecDeque::<Job>::new();
         loop {
-            let job = match queue.try_recv() {
-                Ok(job) => job,
-                Err(TryRecvError::Empty) => {
-                    self.relayout_arrived();
-                    match queue.recv() {
-                        Ok(job) => job,
-                        Err(_) => return,
+            // Drain all ready jobs, keeping DOM/layout/interaction ahead of tile recording.
+            loop {
+                match queue.try_recv() {
+                    Ok(job @ Job::Tile { .. }) => tiles.push_back(job),
+                    Ok(job) => high.push_back(job),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        if high.is_empty() && tiles.is_empty() {
+                            return;
+                        }
+                        break;
                     }
                 }
-                Err(TryRecvError::Disconnected) => return,
-            };
-            self.guard(job.page(), |pages| pages.handle(job));
+            }
+
+            if let Some(job) = high.pop_front() {
+                self.guard(job.page(), |pages| pages.handle(job));
+                continue;
+            }
+
+            if !tiles.is_empty() {
+                // Prefer visible-viewport tiles (`priority > 0`) over prefetch tiles.
+                let pos = tiles
+                    .iter()
+                    .position(|j| matches!(j, Job::Tile { priority, .. } if *priority > 0))
+                    .unwrap_or(0);
+                if let Some(job) = tiles.remove(pos) {
+                    self.guard(job.page(), |pages| pages.handle(job));
+                }
+                continue;
+            }
+
+            self.relayout_arrived();
+            match queue.recv() {
+                Ok(job @ Job::Tile { .. }) => tiles.push_back(job),
+                Ok(job) => high.push_back(job),
+                Err(_) => return,
+            }
         }
     }
 
@@ -476,31 +629,57 @@ impl Pages {
                 }
             }
             Job::Close { id } => {
-                // Dropping the senders answers pending `changed` calls.
-                self.pages.remove(&id);
+                // Dropping the senders answers pending `changed` calls; bumping `raster_gen`
+                // cancels any queued raster tasks for this page.
+                if let Some(page) = self.pages.remove(&id) {
+                    page.bump_raster_gen();
+                }
                 self.arrived.remove(&id);
             }
             Job::Layout { id, width, scale, base_zoom, reply } => {
                 let size = self.pages.get_mut(&id).map(|page| {
+                    let changed = (page.width - width).abs() > f64::EPSILON
+                        || (page.scale - scale).abs() > f64::EPSILON
+                        || (page.base_zoom - base_zoom).abs() > f32::EPSILON;
                     page.lay_out_scaled(width, scale, base_zoom);
+                    if changed {
+                        page.bump_raster_gen();
+                    }
                     HtmlSize { height: page.height, version: page.version, blocked: page.gate.blocked() }
                 });
                 let _ = reply.send(size);
             }
-            Job::Tile { id, width, scale, base_zoom, top, height, reply } => {
-                let tile = self.pages.get_mut(&id).map(|page| page.tile_scaled(width, scale, base_zoom, top, height));
-                let _ = reply.send(tile);
+            Job::Tile { id, width, scale, base_zoom, top, height, priority, reply } => {
+                if reply.is_canceled() {
+                    return;
+                }
+                match self.pages.get_mut(&id) {
+                    Some(page) => {
+                        let task = page.record_tile_scaled(width, scale, base_zoom, top, height, priority, reply);
+                        RASTER_POOL.submit(task);
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
             }
             Job::LinkAt { id, x, y, reply } => {
                 let _ = reply.send(self.pages.get(&id).and_then(|page| page.link_at(x, y)));
             }
             Job::Select { id, from, to, reply } => {
-                let _ = reply.send(self.pages.get_mut(&id).is_some_and(|page| page.select(from, to)));
+                let selected = self.pages.get_mut(&id).is_some_and(|page| {
+                    page.bump_raster_gen();
+                    page.select(from, to)
+                });
+                let _ = reply.send(selected);
             }
             Job::ClearSelection { id, reply } => {
                 let had = self.pages.get_mut(&id).is_some_and(|page| {
                     let had = page.doc.has_text_selection();
                     page.doc.clear_text_selection();
+                    if had {
+                        page.bump_raster_gen();
+                    }
                     had
                 });
                 let _ = reply.send(had);
@@ -564,6 +743,7 @@ impl Pages {
             page.fit();
         }
         page.version += 1;
+        page.bump_raster_gen();
         let version = page.version;
         for reply in page.waiting.drain(..) {
             let _ = reply.send(version);
@@ -828,6 +1008,7 @@ impl Page {
             scheme,
             paper: false,
             recoloured: Vec::new(),
+            raster_gen: Arc::new(AtomicU64::new(0)),
         };
         page.recolour();
         page
@@ -937,6 +1118,46 @@ impl Page {
         self.tile_scaled(width, scale, 1.0, top, height)
     }
 
+    fn bump_raster_gen(&self) {
+        self.raster_gen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a tile's drawing commands into a lightweight `anyrender::recording::Scene` (~0.3 ms)
+    /// on the coordinator thread so CPU rasterization runs off-thread in [`RASTER_POOL`] (MS-450).
+    #[allow(clippy::too_many_arguments)]
+    fn record_tile_scaled(
+        &mut self,
+        width: f64,
+        scale: f64,
+        base_zoom: f32,
+        top: f64,
+        height: f64,
+        priority: u8,
+        reply: oneshot::Sender<Option<HtmlTile>>,
+    ) -> RasterTask {
+        self.lay_out_scaled(width, scale, base_zoom);
+        let (pixel_width, pixel_height) = ((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
+        let zoom = self.zoom as f64;
+        let doc = self.doc.as_mut();
+        doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: top / zoom });
+        let pixel_scale = scale * zoom;
+        let mut scene = anyrender::recording::Scene::new();
+        paint_scene(&mut scene, doc, pixel_scale, pixel_width, pixel_height, 0, 0);
+        doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: 0.0 });
+        RasterTask {
+            priority,
+            seq: 0,
+            generation: self.raster_gen.load(Ordering::Relaxed),
+            page_gen: Arc::clone(&self.raster_gen),
+            scene,
+            white: self.theme.is_none() || self.paper,
+            pixel_width,
+            pixel_height,
+            reply,
+        }
+    }
+
+    #[cfg(test)]
     fn tile_scaled(&mut self, width: f64, scale: f64, base_zoom: f32, top: f64, height: f64) -> HtmlTile {
         self.lay_out_scaled(width, scale, base_zoom);
         let (pixel_width, pixel_height) = ((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
@@ -945,18 +1166,20 @@ impl Page {
         doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: top / zoom });
         let pixel_scale = scale * zoom;
         let white = self.theme.is_none() || self.paper;
+        let mut recorded = anyrender::recording::Scene::new();
+        paint_scene(&mut recorded, doc, pixel_scale, pixel_width, pixel_height, 0, 0);
+        doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: 0.0 });
         let pixels = render_to_buffer::<VelloCpuImageRenderer, _>(
-            |scene| {
+            |painter| {
                 if white {
                     let all = Rect::new(0.0, 0.0, pixel_width as f64, pixel_height as f64);
-                    scene.fill(Fill::NonZero, Default::default(), Color::WHITE, None, &all);
+                    painter.fill(Fill::NonZero, Default::default(), Color::WHITE, None, &all);
                 }
-                paint_scene(scene, doc, pixel_scale, pixel_width, pixel_height, 0, 0);
+                painter.append_scene(recorded, peniko::kurbo::Affine::IDENTITY);
             },
             pixel_width,
             pixel_height,
         );
-        doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: 0.0 });
         HtmlTile { width: pixel_width, height: pixel_height, pixels }
     }
 

@@ -25,19 +25,28 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Corners, CursorStyle, DispatchPhase, FocusHandle, Hitbox, HitboxBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, SharedString, Window, actions, point,
-    px, size,
+    App, Bounds, ClipboardItem, Corners, CursorStyle, DevicePixels, DispatchPhase, DynamicTexture, FocusHandle, Hitbox,
+    HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, SharedString,
+    Window, actions, point, px, size,
 };
 pub use mailstream::{HtmlPart, HtmlTheme};
 use mailstream::{HtmlPage, HtmlTile, is_mail_link};
 
-/// Tiles are this many points tall.
+/// Tiles are this many points tall (`256 pt` on Android to halve per-tile raster time and memory,
+/// `512 pt` on desktop).
+#[cfg(target_os = "android")]
+const TILE: f32 = 256.;
+#[cfg(not(target_os = "android"))]
 const TILE: f32 = 512.;
 
 /// Tiles this many beyond the viewport are drawn ahead; past twice this they are freed.
+#[cfg(target_os = "android")]
+const AHEAD: usize = 2;
+#[cfg(not(target_os = "android"))]
 const AHEAD: usize = 1;
 
+/// Maximum number of reusable `DynamicTexture` slots kept warm while scrolling (MS-450).
+const TEXTURE_POOL_CAP: usize = 12;
 actions!(mail_body, [CopyBody]);
 
 /// ⌘C (Ctrl+C) copies the selection of a body while no text field has focus; a focused field's
@@ -49,8 +58,20 @@ pub fn bind_keys(cx: &mut App) {
     cx.on_action(|_: &CopyBody, cx| copy_selection(cx));
 }
 
+#[derive(Clone)]
+enum TileImage {
+    Dynamic { texture: DynamicTexture, width: u32, height: u32 },
+    Atlas(Arc<RenderImage>),
+}
+
+struct PooledTexture {
+    texture: DynamicTexture,
+    width: u32,
+    height: u32,
+}
+
 struct Tile {
-    image: Arc<RenderImage>,
+    image: TileImage,
     /// Points, in the layout it was drawn for.
     top: f32,
     width: f32,
@@ -117,8 +138,31 @@ impl Drop for Entry {
 #[derive(Default)]
 struct Pages {
     entries: HashMap<SharedString, Entry>,
-    /// Tile images no longer shown, freed from the sprite atlas at the next frame's start.
-    retired: Vec<Arc<RenderImage>>,
+    /// Reusable `DynamicTexture` pool so scrolling overwrites existing GPU textures via
+    /// `queue.write_texture` without allocating new `VkImage`s or fragmenting `WgpuAtlas`.
+    pool: Vec<PooledTexture>,
+    /// Atlas tile images no longer shown, freed from the sprite atlas at the next frame's start.
+    retired_atlas: Vec<Arc<RenderImage>>,
+}
+
+impl Pages {
+    fn retire_tile(&mut self, image: TileImage) {
+        match image {
+            TileImage::Dynamic { texture, width, height } => {
+                if self.pool.len() < TEXTURE_POOL_CAP {
+                    self.pool.push(PooledTexture { texture, width, height });
+                } else {
+                    texture.remove();
+                }
+            }
+            TileImage::Atlas(image) => self.retired_atlas.push(image),
+        }
+    }
+
+    fn take_pooled(&mut self, width: u32, height: u32) -> Option<DynamicTexture> {
+        let idx = self.pool.iter().position(|slot| slot.width == width && slot.height == height)?;
+        Some(self.pool.swap_remove(idx).texture)
+    }
 }
 
 thread_local! {
@@ -169,15 +213,24 @@ pub fn keep(key: &SharedString) {
 /// tiles no longer shown.
 pub fn begin_frame(window: &mut Window) {
     let retired = PAGES.with_borrow_mut(|pages| {
-        let mut retired = std::mem::take(&mut pages.retired);
+        let mut to_retire = Vec::new();
         pages.entries.retain(|_, entry| {
             let keep = std::mem::take(&mut entry.live);
             if !keep {
-                retired.extend(entry.tiles.drain().map(|(_, tile)| tile.image));
+                to_retire.extend(entry.tiles.drain().map(|(_, tile)| tile.image));
             }
             keep
         });
-        retired
+        for image in to_retire {
+            pages.retire_tile(image);
+        }
+        // When no HTML pages remain open (e.g. back to inbox), release all pooled GPU textures.
+        if pages.entries.is_empty() {
+            for slot in pages.pool.drain(..) {
+                slot.texture.remove();
+            }
+        }
+        std::mem::take(&mut pages.retired_atlas)
     });
     for image in retired {
         window.drop_image(image).ok();
@@ -213,43 +266,58 @@ pub fn paint(
     let viewport = (f32::from(visible.top() - bounds.top()), f32::from(visible.bottom() - bounds.top()));
     let mut images = Vec::new();
     let over_link = PAGES.with_borrow_mut(|pages| {
-        let Pages { entries, retired } = pages;
-        if entries.get(key).is_some_and(|entry| entry.theme != Some(theme) || (entry.remote && !remote)) {
-            let stale = entries.remove(key).expect("the entry is there");
-            retired.extend(stale.tiles.values().map(|tile| tile.image.clone()));
-        }
-        let entry = entries.entry(key.clone()).or_insert_with(|| {
-            open(key, html, part, theme, remote, window, cx);
-            let mut entry = Entry::default();
-            entry.theme = Some(theme);
-            entry.remote = remote;
-            entry
-        });
-        if remote && !entry.remote {
-            entry.remote = true;
-            // A page still opening loads it once it is there (`open`).
-            if let Some(page) = &entry.page {
-                page.load_remote();
+        if pages.entries.get(key).is_some_and(|entry| entry.theme != Some(theme) || (entry.remote && !remote)) {
+            let mut stale = pages.entries.remove(key).expect("the entry is there");
+            for (_, tile) in stale.tiles.drain() {
+                pages.retire_tile(tile.image);
             }
         }
-        let Some(page) = entry.page.clone() else { return false };
-        if entry.asked != Some((width, scale, base_zoom)) {
-            entry.asked = Some((width, scale, base_zoom));
-            lay_out(key, &page, width, scale, base_zoom, window, cx);
+        let mut evicted = Vec::new();
+        let over_link = {
+            let entry = pages.entries.entry(key.clone()).or_insert_with(|| {
+                open(key, html, part, theme, remote, window, cx);
+                let mut entry = Entry::default();
+                entry.theme = Some(theme);
+                entry.remote = remote;
+                entry
+            });
+            if remote && !entry.remote {
+                entry.remote = true;
+                // A page still opening loads it once it is there (`open`).
+                if let Some(page) = &entry.page {
+                    page.load_remote();
+                }
+            }
+            let Some(page) = entry.page.clone() else { return false };
+            if entry.asked != Some((width, scale, base_zoom)) {
+                entry.asked = Some((width, scale, base_zoom));
+                lay_out(key, &page, width, scale, base_zoom, window, cx);
+            }
+            if let Some(layout) = entry.layout {
+                update_tiles(key, &page, entry, layout, viewport, &mut evicted, window, cx);
+            }
+            let mut tiles: Vec<_> = entry.tiles.values().collect();
+            tiles.sort_by_key(|tile| tile.generation);
+            images.extend(tiles.into_iter().map(|tile| {
+                let origin = bounds.origin + point(px(0.), px(tile.top));
+                (Bounds::new(origin, size(px(tile.width), px(tile.height))), tile.image.clone())
+            }));
+            entry.over_link
+        };
+        for image in evicted {
+            pages.retire_tile(image);
         }
-        if let Some(layout) = entry.layout {
-            update_tiles(key, &page, entry, layout, viewport, retired, window, cx);
-        }
-        let mut tiles: Vec<_> = entry.tiles.values().collect();
-        tiles.sort_by_key(|tile| tile.generation);
-        images.extend(tiles.into_iter().map(|tile| {
-            let origin = bounds.origin + point(px(0.), px(tile.top));
-            (Bounds::new(origin, size(px(tile.width), px(tile.height))), tile.image.clone())
-        }));
-        entry.over_link
+        over_link
     });
     for (bounds, image) in images {
-        window.paint_image(bounds, bounds, Corners::default(), image, 0, false).ok();
+        match image {
+            TileImage::Dynamic { texture, .. } => {
+                window.paint_dynamic_texture(bounds, texture).ok();
+            }
+            TileImage::Atlas(image) => {
+                window.paint_image(bounds, bounds, Corners::default(), image, 0, false).ok();
+            }
+        }
     }
     if over_link {
         window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
@@ -350,7 +418,7 @@ fn update_tiles(
     entry: &mut Entry,
     layout: Layout,
     (top, bottom): (f32, f32),
-    retired: &mut Vec<Arc<RenderImage>>,
+    retired: &mut Vec<TileImage>,
     window: &Window,
     cx: &App,
 ) {
@@ -382,8 +450,9 @@ fn update_tiles(
         if height <= 0. {
             continue;
         }
+        let in_viewport = tile_top + height > top && tile_top < bottom;
         entry.drawing.insert(i, generation);
-        draw_tile(key, page, i, generation, layout, tile_top, height, window, cx);
+        draw_tile(key, page, i, generation, layout, tile_top, height, in_viewport, window, cx);
     }
 }
 
@@ -396,41 +465,80 @@ fn draw_tile(
     layout: Layout,
     top: f32,
     height: f32,
+    in_viewport: bool,
     window: &Window,
     cx: &App,
 ) {
     let (key, page) = (key.clone(), page.clone());
     let executor = cx.background_executor().clone();
+    let priority = if in_viewport { 1 } else { 0 };
     window
         .spawn(cx, async move |cx| {
             let drawn = page
-                .tile_scaled(f64::from(layout.width), f64::from(layout.scale), layout.base_zoom, f64::from(top), f64::from(height))
+                .tile_scaled_prioritized(
+                    f64::from(layout.width),
+                    f64::from(layout.scale),
+                    layout.base_zoom,
+                    f64::from(top),
+                    f64::from(height),
+                    priority,
+                )
                 .await;
             let Some(drawn) = drawn else { return };
-            let image = executor.spawn(async move { render_image(drawn) }).await;
-            let shown = with_page(&key, &page, |entry| {
-                if entry.drawing.get(&i) == Some(&generation) {
-                    entry.drawing.remove(&i);
+            let (px_width, px_height, pixels) = executor.spawn(async move { bgra_straight_pixels(drawn) }).await;
+            cx.update(|window, _| {
+                let still_needed = with_page(&key, &page, |entry| {
+                    if entry.drawing.get(&i) == Some(&generation) {
+                        entry.drawing.remove(&i);
+                    }
+                    entry.tiles.get(&i).is_none_or(|current| current.generation < generation)
+                });
+                if still_needed != Some(true) {
+                    return;
                 }
-                let tile = Tile { image: image.clone(), top, width: layout.width, height, generation };
-                match entry.tiles.get(&i) {
-                    Some(current) if current.generation >= generation => Some(image.clone()),
-                    _ => entry.tiles.insert(i, tile).map(|old| old.image),
+                let image = upload_tile_image(px_width, px_height, pixels, window);
+                let old = with_page(&key, &page, |entry| {
+                    let tile = Tile { image: image.clone(), top, width: layout.width, height, generation };
+                    match entry.tiles.get(&i) {
+                        Some(current) if current.generation >= generation => Some(image.clone()),
+                        _ => entry.tiles.insert(i, tile).map(|old| old.image),
+                    }
+                });
+                let retire = match old {
+                    Some(retire) => retire,
+                    None => Some(image),
+                };
+                if let Some(retire) = retire {
+                    PAGES.with_borrow_mut(|pages| pages.retire_tile(retire));
                 }
-            });
-            let retire = match shown {
-                Some(retire) => retire,
-                // The page is gone: free what was drawn for it.
-                None => Some(image),
-            };
-            PAGES.with_borrow_mut(|pages| pages.retired.extend(retire));
-            cx.update(|window, _| window.refresh()).ok();
+                window.refresh();
+            })
+            .ok();
         })
         .detach();
 }
 
-/// A tile as a GPUI image, whose pixels are BGRA with straight alpha (the tile's is premultiplied).
-fn render_image(tile: HtmlTile) -> Arc<RenderImage> {
+/// Uploads BGRA8 straight-alpha tile pixels into a pooled `DynamicTexture` (or allocates a new one),
+/// falling back to a `RenderImage` atlas sprite only when no `DynamicTexturePlatform` is registered.
+fn upload_tile_image(width: u32, height: u32, pixels: Vec<u8>, window: &mut Window) -> TileImage {
+    let bytes_per_row = width.saturating_mul(4);
+    let dev_size = size(DevicePixels(width as i32), DevicePixels(height as i32));
+    if let Some(texture) = PAGES.with_borrow_mut(|pages| pages.take_pooled(width, height)) {
+        let bounds = Bounds::new(point(DevicePixels(0), DevicePixels(0)), dev_size);
+        if window.update_dynamic_texture(texture, bounds, &pixels, bytes_per_row).is_ok() {
+            return TileImage::Dynamic { texture, width, height };
+        }
+        texture.remove();
+    }
+    match window.create_dynamic_texture(dev_size, &pixels, bytes_per_row) {
+        Ok(texture) => TileImage::Dynamic { texture, width, height },
+        Err(_) => TileImage::Atlas(render_image_from_bgra(width, height, pixels)),
+    }
+}
+
+/// Converts a Blitz tile (premultiplied RGBA8) into tightly packed BGRA8 with straight alpha
+/// off the UI thread.
+fn bgra_straight_pixels(tile: HtmlTile) -> (u32, u32, Vec<u8>) {
     let mut pixels = tile.pixels;
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.swap(0, 2);
@@ -441,7 +549,11 @@ fn render_image(tile: HtmlTile) -> Arc<RenderImage> {
             }
         }
     }
-    let buffer = image::RgbaImage::from_raw(tile.width, tile.height, pixels).expect("a tile is width × height RGBA pixels");
+    (tile.width, tile.height, pixels)
+}
+
+fn render_image_from_bgra(width: u32, height: u32, pixels: Vec<u8>) -> Arc<RenderImage> {
+    let buffer = image::RgbaImage::from_raw(width, height, pixels).expect("a tile is width × height RGBA pixels");
     Arc::new(RenderImage::new([image::Frame::new(buffer)]))
 }
 
