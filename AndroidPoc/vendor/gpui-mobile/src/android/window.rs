@@ -365,7 +365,7 @@ impl AndroidWindow {
         let height = native_window.height();
 
         log::info!(
-            "AndroidWindow::new — {}×{} scale={:.1}",
+            "AndroidWindow::new — {}×{} scale={:.3}",
             width,
             height,
             scale_factor
@@ -971,6 +971,37 @@ impl AndroidWindow {
     /// Display scale factor (device pixels per logical pixel).
     pub fn scale_factor(&self) -> f32 {
         self.state.lock().scale_factor
+    }
+
+    /// Update the window's logical scale factor (`DisplayMetrics.density`) on
+    /// the main render thread and notify GPUI to re-lay out if it changed.
+    ///
+    /// Returns `true` when the scale factor actually changed.
+    pub fn set_scale_factor(&self, scale_factor: f32) -> bool {
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            return false;
+        }
+        let changed = {
+            let mut state = self.state.lock();
+            if (state.scale_factor - scale_factor).abs() <= 1e-4 {
+                false
+            } else {
+                log::info!(
+                    "AndroidWindow scale_factor: {:.3} → {:.3}",
+                    state.scale_factor,
+                    scale_factor,
+                );
+                state.scale_factor = scale_factor;
+                true
+            }
+        };
+        if changed {
+            self.force_render_once
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.notify_resize();
+            super::frame_source::resume();
+        }
+        changed
     }
 
     /// Returns the current safe area insets in physical (device) pixels.

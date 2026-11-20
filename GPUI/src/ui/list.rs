@@ -137,8 +137,8 @@ impl MailApp {
         };
         let rule = Self::next_row(items, list, ix).is_some_and(|next| !self.line_selected(&next, beneath));
         match item {
-            Item::Section(title) => section_header(title.clone(), None, p).into_any_element(),
-            Item::Waiting(count) => section_header("Waiting on you", Some(*count), p).into_any_element(),
+            Item::Section(title) => section_header_for(title.clone(), None, compact, p).into_any_element(),
+            Item::Waiting(count) => section_header_for("Waiting on you", Some(*count), compact, p).into_any_element(),
             Item::Row(index) => {
                 let Some(conversation) = list.conversations.get(*index) else { return div().into_any_element() };
                 let selected = self.line_selected(&conversation.id, beneath);
@@ -155,12 +155,18 @@ impl MailApp {
                 let unread = bundle.unread > 0;
                 let color = design::category_color(bundle.category, p);
                 let count = if unread { format!("{} new", bundle.unread) } else { bundle.members.len().to_string() };
+                let ts = design::type_scale(compact);
                 let title = div()
                     .flex()
                     .items_center()
                     .gap(px(space::S8))
-                    .child(div().font_weight(if unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD }).child(bundle.category.label()))
-                    .child(tag(count, Some(color), p));
+                    .child(
+                        div()
+                            .when(compact, |d| d.text_size(px(ts.reading)))
+                            .font_weight(if unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
+                            .child(bundle.category.label()),
+                    )
+                    .child(tag_for(count, Some(color), compact, p));
                 let subtitle = div()
                     .flex_1()
                     .min_w_0()
@@ -172,7 +178,7 @@ impl MailApp {
                         .id(ElementId::Name(id.clone().into()))
                         .relative()
                         .flex_shrink_0()
-                        .h(px(design::compact::BUNDLE_ROW_HEIGHT))
+                        .h(px(design::compact::bundle_row_height()))
                         .w_full()
                         .pr(px(metrics::TRAILING_INSET))
                         .flex()
@@ -192,22 +198,22 @@ impl MailApp {
                                 .ml(px(metrics::AVATAR_GAP))
                                 .flex()
                                 .flex_col()
-                                .gap(px(space::S2))
+                                .gap(px(3.))
                                 .child(
                                     div()
                                         .flex()
                                         .items_center()
                                         .gap(px(space::S8))
                                         .child(div().flex_1().min_w_0().child(title))
-                                        .child(date(newest.when.clone().into(), p)),
+                                        .child(date_for(newest.when.clone().into(), true, p)),
                                 )
-                                .child(div().text_size(px(text::FOOTNOTE)).child(subtitle)),
+                                .child(div().text_size(px(ts.footnote)).child(subtitle)),
                         )
                         .when(rule, |d| {
                             d.child(
                                 div()
                                     .absolute()
-                                    .left(px(metrics::SEPARATOR_X))
+                                    .left(px(design::compact::SEPARATOR_X))
                                     .right(px(space::S8))
                                     .bottom_0()
                                     .h(px(stroke::HAIRLINE))
@@ -237,7 +243,7 @@ impl MailApp {
             }
             Item::More => {
                 let shown = self.view_item_count(PagedView::List);
-                self.render_more_footer(PagedView::List, shown, list, p, cx)
+                self.render_more_footer(PagedView::List, shown, list, compact, p, cx)
             }
         }
     }
@@ -287,6 +293,7 @@ impl MailApp {
             .flatten()
             .map(|index| mark_dot(design::account_color(index)));
 
+        let ts = design::type_scale(true);
         let line1 = div()
             .flex()
             .items_center()
@@ -301,7 +308,7 @@ impl MailApp {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(text::READING))
+                            .text_size(px(ts.reading))
                             .font_weight(if conversation.unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
                             .text_color(p.text)
                             .child(senders),
@@ -311,13 +318,13 @@ impl MailApp {
                             div()
                                 .flex_shrink_0()
                                 .ml(px(5.))
-                                .text_size(px(text::CAPTION))
+                                .text_size(px(ts.caption))
                                 .text_color(p.muted)
                                 .child(conversation.message_count.to_string()),
                         )
                     })
                     .when(conversation.waiting, |d| {
-                        d.child(div().ml(px(space::S6)).child(icon(Icon::Reply, icon_size::INLINE, p.waiting)))
+                        d.child(div().ml(px(space::S6)).child(icon(Icon::Reply, 14., p.waiting)))
                     }),
             )
             .child(
@@ -326,9 +333,9 @@ impl MailApp {
                     .flex()
                     .items_center()
                     .gap(px(space::S4))
-                    .when(conversation.has_attachment, |d| d.child(icon(Icon::Attachment, 13., p.muted)))
+                    .when(conversation.has_attachment, |d| d.child(icon(Icon::Attachment, 14., p.muted)))
                     .children(account_dot.map(|dot| dot.mr(px(2.))))
-                    .child(date(conversation.when.clone().into(), p)),
+                    .child(date_for(conversation.when.clone().into(), true, p)),
             );
 
         let subject: SharedString =
@@ -338,23 +345,23 @@ impl MailApp {
             .items_center()
             .gap(px(space::S6))
             .when(!conversation.tag.is_empty(), |d| {
-                d.child(div().flex_shrink_0().text_size(px(text::BODY)).child(conversation.tag.clone()))
+                d.child(div().flex_shrink_0().text_size(px(ts.body)).child(conversation.tag.clone()))
             })
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text::BODY))
+                    .text_size(px(ts.body))
                     .font_weight(if conversation.unread { FontWeight::MEDIUM } else { FontWeight::NORMAL })
                     .text_color(if conversation.unread { p.text } else { p.glyph })
                     .child(subject),
             )
-            .when(conversation.starred, |d| d.child(icon(Icon::Starred, 13., p.star)));
+            .when(conversation.starred, |d| d.child(icon(Icon::Starred, 15., p.star)));
 
         let snippet_text: SharedString = conversation.snippet.as_deref().unwrap_or("").to_owned().into();
         let topic = conversation.labels.first().map(|label| {
-            tag(SharedString::from(label.clone()), Some(design::topic_color(label, p.dark)), p)
+            tag_for(SharedString::from(label.clone()), Some(design::topic_color(label, p.dark)), true, p)
         });
         let line3 = div()
             .flex()
@@ -365,7 +372,7 @@ impl MailApp {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text::FOOTNOTE))
+                    .text_size(px(ts.footnote))
                     .text_color(p.muted)
                     .child(snippet_text),
             )
@@ -377,7 +384,7 @@ impl MailApp {
             .id(ElementId::Name(id.into()))
             .relative()
             .flex_shrink_0()
-            .h(px(design::compact::ROW_HEIGHT))
+            .h(px(design::compact::row_height()))
             .w_full()
             .cursor_pointer()
             .when(lifted, |d| d.child(lifted_card(true, p)))
@@ -415,7 +422,7 @@ impl MailApp {
                 d.child(
                     div()
                         .absolute()
-                        .left(px(metrics::SEPARATOR_X))
+                        .left(px(design::compact::SEPARATOR_X))
                         .right(px(space::S8))
                         .bottom_0()
                         .h(px(stroke::HAIRLINE))
@@ -637,7 +644,7 @@ impl MailApp {
                 if row == bundle.members.len() {
                     return div()
                         .px(px(metrics::INSET))
-                        .child(this.render_more_footer(PagedView::Bundle, bundle.members.len(), list, p, cx))
+                        .child(this.render_more_footer(PagedView::Bundle, bundle.members.len(), list, compact, p, cx))
                         .into_any_element();
                 }
                 let Some(conversation) = bundle.members.get(row).and_then(|&ix| list.conversations.get(ix)) else {
@@ -667,9 +674,11 @@ impl MailApp {
         view: PagedView,
         shown: usize,
         list: &List,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ts = design::type_scale(compact);
         let id = match view {
             PagedView::List => "list-load-more",
             PagedView::Bundle => "bundle-load-more",
@@ -680,7 +689,7 @@ impl MailApp {
                 .py(px(space::S12))
                 .flex()
                 .justify_center()
-                .text_size(px(text::CAPTION))
+                .text_size(px(ts.caption))
                 .text_color(p.muted)
                 .child("Loading older mail…")
                 .into_any_element();
@@ -698,12 +707,12 @@ impl MailApp {
                     div()
                         .px(px(space::S12))
                         .text_center()
-                        .text_size(px(text::CAPTION))
+                        .text_size(px(ts.caption))
                         .text_color(p.muted)
                         .child(error),
                 )
             })
-            .child(button(id, "Load older mail", kind, ControlSize::Small, true, p).on_click(cx.listener(
+            .child(button(id, "Load older mail", kind, ControlSize::small(compact), true, p).on_click(cx.listener(
                 move |this, _: &ClickEvent, _, cx| {
                     this.load_more(view, shown, true, cx);
                 },
@@ -725,12 +734,13 @@ impl MailApp {
         let Some(newest) = bundle.spaces.first() else { return div().into_any_element() };
         let id = BundleKind::Chat.id();
         let color = design::chat_color();
+        let ts = design::type_scale(compact);
         let title = div()
             .flex()
             .items_center()
             .gap(px(space::S8))
-            .child(div().font_weight(FontWeight::BOLD).child("Chat"))
-            .child(tag(format!("{} new", bundle.spaces.len()), Some(color), p));
+            .child(div().when(compact, |d| d.text_size(px(ts.reading))).font_weight(FontWeight::BOLD).child("Chat"))
+            .child(tag_for(format!("{} new", bundle.spaces.len()), Some(color), compact, p));
         let subtitle = div()
             .flex_1()
             .min_w_0()
@@ -742,7 +752,7 @@ impl MailApp {
                 .id(ElementId::Name(id.clone().into()))
                 .relative()
                 .flex_shrink_0()
-                .h(px(design::compact::BUNDLE_ROW_HEIGHT))
+                .h(px(design::compact::bundle_row_height()))
                 .w_full()
                 .pr(px(metrics::TRAILING_INSET))
                 .flex()
@@ -762,22 +772,22 @@ impl MailApp {
                         .ml(px(metrics::AVATAR_GAP))
                         .flex()
                         .flex_col()
-                        .gap(px(space::S2))
+                        .gap(px(3.))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(space::S8))
                                 .child(div().flex_1().min_w_0().child(title))
-                                .child(date(newest.when.clone(), p)),
+                                .child(date_for(newest.when.clone(), true, p)),
                         )
-                        .child(div().text_size(px(text::FOOTNOTE)).child(subtitle)),
+                        .child(div().text_size(px(ts.footnote)).child(subtitle)),
                 )
                 .when(rule, |d| {
                     d.child(
                         div()
                             .absolute()
-                            .left(px(metrics::SEPARATOR_X))
+                            .left(px(design::compact::SEPARATOR_X))
                             .right(px(space::S8))
                             .bottom_0()
                             .h(px(stroke::HAIRLINE))
@@ -802,7 +812,7 @@ impl MailApp {
 
     /// The open Chat bundle: a row per space with unread messages, as Chat's list draws it; a
     /// click opens the space in Chat.
-    pub(super) fn render_chat_bundle(&self, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_chat_bundle(&self, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(bundle) = self.chat_bundle() else {
             return centered_note("Nothing here any more", p).into_any_element();
         };
@@ -815,18 +825,25 @@ impl MailApp {
             cx.processor(move |this, row: usize, _, cx| {
                 let Some(space) = bundle.spaces.get(row) else { return div().into_any_element() };
                 let rule = bundle.spaces.get(row + 1).is_some_and(|next| !this.row_selected(&next.row_id(), true));
-                div().px(px(metrics::INSET)).child(this.render_chat_space(space, rule, p, cx)).into_any_element()
+                div().px(px(metrics::INSET)).child(this.render_chat_space(space, rule, compact, p, cx)).into_any_element()
             }),
         )
         .size_full()
-        .py(px(space::S6))
+        .pt(px(space::S6))
+        .pb(px(if compact { design::compact::DOCK_CLEARANCE } else { space::S6 }))
         .into_any_element()
     }
 
-    fn render_chat_space(&self, space: &UnreadSpace, rule: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_chat_space(&self, space: &UnreadSpace, rule: bool, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = space.row_id();
         let selected = self.row_selected(&id, true);
-        let title = div().min_w_0().truncate().font_weight(FontWeight::BOLD).child(space.title.clone());
+        let ts = design::type_scale(compact);
+        let title = div()
+            .min_w_0()
+            .truncate()
+            .when(compact, |d| d.text_size(px(ts.reading)))
+            .font_weight(FontWeight::BOLD)
+            .child(space.title.clone());
         let account_dot = (self.accounts.len() > 1)
             .then(|| self.accounts.iter().position(|a| a.id == space.account.as_ref()))
             .flatten()
@@ -837,13 +854,20 @@ impl MailApp {
             .items_center()
             .gap(px(space::S4))
             .children(account_dot.map(|dot| dot.mr(px(2.))))
-            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.accent).child(space.when.clone()));
-        let subtitle = div().flex_1().min_w_0().truncate().text_color(p.muted).child(space.snippet.clone());
+            .child(div().text_size(px(if compact { ts.caption } else { text::FOOTNOTE })).text_color(p.accent).child(space.when.clone()));
+        let subtitle = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .when(compact, |d| d.text_size(px(ts.footnote)))
+            .text_color(p.muted)
+            .child(space.snippet.clone());
         list_row(ElementId::Name(id.clone().into()), selected, rule, p)
+            .when(compact, |d| d.h(px(design::compact::bundle_row_height())))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| this.click_row(&id, event.modifiers(), window, cx)))
             .child(row_layout(
                 true,
-                avatars::avatar(&space.avatar_email, &space.avatar, metrics::AVATAR, p, cx),
+                avatars::avatar(&space.avatar_email, &space.avatar, if compact { design::compact::AVATAR } else { metrics::AVATAR }, p, cx),
                 title,
                 meta,
                 subtitle,
@@ -863,5 +887,10 @@ fn keep_top(state: &ListState, count: usize) {
 
 /// A row's date, in the secondary label.
 fn date(when: SharedString, p: &Palette) -> Div {
-    div().flex_shrink_0().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(when)
+    date_for(when, false, p)
+}
+
+fn date_for(when: SharedString, compact: bool, p: &Palette) -> Div {
+    let ts = design::type_scale(compact);
+    div().flex_shrink_0().text_size(px(if compact { ts.caption } else { text::FOOTNOTE })).text_color(p.muted).child(when)
 }

@@ -220,7 +220,8 @@ impl MailApp {
                             .items_center()
                             .justify_between()
                             .gap(px(space::S8))
-                            .child(
+                            .child({
+                                let ts = design::type_scale(true);
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -229,25 +230,24 @@ impl MailApp {
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(design::compact::HEADER_TITLE))
+                                            .text_size(px(ts.header_title))
+                                            .line_height(relative(1.15))
                                             .font_weight(FontWeight::BOLD)
                                             .text_color(p.text)
                                             .child("Mailstream"),
                                     )
                                     .when_some(account_summary, |d, summary| {
-                                        d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child(summary))
-                                    }),
-                            )
+                                        d.child(div().text_size(px(ts.caption)).text_color(p.muted).child(summary))
+                                    })
+                            })
                             .child(
-                                capsule(p).child(
-                                    icon_button("drawer-close", Icon::Close, "Close Menu", true, p.glyph)
+                                compact_capsule(p).child(
+                                    compact_icon_button("drawer-close", Icon::Close, "Close Menu", true, p.glyph)
                                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close_drawer(cx))),
                                 ),
                             ),
                     )
-                    .child(group_title("Mailboxes", p).pt(px(space::S6)).pl(px(space::S16)))
-                    .child(
-                        div()
+                    .child(group_title("Mailboxes", p).text_size(px(design::type_scale(true).footnote)).pt(px(space::S8)).pl(px(space::S16)))
                             .id("drawer-scroll")
                             .flex_1()
                             .min_h_0()
@@ -265,11 +265,11 @@ impl MailApp {
                             .child(
                                 div()
                                     .id("drawer-add-account")
-                                    .h(px(design::compact::DRAWER_ROW + 2.))
+                                    .h(px(design::compact::drawer_row_height()))
                                     .px(px(space::S12))
                                     .flex()
                                     .items_center()
-                                    .gap(px(space::S10))
+                                    .gap(px(space::S12))
                                     .rounded(px(radius::CARD))
                                     .bg(p.card)
                                     .border(px(stroke::HAIRLINE))
@@ -282,19 +282,18 @@ impl MailApp {
                                         this.close_drawer(cx);
                                         this.show_settings(&ShowSettings, window, cx);
                                     }))
-                                    .child(icon(Icon::Add, icon_size::TOOLBAR, p.accent))
+                                    .child(icon(Icon::Add, 20., p.accent))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
                                             .truncate()
-                                            .text_size(px(text::BODY))
+                                            .text_size(px(design::type_scale(true).body))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(p.text)
                                             .child("Settings & Accounts"),
                                     )
-                                    .child(icon(Icon::Disclosure, 12., p.muted)),
-                            ),
+                                    .child(icon(Icon::Disclosure, 14., p.muted)),
                     ),
             )
             .into_any_element()
@@ -313,12 +312,14 @@ impl MailApp {
         let toggle_key = node.key.clone();
         let source = node.source.clone();
 
+        let ts = design::type_scale(true);
         if node.key.starts_with("section:") {
             return div()
                 .pt(px(space::S10))
                 .pb(px(space::S2))
                 .child(
                     expander(ElementId::Name(format!("drawer:{}", key).into()), expanded, node.title, p)
+                        .compact()
                         .title_color(p.muted)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_expanded(&key, cx))),
                 )
@@ -326,10 +327,10 @@ impl MailApp {
         }
 
         let leading: AnyElement = match node.leading {
-            Leading::Icon(glyph) => icon(glyph, icon_size::TOOLBAR, p.accent).into_any_element(),
+            Leading::Icon(glyph) => icon(glyph, 20., p.accent).into_any_element(),
             Leading::Dot(color) => div()
                 .flex_shrink_0()
-                .w(px(icon_size::TOOLBAR))
+                .w(px(20.))
                 .flex()
                 .justify_center()
                 .child(mark_dot(color))
@@ -339,7 +340,7 @@ impl MailApp {
             div()
                 .id(ElementId::Name(format!("drawer-disclose:{}", node.key).into()))
                 .flex_shrink_0()
-                .size(px(30.))
+                .size(px(34.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -354,14 +355,14 @@ impl MailApp {
 
         div()
             .id(ElementId::Name(format!("drawer:{}", node.key).into()))
-            .h(px(design::compact::DRAWER_ROW))
+            .h(px(design::compact::drawer_row_height()))
             .mb(px(2.))
             .ml(px(node.depth as f32 * layout::SIDEBAR_INDENT))
-            .pl(px(space::S10))
-            .pr(px(space::S8))
+            .pl(px(space::S12))
+            .pr(px(space::S10))
             .flex()
             .items_center()
-            .gap(px(space::S10))
+            .gap(px(space::S12))
             .rounded(px(radius::CONTROL))
             .cursor_pointer()
             .when(selected, |d| d.bg(p.selection))
@@ -378,7 +379,7 @@ impl MailApp {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text::READING))
+                    .text_size(px(ts.reading))
                     .text_color(p.text)
                     .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                     .child(node.title),
@@ -387,13 +388,13 @@ impl MailApp {
                 d.child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(text::FOOTNOTE))
+                        .text_size(px(ts.footnote))
                         .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
                         .text_color(p.muted)
                         .child(count(node.badge)),
                 )
             })
-            .when(node.problem.is_some(), |d| d.child(icon(Icon::Spam, icon_size::ROW, p.danger)))
+            .when(node.problem.is_some(), |d| d.child(icon(Icon::Spam, icon_size::TOOLBAR, p.danger)))
             .children(disclosure)
             .into_any_element()
     }
@@ -507,7 +508,7 @@ impl MailApp {
                         this.new_message(&NewMessage, window, cx);
                     }
                 }))
-                .child(icon(glyph, 20., p.on_accent))
+                .child(icon(glyph, 22., p.on_accent))
         });
 
         div()
@@ -871,6 +872,7 @@ fn bottom_nav_item(
     selected: bool,
     p: &'static Palette,
 ) -> Stateful<Div> {
+    let chrome_scale = design::compact::chrome_font_scale();
     div()
         .id(id)
         .flex_1()
@@ -880,7 +882,7 @@ fn bottom_nav_item(
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(1.))
+        .gap(px(2.))
         .cursor_pointer()
         .when(selected, |d| {
             d.bg(if p.dark { p.selection } else { p.raised_card })
@@ -892,20 +894,20 @@ fn bottom_nav_item(
         .child(
             div()
                 .relative()
-                .w(px(36.))
-                .h(px(22.))
+                .w(px(40.))
+                .h(px(26.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(glyph, 18., if selected { p.accent } else { p.glyph }))
+                .child(icon(glyph, 21., if selected { p.accent } else { p.glyph }))
                 .when(badge > 0, |d| {
                     d.child(
                         div()
                             .absolute()
-                            .top(px(-3.))
-                            .right(px(-5.))
-                            .h(px(14.))
-                            .min_w(px(14.))
+                            .top(px(-2.))
+                            .right(px(-4.))
+                            .h(px(16.))
+                            .min_w(px(16.))
                             .px(px(4.))
                             .flex()
                             .items_center()
@@ -913,7 +915,7 @@ fn bottom_nav_item(
                             .rounded_full()
                             .bg(if selected { p.accent } else { p.capsule })
                             .when(!selected, |d| d.border(px(stroke::HAIRLINE)).border_color(p.capsule_rim))
-                            .text_size(px(9.5))
+                            .text_size(px(10.5 * chrome_scale))
                             .font_weight(FontWeight::BOLD)
                             .text_color(if selected { p.on_accent } else { p.glyph })
                             .child(count_label(badge)),
@@ -922,7 +924,7 @@ fn bottom_nav_item(
         )
         .child(
             div()
-                .text_size(px(10.5))
+                .text_size(px(12.0 * chrome_scale))
                 .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                 .text_color(if selected { p.text } else { p.muted })
                 .child(label),

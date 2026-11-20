@@ -19,7 +19,7 @@ use gpui::{
 };
 use mailstream::{AutoReadEntry, AutoReadLog, AutoReadReason, Category, Event, SettingEntry, SettingValue};
 
-use crate::controls::{ButtonKind, ControlSize, button, capsule, field_frame, hairline, icon_button};
+use crate::controls::{ButtonKind, ControlSize, button, compact_capsule, compact_icon_button, field_frame, hairline, icon_button};
 use crate::design::{self, Palette, layout, settings as metrics, space, text};
 use crate::engine::{MailError, engine};
 use crate::icons::{Icon, icon};
@@ -757,6 +757,8 @@ impl Render for SettingsListView {
         let p = design::palette(window.appearance());
         let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let inline = self.inline.is_some();
+        let mobile = inline && compact;
+        let ts = design::type_scale(mobile);
         let (controls, body) = match self.kind.clone() {
             SettingsListKind::AutoRead => self.render_auto_read_content(p, compact, window, cx),
             SettingsListKind::Addresses { key } => self.render_addresses_content(&key, p, compact, window, cx),
@@ -773,7 +775,7 @@ impl Render for SettingsListView {
             .flex()
             .flex_col()
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(ts.body))
             .text_color(p.text)
             .bg(p.background)
             .when(inline, |d| {
@@ -782,13 +784,13 @@ impl Render for SettingsListView {
                         .id("settings-list-header")
                         .flex_shrink_0()
                         .h(px(design::compact::TOP_BAR_HEIGHT))
-                        .px(px(space::S10))
+                        .px(px(space::S12))
                         .flex()
                         .items_center()
                         .gap(px(space::S8))
                         .child(
-                            capsule(p).child(
-                                icon_button("settings-list-back", Icon::Back, "Back to Settings", true, p.glyph)
+                            compact_capsule(p).child(
+                                compact_icon_button("settings-list-back", Icon::Back, "Back to Settings", true, p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_or_back(window, cx))),
                             ),
                         )
@@ -801,15 +803,15 @@ impl Render for SettingsListView {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(design::compact::HEADER_TITLE))
+                                        .text_size(px(ts.header_title))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(p.text)
                                         .child(self.kind.window_title()),
                                 ),
                         )
                         .child(
-                            capsule(p).child(
-                                icon_button("settings-list-close", Icon::Close, "Close Settings", true, p.glyph)
+                            compact_capsule(p).child(
+                                compact_icon_button("settings-list-close", Icon::Close, "Close Settings", true, p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_overlay(window, cx))),
                             ),
                         ),

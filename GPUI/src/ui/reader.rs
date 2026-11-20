@@ -24,19 +24,21 @@ impl MailApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ts = design::type_scale(compact);
+        let pill_icon = if compact { 14. } else { icon_size::INLINE };
         let pad = if compact { design::compact::READER_PADDING } else { space::S32 };
         let column = move || div().w_full().max_w(px(layout::READING_WIDTH)).px(px(pad));
         let account = self.accounts.iter().position(|a| a.id == conversation.account).map(|index| {
             let title = self.accounts[index].title();
-            pill(title, Some(mark_dot(design::account_color(index)).into_any_element()), p)
+            pill_for(title, Some(mark_dot(design::account_color(index)).into_any_element()), compact, p)
         });
         let head = column()
             .flex()
             .flex_col()
             .child(
                 div()
-                    .text_size(px(if compact { design::compact::TITLE_SIZE } else { text::DISPLAY }))
-                    .line_height(relative(1.22))
+                    .text_size(px(ts.display))
+                    .line_height(relative(if compact { 1.24 } else { 1.22 }))
                     .font_weight(FontWeight::BOLD)
                     .child(conversation.title.clone()),
             )
@@ -49,7 +51,7 @@ impl MailApp {
                     .gap(px(space::S8))
                     .when(conversation.waiting, |d| {
                         d.child(
-                            pill("Waiting on you", Some(icon(Icon::Reply, icon_size::INLINE, p.on_waiting_fill).into_any_element()), p)
+                            pill_for("Waiting on you", Some(icon(Icon::Reply, pill_icon, p.on_waiting_fill).into_any_element()), compact, p)
                                 .id("reader-resolve")
                                 .bg(p.waiting_fill)
                                 .text_color(p.on_waiting_fill)
@@ -59,7 +61,7 @@ impl MailApp {
                                 })),
                         )
                     })
-                    .when(!conversation.tag.is_empty(), |d| d.child(pill(conversation.tag.clone(), None, p)))
+                    .when(!conversation.tag.is_empty(), |d| d.child(pill_for(conversation.tag.clone(), None, compact, p)))
                     // Its category and topic labels open the tag editor (MS-339).
                     .child({
                         let (title, glyph, color) = match conversation.category {
@@ -67,7 +69,7 @@ impl MailApp {
                             None => ("Add Tag", Icon::Label, p.glyph),
                         };
                         let id = conversation.id.clone();
-                        pill(title, Some(icon(glyph, icon_size::INLINE, color).into_any_element()), p)
+                        pill_for(title, Some(icon(glyph, pill_icon, color).into_any_element()), compact, p)
                             .id("reader-category")
                             .cursor_pointer()
                             .hover(|s| s.bg(p.hover))
@@ -77,7 +79,7 @@ impl MailApp {
                     })
                     .children(conversation.labels.iter().enumerate().map(|(ix, label)| {
                         let id = conversation.id.clone();
-                        pill(label.clone(), Some(mark_dot(design::topic_color(label, p.dark)).into_any_element()), p)
+                        pill_for(label.clone(), Some(mark_dot(design::topic_color(label, p.dark)).into_any_element()), compact, p)
                             .id(ElementId::NamedInteger("reader-label".into(), ix as u64))
                             .cursor_pointer()
                             .hover(|s| s.bg(p.hover))
@@ -87,14 +89,14 @@ impl MailApp {
                     }))
                     .children(account)
                     .when(conversation.message_count > 1, |d| {
-                        d.child(pill(format!("{} messages", conversation.message_count), None, p))
+                        d.child(pill_for(format!("{} messages", conversation.message_count), None, compact, p))
                     })
                     .children(self.render_renderer_switch(p, cx)),
             );
         let mut rows: Vec<AnyElement> = vec![head.into_any_element()];
         // The bodies read the web only when the engine knows the senders or the person says so.
         let remote = self.remote_allowed(&conversation.id);
-        if let Some(bar) = self.render_remote_bar(conversation, remote, p, cx) {
+        if let Some(bar) = self.render_remote_bar(conversation, remote, compact, p, cx) {
             rows.push(column().mt(px(space::S16)).child(bar).into_any_element());
         }
         let pinned = match &self.reader_pin {
@@ -235,6 +237,7 @@ impl MailApp {
         &self,
         conversation: &Conversation,
         remote: bool,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -252,19 +255,21 @@ impl MailApp {
             let names: Vec<String> = untrusted.iter().map(|sender| sender.display_name()).collect();
             format!("Remote images from {} are hidden to protect your privacy.", names.join(", ")).into()
         };
+        let ts = design::type_scale(compact);
         let id = conversation.id.clone();
-        let load = button("remote-load", "Load Images", ButtonKind::Secondary, ControlSize::Small, true, p)
+        let load = button("remote-load", "Load Images", ButtonKind::Secondary, ControlSize::small(compact), true, p)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.load_remote_content(&id, cx)));
         let trust = (!untrusted.is_empty()).then(|| {
             let id = conversation.id.clone();
             let emails: Vec<&str> = untrusted.iter().map(|sender| sender.email.as_str()).collect();
             let label = if untrusted.len() == 1 { "Trust Sender" } else { "Trust Senders" };
-            button("remote-trust", label, ButtonKind::Secondary, ControlSize::Small, true, p)
+            button("remote-trust", label, ButtonKind::Secondary, ControlSize::small(compact), true, p)
                 .tooltip(format!("Always load remote images from {}, on every device", emails.join(", ")))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.trust_senders(&id, cx)))
         });
         let bar = div()
             .flex()
+            .when(compact, |d| d.flex_wrap())
             .items_center()
             .gap(px(space::S10))
             .pl(px(space::S12))
@@ -274,8 +279,8 @@ impl MailApp {
             .bg(p.background)
             .border(px(stroke::HAIRLINE))
             .border_color(p.line)
-            .child(icon(Icon::HideImage, icon_size::ROW, p.muted))
-            .child(div().flex_1().min_w_0().text_size(px(text::FOOTNOTE)).text_color(p.text).child(text))
+            .child(icon(Icon::HideImage, if compact { 18. } else { icon_size::ROW }, p.muted))
+            .child(div().flex_1().min_w_0().text_size(px(ts.footnote)).text_color(p.text).child(text))
             .child(load)
             .children(trust);
         Some(bar.into_any_element())
@@ -303,19 +308,20 @@ impl MailApp {
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ts = design::type_scale(compact);
         let sender = message.sender();
         let id = message.id.clone();
-        let avatar_size = if compact { 32. } else { metrics::AVATAR };
+        let avatar_size = if compact { design::compact::READER_AVATAR } else { metrics::AVATAR };
         let photo = avatars::avatar(&sender.email, &message.avatar, avatar_size, p, cx);
         let header = div()
             .id(ElementId::Name(format!("message:{id}").into()))
             .pl(px(if compact { space::S12 } else { space::S16 }))
             .pr(px(if compact { space::S12 } else { space::S8 }))
-            .py(px(if compact { space::S10 } else { space::S12 }))
+            .py(px(space::S12))
             .flex()
             // Full headers open run down from the avatar.
             .map(|d| if open && self.headers_open.contains(&message.id) { d.items_start() } else { d.items_center() })
-            .gap(px(if compact { space::S10 } else { space::S16 }))
+            .gap(px(if compact { space::S12 } else { space::S16 }))
             .when(!last, |d| {
                 d.cursor_pointer()
                     .hover(|s| s.bg(p.hover))
@@ -334,7 +340,14 @@ impl MailApp {
                             .flex()
                             .gap(px(space::S6))
                             .items_baseline()
-                            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(sender.display_name()))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when(compact, |d| d.text_size(px(ts.reading)))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(sender.display_name()),
+                            )
                             .children(message.unread.then(|| unread_mark(p)))
                             .when(open && !compact && sender.name.is_some(), |d| {
                                 d.child(
@@ -347,18 +360,26 @@ impl MailApp {
                                 )
                             })
                             .when(!open, |d| {
-                                d.child(div().flex_1().min_w_0().truncate().text_color(p.muted).child(message.preview.clone()))
+                                d.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .when(compact, |d| d.text_size(px(ts.footnote)))
+                                        .text_color(p.muted)
+                                        .child(message.preview.clone()),
+                                )
                             }),
                     )
-                    .when(open, |d| d.children(self.render_recipients(message, p, cx))),
+                    .when(open, |d| d.children(self.render_recipients(message, compact, p, cx))),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(space::S6))
-                    .children(message.starred.then(|| icon(Icon::Starred, icon_size::INLINE, p.star)))
-                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(message.when.clone())),
+                    .children(message.starred.then(|| icon(Icon::Starred, if compact { 14. } else { icon_size::INLINE }, p.star)))
+                    .child(div().text_size(px(if compact { ts.caption } else { text::FOOTNOTE })).text_color(p.muted).child(message.when.clone())),
             );
         let card = div()
             .flex()
@@ -375,15 +396,15 @@ impl MailApp {
         let card_pad = if compact { space::S12 } else { space::S16 };
         let inset = move || div().px(px(card_pad)).pb(px(card_pad));
         let invitation = message.invitation.as_ref().map(|invitation| {
-            div().px(px(card_pad)).pb(px(space::S12)).child(self.render_invitation(message, invitation, p, cx))
+            div().px(px(card_pad)).pb(px(space::S12)).child(self.render_invitation(message, invitation, compact, p, cx))
         });
         card.children(invitation)
             // The body's presses are its own (text selection, links): no drag of the reader there.
-            .children(self.render_body(message, remote, p, cx).map(|body| own_presses(inset()).child(body)))
+            .children(self.render_body(message, remote, compact, p, cx).map(|body| own_presses(inset()).child(body)))
             .when(message.truncated && message.body_html.is_none(), |d| {
                 d.child(
                     inset()
-                        .text_size(px(text::FOOTNOTE))
+                        .text_size(px(ts.footnote))
                         .text_color(p.muted)
                         .child("The message continues; open it in Mailstream to read the rest."),
                 )
@@ -391,22 +412,23 @@ impl MailApp {
             .when_some(message.error.as_ref(), |d, error| {
                 d.child(inset().child(notice(Tone::Error, None, error.clone(), false, p)))
             })
-            .when(!message.tiles.is_empty(), |d| d.child(inset().child(self.render_attachments(message, p, cx))))
+            .when(!message.tiles.is_empty(), |d| d.child(inset().child(self.render_attachments(message, compact, p, cx))))
             .into_any_element()
     }
 
     /// Who a message went to, the user as "me", on one line; a click opens its full headers
     /// (From, To, Cc with their addresses, and the date) in its place, and another closes them.
-    fn render_recipients(&self, message: &ShownMessage, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_recipients(&self, message: &ShownMessage, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         if message.recipients.is_empty() {
             return None;
         }
+        let ts = design::type_scale(compact);
         let id = message.id.clone();
         let open = self.headers_open.contains(&id);
         let line = div()
             .id(ElementId::Name(format!("recipients:{id}").into()))
             .min_w_0()
-            .text_size(px(text::CAPTION))
+            .text_size(px(ts.caption))
             .text_color(p.muted)
             .cursor_pointer()
             .tooltip(tooltip(if open { "Hide details" } else { "Show details" }))
@@ -428,7 +450,8 @@ impl MailApp {
     /// A message's attachments as tiles of two lines (Mail's): a mark in the file kind's color, or
     /// a picture's thumbnail, beside its name over its size and type, and a button that saves a
     /// copy. A click on the tile opens the file in the system's app.
-    fn render_attachments(&self, message: &ShownMessage, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+    fn render_attachments(&self, message: &ShownMessage, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+        let ts = design::type_scale(compact);
         div().flex().flex_wrap().gap(px(space::S8)).children(message.tiles.iter().enumerate().map(|(index, tile)| {
             let attachment = &tile.attachment;
             let here = !attachment.path.is_empty();
@@ -444,7 +467,7 @@ impl MailApp {
                 .rounded(px(radius::CONTROL))
                 .overflow_hidden()
                 .bg(color.opacity(design::avatar::TINT))
-                .text_size(px(text::TAG))
+                .text_size(px(ts.tag))
                 .font_weight(FontWeight::BOLD)
                 .text_color(color)
                 .map(|d| match thumbnail {
@@ -480,12 +503,16 @@ impl MailApp {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(div().truncate().text_size(px(text::FOOTNOTE)).font_weight(FontWeight::SEMIBOLD).child(name))
-                        .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(tile.detail.clone())),
+                        .child(div().truncate().text_size(px(if compact { ts.body } else { text::FOOTNOTE })).font_weight(FontWeight::SEMIBOLD).child(name))
+                        .child(div().truncate().text_size(px(ts.caption)).text_color(p.muted).child(tile.detail.clone())),
                 )
                 .child(
-                    icon_button(ElementId::Name(format!("attachment-save:{}:{index}", message.id).into()), Icon::Download, "Save…", here, p.glyph)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.save_attachment(save.clone(), file.clone(), cx))),
+                    (if compact {
+                        compact_icon_button(ElementId::Name(format!("attachment-save:{}:{index}", message.id).into()), Icon::Download, "Save…", here, p.glyph)
+                    } else {
+                        icon_button(ElementId::Name(format!("attachment-save:{}:{index}", message.id).into()), Icon::Download, "Save…", here, p.glyph)
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.save_attachment(save.clone(), file.clone(), cx))),
                 )
         }))
     }
@@ -493,24 +520,25 @@ impl MailApp {
     /// A message's body: its HTML when it has one (`mailstream::Message::html_body`), reading the
     /// web with `remote`, else its text with its `>` quotes in place; either way with its quoted
     /// history folded.
-    fn render_body(&self, message: &ShownMessage, remote: bool, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_body(&self, message: &ShownMessage, remote: bool, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         if let Some(html) = &message.body_html {
-            return Some(self.render_html(message, html.clone(), remote, p, cx));
+            return Some(self.render_html(message, html.clone(), remote, compact, p, cx));
         }
         message.text.as_ref()?;
         let open = self.quotes_open.contains(&message.id);
+        let ts = design::type_scale(compact);
         Some(
             div()
                 .flex()
                 .flex_col()
-                .text_size(px(text::READING))
-                .line_height(relative(text::READING_LEADING))
+                .text_size(px(ts.reading))
+                .line_height(relative(if compact { 1.52 } else { text::READING_LEADING }))
                 .when(!message.shown.is_empty(), |d| d.child(text_runs(&format!("body:{}", message.id), &message.shown, p)))
                 .when_some(message.quoted.clone(), |d, quoted| {
                     let content = div()
                         .text_color(p.muted)
                         .child(linked_text(ElementId::Name(format!("body-quoted:{}", message.id).into()), quoted, p));
-                    d.child(self.render_fold(&message.id, open, content, p, cx))
+                    d.child(self.render_fold(&message.id, open, compact, content, p, cx))
                 })
                 .into_any_element(),
         )
@@ -525,26 +553,28 @@ impl MailApp {
         message: &ShownMessage,
         html: SharedString,
         remote: bool,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id: SharedString = message.id.clone().into();
         let open = self.quotes_open.contains(&message.id);
+        let base_zoom = if compact { design::compact::blitz_zoom() } else { 1.0 };
         #[cfg(target_os = "macos")]
         if self.renderer == Renderer::WebKit {
             let body = web_body(id.clone(), html, open, remote, p);
             if webview::quoted(&id) != Some(true) {
                 return body;
             }
-            return div().flex().flex_col().child(body).child(self.render_fold(&id, open, div(), p, cx)).into_any_element();
+            return div().flex().flex_col().child(body).child(self.render_fold(&id, open, compact, div(), p, cx)).into_any_element();
         }
-        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, remote, p, &self.focus);
+        let main = blitz_html(id.clone(), html.clone(), blitz_body::HtmlPart::Main, remote, base_zoom, p, &self.focus);
         if blitz_body::quoted(&id) != Some(true) {
             return main;
         }
         let key = format!("{id}{}", blitz_body::QUOTED).into();
-        let quoted = blitz_html(key, html, blitz_body::HtmlPart::Quoted, remote, p, &self.focus);
-        div().flex().flex_col().child(main).child(self.render_fold(&id, open, quoted, p, cx)).into_any_element()
+        let quoted = blitz_html(key, html, blitz_body::HtmlPart::Quoted, remote, base_zoom, p, &self.focus);
+        div().flex().flex_col().child(main).child(self.render_fold(&id, open, compact, quoted, p, cx)).into_any_element()
     }
 
     /// The switch beside the pills, labelled with the renderer in use (Flutter's
@@ -582,17 +612,19 @@ impl MailApp {
         &self,
         message: &str,
         open: bool,
+        compact: bool,
         content: impl IntoElement,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ts = design::type_scale(compact);
         let id = message.to_owned();
         let tip: SharedString = if open { "Hide quoted text" } else { "Show quoted text" }.into();
         let toggle = div()
             .id(ElementId::Name(format!("fold:{message}").into()))
             .my(px(space::S4))
-            .w(px(metrics_reader::FOLD_WIDTH))
-            .h(px(metrics_reader::FOLD_HEIGHT))
+            .w(px(if compact { 40. } else { metrics_reader::FOLD_WIDTH }))
+            .h(px(if compact { 24. } else { metrics_reader::FOLD_HEIGHT }))
             .flex()
             .items_center()
             .justify_center()
@@ -600,7 +632,7 @@ impl MailApp {
             .bg(p.fill)
             .cursor_pointer()
             .hover(|s| s.bg(p.pressed))
-            .text_size(px(text::CAPTION))
+            .text_size(px(ts.caption))
             .line_height(relative(1.))
             .font_weight(FontWeight::BOLD)
             .text_color(p.muted)
@@ -683,19 +715,19 @@ impl MailApp {
         });
         let content = [
             recipients
-                .then(|| self.render_recipients(message, p, cx).map(|line| div().pb(px(space::S4)).child(line).into_any_element()))
+                .then(|| self.render_recipients(message, compact, p, cx).map(|line| div().pb(px(space::S4)).child(line).into_any_element()))
                 .flatten(),
             message.error.as_ref().map(|error| notice(Tone::Error, None, error.clone(), false, p).into_any_element()),
             message.invitation.as_ref().map(|invitation| {
-                div().pb(px(space::S8)).child(self.render_invitation(message, invitation, p, cx)).into_any_element()
+                div().pb(px(space::S8)).child(self.render_invitation(message, invitation, compact, p, cx)).into_any_element()
             }),
             // An HTML body has no width of its own (Blitz and the web view lay it out at the width
             // they are given), so it takes the column's: on the user's own side, which hugs its
             // pieces to the right, it would shrink to a sliver (MS-349).
-            self.render_body(message, remote, p, cx)
+            self.render_body(message, remote, compact, p, cx)
                 .map(|body| own_presses(div()).max_w_full().min_w_0().when(message.body_html.is_some(), |d| d.w_full()).child(body).into_any_element()),
             (!message.tiles.is_empty())
-                .then(|| div().pt(px(space::S8)).child(self.render_attachments(message, p, cx)).into_any_element()),
+                .then(|| div().pt(px(space::S8)).child(self.render_attachments(message, compact, p, cx)).into_any_element()),
         ];
         // The buttons answer the message under the pointer, not the conversation's latest.
         let (reply, reply_all, forward) = (id.clone(), id.clone(), id.clone());
@@ -756,6 +788,7 @@ fn blitz_html(
     html: SharedString,
     part: blitz_body::HtmlPart,
     remote: bool,
+    base_zoom: f32,
     p: &Palette,
     focus: &FocusHandle,
 ) -> AnyElement {
@@ -767,7 +800,7 @@ fn blitz_html(
     let body = canvas(
         |bounds, window, _| blitz_body::prepaint(bounds, window),
         move |bounds, hitbox, window, cx| {
-            blitz_body::paint(&key, &html, part, theme, remote, bounds, hitbox, &focus, window, cx)
+            blitz_body::paint(&key, &html, part, theme, remote, base_zoom, bounds, hitbox, &focus, window, cx)
         },
     );
     let body = body.w_full().h(px(height)).into_any_element();

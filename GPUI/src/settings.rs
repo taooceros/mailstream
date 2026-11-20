@@ -29,8 +29,8 @@ use mailstream::{
 };
 
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, field_frame, hairline, icon_button, icon_label_button, notice, pill,
-    switch, tag,
+    ButtonKind, ControlSize, Tone, button, compact_capsule, compact_icon_button, field_frame, hairline, icon_button,
+    icon_label_button, notice, pill, switch, tag_for,
 };
 use crate::design::{self, Palette, layout, radius, settings as metrics, space, stroke, text};
 use crate::engine::{MailError, engine};
@@ -1222,21 +1222,22 @@ impl Render for Settings {
         self.ensure_join_input(window, cx);
         self.ensure_cloud_input(window, cx);
         let p = design::palette(window.appearance());
-        let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let inline = self.on_close.is_some();
+        let mobile = inline && f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let ts = design::type_scale(mobile);
         let body = div()
             .id("settings")
             .flex_1()
             .min_h_0()
             .w_full()
             .overflow_y_scroll()
-            .p(px(if compact { space::S12 } else { metrics::PADDING }))
+            .p(px(if mobile { space::S16 } else { metrics::PADDING }))
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(self.render_accounts(p, window, cx))
-            .child(self.render_device_sync(p, window, cx))
-            .children(self.render_settings(p, window, cx))
+            .child(self.render_accounts(mobile, p, window, cx))
+            .child(self.render_device_sync(mobile, p, window, cx))
+            .children(self.render_settings(mobile, p, window, cx))
             .child(self.render_status(p));
 
         div()
@@ -1252,7 +1253,7 @@ impl Render for Settings {
             .flex()
             .flex_col()
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(ts.body))
             .text_color(p.text)
             .bg(p.background)
             .when(inline, |d| {
@@ -1261,13 +1262,13 @@ impl Render for Settings {
                         .id("settings-header")
                         .flex_shrink_0()
                         .h(px(design::compact::TOP_BAR_HEIGHT))
-                        .px(px(space::S10))
+                        .px(px(space::S12))
                         .flex()
                         .items_center()
                         .gap(px(space::S8))
                         .child(
-                            capsule(p).child(
-                                icon_button("settings-back", Icon::Back, "Back (Esc)", true, p.glyph)
+                            compact_capsule(p).child(
+                                compact_icon_button("settings-back", Icon::Back, "Back (Esc)", true, p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close(window, cx))),
                             ),
                         )
@@ -1280,15 +1281,15 @@ impl Render for Settings {
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_size(px(design::compact::HEADER_TITLE))
+                                        .text_size(px(ts.header_title))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(p.text)
                                         .child("Settings"),
                                 ),
                         )
                         .child(
-                            capsule(p).child(
-                                icon_button("settings-close", Icon::Close, "Close Settings", true, p.glyph)
+                            compact_capsule(p).child(
+                                compact_icon_button("settings-close", Icon::Close, "Close Settings", true, p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.close_all(window, cx))),
                             ),
                         ),
@@ -1300,7 +1301,8 @@ impl Render for Settings {
 }
 
 impl Settings {
-    fn render_accounts(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_accounts(&self, mobile: bool, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let ts = design::type_scale(mobile);
         let body: AnyElement = match &self.accounts {
             None => note("Loading accounts…", p).into_any_element(),
             Some(Err(error)) => note(error.to_string(), p).into_any_element(),
@@ -1311,7 +1313,7 @@ impl Settings {
                 .child(div().font_weight(FontWeight::MEDIUM).child("No accounts"))
                 .child(
                     div()
-                        .text_size(px(text::FOOTNOTE))
+                        .text_size(px(ts.footnote))
                         .text_color(p.muted)
                         .child("Sign in to bring in mail, contacts and Google Chat."),
                 )
@@ -1320,7 +1322,7 @@ impl Settings {
                 let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
                 let last = rows.len() - 1;
                 card(p)
-                    .children(rows.iter().enumerate().map(|(index, row)| self.render_row(index, row, index == last, compact, p, cx)))
+                    .children(rows.iter().enumerate().map(|(index, row)| self.render_row(index, row, index == last, compact, mobile, p, cx)))
                     .into_any_element()
             }
         };
@@ -1330,7 +1332,7 @@ impl Settings {
                 .flex()
                 .items_center()
                 .gap(px(10.))
-                .child(div().flex_1().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(match &waiting.connecting {
+                .child(div().flex_1().text_size(px(ts.footnote)).text_color(p.muted).child(match &waiting.connecting {
                     Some((account, service)) => format!(
                         "Waiting for {} to allow {} for {account} in your browser…",
                         waiting.provider.name(),
@@ -1339,19 +1341,20 @@ impl Settings {
                     None => format!("Waiting for the {} sign-in in your browser…", waiting.provider.name()),
                 }))
                 .child(
-                    button("stop-waiting", "Stop Waiting", ButtonKind::Secondary, ControlSize::Regular, true, p)
+                    button("stop-waiting", "Stop Waiting", ButtonKind::Secondary, ControlSize::regular(mobile), true, p)
                         .on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))),
                 )
                 .into_any_element(),
             None => div()
                 .flex()
+                .flex_wrap()
                 .gap(px(8.))
                 .children([Provider::Google, Provider::Microsoft].map(|provider| {
                     button(
                         ElementId::Name(format!("add-{}", provider.as_str()).into()),
                         format!("{} Account…", provider.name()),
                         ButtonKind::Secondary,
-                        ControlSize::Regular,
+                        ControlSize::regular(mobile),
                         self.client.is_none(),
                         p,
                     )
@@ -1366,8 +1369,8 @@ impl Settings {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(heading("Accounts", p))
-            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+            .child(heading_for("Accounts", mobile, p))
+            .child(div().text_size(px(ts.footnote)).text_color(p.muted).child(
                 "Mailstream signs in to Google and Microsoft in your browser, with an OAuth client you registered. \
                  Signing in asks only for mail; connect contacts, chat or calendar for an account when you want them.",
             ))
@@ -1377,7 +1380,7 @@ impl Settings {
             .when_some(self.note.as_ref(), |this, n| {
                 this.child(
                     div()
-                        .text_size(px(text::FOOTNOTE))
+                        .text_size(px(ts.footnote))
                         .text_color(if n.error { p.danger } else { p.muted })
                         .child(n.text.clone()),
                 )
@@ -1460,6 +1463,7 @@ impl Settings {
         row: &Account,
         last: bool,
         compact: bool,
+        mobile: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1531,7 +1535,7 @@ impl Settings {
             .flex_wrap()
             .items_center()
             .gap(px(4.))
-            .children(row.services.iter().map(|s| tag(service_title(s), None, p).into_any_element()))
+            .children(row.services.iter().map(|s| tag_for(service_title(s), None, mobile, p).into_any_element()))
             .children(row.connectable.iter().map(|service| {
                 let idle = self.signing_in.is_none();
                 let partly = row.services.contains(service);
@@ -1545,7 +1549,7 @@ impl Settings {
                     ElementId::Name(format!("connect:{}:{service}", row.id).into()),
                     label,
                     ButtonKind::Plain(p.accent),
-                    ControlSize::Small,
+                    ControlSize::small(mobile),
                     idle,
                     p,
                 )
@@ -1571,7 +1575,7 @@ impl Settings {
                         .child(div().flex_1().min_w_0().child(title))
                         .child(actions),
                 )
-                .child(div().pl(px(18.)).text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(detail.join(" · ")))
+                .child(div().pl(px(18.)).text_size(px(design::type_scale(mobile).caption)).text_color(p.muted).truncate().child(detail.join(" · ")))
                 .child(div().pl(px(18.)).child(services))
         } else {
             div()
@@ -1642,7 +1646,8 @@ impl Settings {
 
     /// The settings' sections, as Flutter's Settings shows them: the file's problems first, then each
     /// group under its title, the keys of no section after, and where the file is.
-    fn render_settings(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_settings(&self, mobile: bool, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let ts = design::type_scale(mobile);
         let settings = match &self.settings {
             None => return vec![note("Loading settings…", p).into_any_element()],
             Some(Err(error)) => return vec![note(error.to_string(), p).into_any_element()],
@@ -1655,7 +1660,7 @@ impl Settings {
                 .settings
                 .iter()
                 .filter(|entry| in_section(&entry.key, prefixes))
-                .map(|entry| self.render_entry(entry, p, window, cx))
+                .map(|entry| self.render_entry(entry, mobile, p, window, cx))
                 .collect();
             let tagging = prefixes.contains(&"aiTagging.");
             if tagging {
@@ -1673,7 +1678,7 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(heading(*title, p))
+                    .child(heading_for(*title, mobile, p))
                     .children(problem.map(|problem| notice(Tone::Error, None, problem, false, p)))
                     .children(group(rows, p))
                     .when(prefixes.contains(&"autoRead."), |d| d.children(self.render_auto_read(p, window, cx)))
@@ -1684,13 +1689,13 @@ impl Settings {
             .settings
             .iter()
             .filter(|entry| shown(&entry.key) && !SECTIONS.iter().any(|(_, prefixes)| in_section(&entry.key, prefixes)))
-            .map(|entry| self.render_entry(entry, p, window, cx))
+            .map(|entry| self.render_entry(entry, mobile, p, window, cx))
             .collect();
         out.extend(group(rest, p).map(IntoElement::into_any_element));
         out.push(
             div()
                 .px(px(4.))
-                .text_size(px(text::FOOTNOTE))
+                .text_size(px(ts.footnote))
                 .text_color(p.muted)
                 .child(format!("Saved in {}, shared with Mailstream and `mailstream config`.", settings.file))
                 .into_any_element(),
@@ -1698,7 +1703,7 @@ impl Settings {
         out
     }
 
-    fn render_entry(&self, entry: &SettingEntry, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_entry(&self, entry: &SettingEntry, mobile: bool, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if entry.key == LOCAL_ONLY_ACCOUNTS {
             return self.render_sync_accounts(entry, p, cx);
         }
@@ -1729,7 +1734,7 @@ impl Settings {
                             ElementId::Name(format!("{key}={word}").into()),
                             choice_title(&word).to_owned(),
                             if selected { ButtonKind::Primary } else { ButtonKind::Secondary },
-                            ControlSize::Small,
+                            ControlSize::small(mobile),
                             true,
                             p,
                         )
@@ -1751,7 +1756,7 @@ impl Settings {
         };
         let reset_key = key.clone();
         let reset_btn = entry.changed.then(|| {
-            button(ElementId::Name(format!("reset-{key}").into()), "Reset", ButtonKind::Plain(p.accent), ControlSize::Small, true, p)
+            button(ElementId::Name(format!("reset-{key}").into()), "Reset", ButtonKind::Plain(p.accent), ControlSize::small(mobile), true, p)
                 .on_click(cx.listener(move |this, _, _, cx| this.write(reset_key.clone(), None, cx)))
         });
         let header_row = if compact && !inline_control {
@@ -1759,7 +1764,7 @@ impl Settings {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(setting_label(entry, range, p))
+                .child(setting_label(entry, range, mobile, p))
                 .when(control.is_some() || reset_btn.is_some(), |d| {
                     d.child(div().flex().items_center().gap(px(8.)).children(control).children(reset_btn))
                 })
@@ -1773,7 +1778,7 @@ impl Settings {
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .child(setting_label(entry, range, p))
+                .child(setting_label(entry, range, mobile, p))
                 .children(control)
                 .child(reset)
         };
@@ -1946,7 +1951,7 @@ impl Settings {
             .py(px(10.))
             .flex()
             .flex_col()
-            .child(div().flex().child(setting_label(entry, None, p)))
+            .child(div().flex().child(setting_label(entry, None, self.on_close.is_some(), p)))
             .when(rows.is_empty(), |d| {
                 d.child(
                     div()
@@ -2169,13 +2174,14 @@ impl Settings {
         })))
     }
 
-    fn render_device_sync(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_device_sync(&self, mobile: bool, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let ts = design::type_scale(mobile);
         let section = div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(heading("Device sync", p))
-            .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(
+            .child(heading_for("Device sync", mobile, p))
+            .child(div().text_size(px(ts.footnote)).text_color(p.muted).child(
                 "Syncs your accounts, trusted senders, auto-read, and AI tagging preferences directly between \
                  your devices with iroh; sign-ins travel encrypted for each device. Off until enabled or paired, \
                  so Mailstream does not connect to a relay on its own.",
@@ -2184,7 +2190,7 @@ impl Settings {
             return section
                 .child(note("Loading device sync…", p))
                 .when_some(self.sync_error.clone(), |d, error| {
-                    d.child(div().text_size(px(text::FOOTNOTE)).text_color(p.danger).child(error))
+                    d.child(div().text_size(px(ts.footnote)).text_color(p.danger).child(error))
                 });
         };
 
@@ -2222,7 +2228,7 @@ impl Settings {
                     .flex_col()
                     .gap(px(2.))
                     .child(div().font_weight(FontWeight::MEDIUM).child("Cross-device settings sync"))
-                    .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(status_line)),
+                    .child(div().text_size(px(ts.footnote)).text_color(p.muted).child(status_line)),
             )
             .child(
                 switch("device-sync-toggle", enabled)
@@ -2259,10 +2265,10 @@ impl Settings {
                     .flex_col()
                     .gap(px(2.))
                     .child(div().font_weight(FontWeight::MEDIUM).truncate().child(this_title))
-                    .child(div().text_size(px(text::CAPTION)).text_color(p.muted).truncate().child(this_detail)),
+                    .child(div().text_size(px(ts.caption)).text_color(p.muted).truncate().child(this_detail)),
             )
             .child(
-                button("sync-now", sync_now_label, ButtonKind::Secondary, ControlSize::Regular, sync_now_enabled, p)
+                button("sync-now", sync_now_label, ButtonKind::Secondary, ControlSize::regular(mobile), sync_now_enabled, p)
                     .when(sync_now_enabled, |b| b.on_click(cx.listener(|this, _, _, cx| this.sync_now(cx)))),
             )
             .into_any_element();
@@ -2689,7 +2695,12 @@ impl Settings {
 
 /// A section's title (Flutter's `_Heading`): bold secondary text over its group.
 fn heading(title: impl Into<SharedString>, p: &Palette) -> Div {
-    div().pt(px(8.)).px(px(4.)).font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child(title.into())
+    heading_for(title, false, p)
+}
+
+fn heading_for(title: impl Into<SharedString>, mobile: bool, p: &Palette) -> Div {
+    let ts = design::type_scale(mobile);
+    div().pt(px(8.)).px(px(4.)).text_size(px(ts.footnote)).font_weight(FontWeight::SEMIBOLD).text_color(p.muted).child(title.into())
 }
 
 pub(crate) fn card(p: &Palette) -> Div {
@@ -2706,7 +2717,8 @@ pub(crate) fn group(rows: Vec<AnyElement>, p: &Palette) -> Option<Div> {
 }
 
 /// A setting's name over the engine's description and its key (with the range a number takes).
-fn setting_label(entry: &SettingEntry, range: Option<String>, p: &Palette) -> Div {
+fn setting_label(entry: &SettingEntry, range: Option<String>, mobile: bool, p: &Palette) -> Div {
+    let ts = design::type_scale(mobile);
     let key = match range {
         Some(range) => format!("{}  ·  {range}", entry.key),
         None => entry.key.clone(),
@@ -2718,8 +2730,8 @@ fn setting_label(entry: &SettingEntry, range: Option<String>, p: &Palette) -> Di
         .flex_col()
         .gap(px(2.))
         .child(title(&entry.key).to_owned())
-        .child(div().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(entry.summary.clone()))
-        .child(div().text_size(px(text::CAPTION)).text_color(p.faint).child(key))
+        .child(div().text_size(px(ts.footnote)).text_color(p.muted).child(entry.summary.clone()))
+        .child(div().text_size(px(ts.caption)).text_color(p.faint).child(key))
 }
 
 pub(crate) fn note(text: impl Into<SharedString>, p: &Palette) -> Div {

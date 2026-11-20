@@ -17,7 +17,7 @@ mod android_entry {
     static INSET_BOTTOM: AtomicU32 = AtomicU32::new(0);
     static INSET_LEFT: AtomicU32 = AtomicU32::new(0);
     static INSET_RIGHT: AtomicU32 = AtomicU32::new(0);
-
+    static FONT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
     #[unsafe(no_mangle)]
     pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeInsets(
         _env: *mut std::ffi::c_void,
@@ -40,9 +40,34 @@ mod android_entry {
             left.max(0) as f32 / scale,
             right.max(0) as f32 / scale,
         );
-        if let Some(win) = jni::shared_platform().and_then(|p| p.0.primary_window()) {
-            win.request_frame();
-        }
+        // Wake the render thread safely from the Java UI thread without touching GPUI directly.
+        jni::request_config_refresh();
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeDisplayMetrics(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        density: f32,
+        font_scale: f32,
+    ) {
+        let scale = if font_scale.is_finite() && font_scale > 0.0 {
+            font_scale.clamp(0.75, 2.0)
+        } else {
+            1.0
+        };
+        FONT_SCALE.store(scale.to_bits(), Ordering::Relaxed);
+        log::info!(
+            "mailstream-android-poc: display metrics density={:.3} font_scale={:.3}",
+            density,
+            scale,
+        );
+        jni::request_config_refresh();
+    }
+
+    fn android_font_scale() -> f32 {
+        let scale = f32::from_bits(FONT_SCALE.load(Ordering::Relaxed));
+        if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
     }
 
     fn android_safe_area_insets() -> (f32, f32, f32, f32) {
@@ -70,6 +95,7 @@ mod android_entry {
 
     fn launch_mailstream_ui(cx: &mut App) {
         mailstream_gpui::design::compact::set_safe_area_provider(android_safe_area_insets);
+        mailstream_gpui::design::compact::set_font_scale_provider(android_font_scale);
         mailstream_gpui::init(cx);
         let (window, app) = mailstream_gpui::open_window(mailstream_gpui::mobile_window_options(), cx);
         window

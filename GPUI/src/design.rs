@@ -353,7 +353,7 @@ pub fn sync_kit_theme(appearance: WindowAppearance, cx: &mut App) {
     let pressed = |face: Hsla| face.blend(tint(shade, 0.16));
     Theme::update(cx, |theme| {
         theme.font_family = ui_font().into();
-        theme.font_size = px(text::BODY);
+        theme.font_size = px(type_scale(cfg!(target_os = "android")).body);
         theme.radius = px(radius::CONTROL);
         theme.radius_lg = px(radius::CARD);
         theme.shadow = false;
@@ -462,6 +462,67 @@ pub mod text {
     pub const PANE_TITLE: f32 = 15.0;
     /// The thread title.
     pub const DISPLAY: f32 = 22.0;
+}
+
+/// Resolved typography scale for the current viewport (`desktop()` for desktop macOS/Linux
+/// windows, `compact()` for phone/Android viewports aligned with Material 3 / native Android
+/// proportions and scaled by Android's system `fontScale`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TypeScale {
+    pub tag: f32,
+    pub caption: f32,
+    pub footnote: f32,
+    pub body: f32,
+    pub reading: f32,
+    pub pane_title: f32,
+    pub header_title: f32,
+    pub display: f32,
+}
+
+impl TypeScale {
+    pub const COMPACT_TAG: f32 = 11.5;
+    pub const COMPACT_CAPTION: f32 = 12.5;
+    pub const COMPACT_FOOTNOTE: f32 = 13.5;
+    pub const COMPACT_BODY: f32 = 15.0;
+    pub const COMPACT_READING: f32 = 16.0;
+    pub const COMPACT_PANE_TITLE: f32 = 17.5;
+    pub const COMPACT_HEADER_TITLE: f32 = 21.0;
+    pub const COMPACT_DISPLAY: f32 = 23.0;
+
+    pub const fn desktop() -> Self {
+        Self {
+            tag: text::TAG,
+            caption: text::CAPTION,
+            footnote: text::FOOTNOTE,
+            body: text::BODY,
+            reading: text::READING,
+            pane_title: text::PANE_TITLE,
+            header_title: text::PANE_TITLE,
+            display: text::DISPLAY,
+        }
+    }
+
+    pub fn compact_at(scale: f32) -> Self {
+        let s = scale.clamp(0.75, 2.0);
+        let chrome = s.clamp(0.85, 1.25);
+        Self {
+            tag: Self::COMPACT_TAG * s,
+            caption: Self::COMPACT_CAPTION * s,
+            footnote: Self::COMPACT_FOOTNOTE * s,
+            body: Self::COMPACT_BODY * s,
+            reading: Self::COMPACT_READING * s,
+            pane_title: Self::COMPACT_PANE_TITLE * chrome,
+            header_title: Self::COMPACT_HEADER_TITLE * chrome,
+            display: Self::COMPACT_DISPLAY * s,
+        }
+    }
+}
+
+/// Typography scale for `compact` (phone / Android) vs desktop viewports. Desktop returns exact
+/// `text::*` constants unchanged; compact applies Material 3 proportions multiplied by system
+/// `fontScale`.
+pub fn type_scale(compact: bool) -> TypeScale {
+    if compact { TypeScale::compact_at(compact::font_scale()) } else { TypeScale::desktop() }
 }
 
 /// The message log mail between people and Google Chat share (`message_log`, MS-326).
@@ -708,25 +769,37 @@ pub mod layout {
 /// Small-screen (phone) shell metrics: unified warm surfaces, floating glass top capsules and
 /// bottom dock, slide-over drawer, and touch-friendly 3-line rows (MS-408, MS-417).
 pub mod compact {
-    pub const TOP_BAR_HEIGHT: f32 = super::layout::HEADER_HEIGHT;
+    pub const TOP_BAR_HEIGHT: f32 = 60.0;
+    pub const CAPSULE_HEIGHT: f32 = 40.0;
+    pub const ICON_BUTTON: f32 = 34.0;
+    pub const TOOLBAR_ICON: f32 = 19.0;
     /// Floating glass bottom dock height (shared by the nav capsule and the integrated Compose circle).
-    pub const DOCK_HEIGHT: f32 = 54.0;
+    pub const DOCK_HEIGHT: f32 = 62.0;
     pub const DOCK_PADDING: f32 = 4.0;
     pub const DOCK_MARGIN_X: f32 = 14.0;
     pub const DOCK_MARGIN_B: f32 = 12.0;
     /// Bottom scroll clearance and toast offset so content clears the floating dock cleanly.
-    pub const DOCK_CLEARANCE: f32 = 88.0;
-    pub const DRAWER_WIDTH: f32 = 292.0;
-    pub const DRAWER_ROW: f32 = 40.0;
-    pub const ROW_HEIGHT: f32 = 76.0;
-    pub const BUNDLE_ROW_HEIGHT: f32 = 62.0;
-    pub const AVATAR: f32 = super::list::AVATAR;
+    pub const DOCK_CLEARANCE: f32 = 96.0;
+    pub const DRAWER_WIDTH: f32 = 300.0;
+    pub const DRAWER_ROW: f32 = 48.0;
+    pub const ROW_HEIGHT: f32 = 86.0;
+    pub const BUNDLE_ROW_HEIGHT: f32 = 70.0;
+    pub const AVATAR: f32 = 40.0;
+    pub const READER_AVATAR: f32 = 38.0;
+    pub const SEPARATOR_X: f32 = super::marks::UNREAD_SLOT + AVATAR + super::list::AVATAR_GAP;
     pub const FAB_SIZE: f32 = DOCK_HEIGHT;
-    pub const REPLY_BAR_HEIGHT: f32 = 46.0;
-    pub const READER_PADDING: f32 = 14.0;
-    pub const TITLE_SIZE: f32 = 20.0;
-    pub const HEADER_TITLE: f32 = 16.0;
+    pub const REPLY_BAR_HEIGHT: f32 = 50.0;
+    pub const READER_PADDING: f32 = 16.0;
+    pub const TITLE_SIZE: f32 = super::TypeScale::COMPACT_DISPLAY;
+    pub const HEADER_TITLE: f32 = super::TypeScale::COMPACT_HEADER_TITLE;
+    pub const SECTION_HEIGHT: f32 = 36.0;
+    pub const TAG_HEIGHT: f32 = 21.0;
+    pub const PILL_HEIGHT: f32 = 26.0;
+    pub const BUTTON_HEIGHT: f32 = 36.0;
+    pub const BUTTON_SMALL_HEIGHT: f32 = 30.0;
+    pub const SEARCH_HEIGHT: f32 = 40.0;
     static SAFE_AREA: std::sync::OnceLock<fn() -> (f32, f32, f32, f32)> = std::sync::OnceLock::new();
+    static FONT_SCALE: std::sync::OnceLock<fn() -> f32> = std::sync::OnceLock::new();
 
     /// Registers the platform safe-area inset provider (top, bottom, left, right in logical points).
     pub fn set_safe_area_provider(provider: fn() -> (f32, f32, f32, f32)) {
@@ -736,6 +809,43 @@ pub mod compact {
     /// Current platform safe-area insets `(top, bottom, left, right)` in logical points.
     pub fn safe_area_insets() -> (f32, f32, f32, f32) {
         SAFE_AREA.get().map_or((0., 0., 0., 0.), |f| f())
+    }
+
+    /// Registers the platform font-scale provider (Android `Configuration.fontScale`).
+    pub fn set_font_scale_provider(provider: fn() -> f32) {
+        let _ = FONT_SCALE.set(provider);
+    }
+
+    /// Current platform text scale multiplier (1.0 on desktop and default Android).
+    pub fn font_scale() -> f32 {
+        let scale = FONT_SCALE.get().map_or(1.0, |f| f());
+        if scale.is_finite() && scale > 0.0 { scale.clamp(0.75, 2.0) } else { 1.0 }
+    }
+
+    /// Clamped font scale for fixed-height chrome (top bar, bottom dock, reply bar).
+    pub fn chrome_font_scale() -> f32 {
+        font_scale().clamp(0.85, 1.25)
+    }
+
+    /// Three-line compact mail row height, growing cleanly with system `fontScale`.
+    pub fn row_height() -> f32 {
+        (24.0 + 62.0 * font_scale()).round()
+    }
+
+    /// Two-line compact bundle/chat row height, growing cleanly with system `fontScale`.
+    pub fn bundle_row_height() -> f32 {
+        (24.0 + 46.0 * font_scale()).round()
+    }
+
+    /// Touch-friendly navigation drawer row height (>= 48dp, growing with `fontScale`).
+    pub fn drawer_row_height() -> f32 {
+        (26.0 + 22.0 * font_scale()).max(DRAWER_ROW).round()
+    }
+
+    /// Base zoom for Blitz HTML bodies on compact screens so 14px CSS body text matches
+    /// `TypeScale::COMPACT_READING` (16sp) and scales with system `fontScale`.
+    pub fn blitz_zoom() -> f32 {
+        (super::TypeScale::COMPACT_READING / super::text::READING) * font_scale()
     }
 }
 
@@ -1048,6 +1158,33 @@ mod tests {
         // From rest it arrives within `longest`, at 60 Hz as at 120 Hz.
         let (offset, arrived) = motion.at(0., 2000., 0., motion.longest().as_secs_f32());
         assert!(arrived && offset == 2000.);
+    }
+
+    #[test]
+    fn type_scale_keeps_desktop_unchanged_and_scales_compact_for_android() {
+        let desktop = type_scale(false);
+        assert_eq!(desktop.tag, text::TAG);
+        assert_eq!(desktop.caption, text::CAPTION);
+        assert_eq!(desktop.footnote, text::FOOTNOTE);
+        assert_eq!(desktop.body, text::BODY);
+        assert_eq!(desktop.reading, text::READING);
+        assert_eq!(desktop.pane_title, text::PANE_TITLE);
+        assert_eq!(desktop.display, text::DISPLAY);
+
+        let mobile = TypeScale::compact_at(1.0);
+        assert!(mobile.header_title >= 20.0 && mobile.header_title <= 22.0);
+        assert!(mobile.reading >= 15.5 && mobile.reading <= 16.5);
+        assert!(mobile.display > mobile.header_title);
+        assert!(mobile.header_title > mobile.reading);
+        assert!(mobile.reading > mobile.body);
+        assert!(mobile.body > mobile.footnote);
+        assert!(mobile.footnote > mobile.caption);
+        assert!(mobile.caption > mobile.tag);
+
+        let large = TypeScale::compact_at(1.5);
+        assert!((large.reading - mobile.reading * 1.5).abs() < 1e-3);
+        // Fixed-height chrome titles clamp at 1.25x so top bars never clip at large system fontScale.
+        assert!((large.header_title - mobile.header_title * 1.25).abs() < 1e-3);
     }
 }
 

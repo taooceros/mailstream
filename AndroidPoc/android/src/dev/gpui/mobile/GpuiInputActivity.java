@@ -45,6 +45,7 @@ public class GpuiInputActivity extends NativeActivity {
 
     private static native void nativeIme(long session, int kind, String text, int start, int end);
     private static native void nativeInsets(int top, int bottom, int left, int right, float density);
+    private static native void nativeDisplayMetrics(float density, float fontScale);
     private static native void nativeBack();
 
     @Override
@@ -59,7 +60,9 @@ public class GpuiInputActivity extends NativeActivity {
             content.addView(imeProxy, new FrameLayout.LayoutParams(1, 1));
         }
         final View decor = getWindow().getDecorView();
-        configureEdgeToEdge(getResources().getConfiguration());
+        Configuration initialConfig = getResources().getConfiguration();
+        configureEdgeToEdge(initialConfig);
+        pushDisplayMetrics(initialConfig);
         decor.setOnApplyWindowInsetsListener((v, insets) -> {
             int top, bottom, left, right;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -103,6 +106,18 @@ public class GpuiInputActivity extends NativeActivity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         configureEdgeToEdge(newConfig);
+        pushDisplayMetrics(newConfig);
+    }
+
+    private void pushDisplayMetrics(Configuration config) {
+        float density = getResources().getDisplayMetrics().density;
+        if (density <= 0f) density = 1f;
+        float fontScale = config != null ? config.fontScale : 1f;
+        if (fontScale <= 0f) fontScale = 1f;
+        try {
+            nativeDisplayMetrics(density, fontScale);
+        } catch (UnsatisfiedLinkError ignored) {
+        }
     }
 
     @SuppressWarnings("deprecation")

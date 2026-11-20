@@ -55,9 +55,11 @@ impl MailApp {
         &self,
         message: &ShownMessage,
         invitation: &MeetingInvitation,
+        compact: bool,
         p: &'static Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        let ts = design::type_scale(compact);
         let card = self.invitations.get(&message.id);
         let status = card.and_then(|card| card.status.as_ref());
         let event = status.and_then(|status| status.event.as_ref());
@@ -121,7 +123,7 @@ impl MailApp {
             .bg(p.background)
             .border(px(stroke::RIM))
             .border_color(p.line)
-            .text_size(px(text::BODY))
+            .text_size(px(ts.body))
             .child(
                 div()
                     .flex()
@@ -137,9 +139,9 @@ impl MailApp {
                             .when(cancelled || response == Some("declined"), |d| d.line_through())
                             .child(title),
                     )
-                    .when(cancelled, |d| d.child(tag("Cancelled", Some(p.danger), p)))
+                    .when(cancelled, |d| d.child(tag_for("Cancelled", Some(p.danger), compact, p)))
                     .when_some(answered(response).filter(|_| !cancelled), |d, label| {
-                        d.child(tag(label, (response != Some("declined")).then_some(p.accent), p))
+                        d.child(tag_for(label, (response != Some("declined")).then_some(p.accent), compact, p))
                     }),
             )
             .child(line(Icon::Waiting, when))

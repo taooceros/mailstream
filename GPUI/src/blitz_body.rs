@@ -63,6 +63,7 @@ struct Tile {
 struct Layout {
     width: f32,
     scale: f32,
+    base_zoom: f32,
     height: f32,
 }
 
@@ -79,9 +80,8 @@ struct Entry {
     /// Whether the page is on paper, once it says.
     paper: Option<bool>,
     layout: Option<Layout>,
-    /// The width and scale a layout was last asked for.
-    asked: Option<(f32, f32)>,
-    /// The page's content version, which late content raises.
+    /// The width, scale and base zoom a layout was last asked for.
+    asked: Option<(f32, f32, f32)>,
     version: i64,
     /// Grows whenever drawn tiles go stale (a layout, a selection); a stale tile stays on screen
     /// until its replacement arrives, so nothing flashes.
@@ -200,6 +200,7 @@ pub fn paint(
     part: HtmlPart,
     theme: HtmlTheme,
     remote: bool,
+    base_zoom: f32,
     bounds: Bounds<Pixels>,
     hitbox: Hitbox,
     focus: &FocusHandle,
@@ -232,9 +233,9 @@ pub fn paint(
             }
         }
         let Some(page) = entry.page.clone() else { return false };
-        if entry.asked != Some((width, scale)) {
-            entry.asked = Some((width, scale));
-            lay_out(key, &page, width, scale, window, cx);
+        if entry.asked != Some((width, scale, base_zoom)) {
+            entry.asked = Some((width, scale, base_zoom));
+            lay_out(key, &page, width, scale, base_zoom, window, cx);
         }
         if let Some(layout) = entry.layout {
             update_tiles(key, &page, entry, layout, viewport, retired, window, cx);
@@ -320,16 +321,16 @@ fn with_page<R>(key: &SharedString, page: &Arc<HtmlPage>, f: impl FnOnce(&mut En
     })
 }
 
-fn lay_out(key: &SharedString, page: &Arc<HtmlPage>, width: f32, scale: f32, window: &Window, cx: &App) {
+fn lay_out(key: &SharedString, page: &Arc<HtmlPage>, width: f32, scale: f32, base_zoom: f32, window: &Window, cx: &App) {
     let (key, page) = (key.clone(), page.clone());
     window
         .spawn(cx, async move |cx| {
-            let Some(size) = page.layout(f64::from(width), f64::from(scale)).await else { return };
+            let Some(size) = page.layout_scaled(f64::from(width), f64::from(scale), base_zoom).await else { return };
             let laid_out = with_page(&key, &page, |entry| {
-                if entry.asked != Some((width, scale)) {
+                if entry.asked != Some((width, scale, base_zoom)) {
                     return false;
                 }
-                entry.layout = Some(Layout { width, scale, height: size.height as f32 });
+                entry.layout = Some(Layout { width, scale, base_zoom, height: size.height as f32 });
                 entry.blocked = size.blocked;
                 entry.generation += 1;
                 true
@@ -403,7 +404,7 @@ fn draw_tile(
     window
         .spawn(cx, async move |cx| {
             let drawn = page
-                .tile(f64::from(layout.width), f64::from(layout.scale), f64::from(top), f64::from(height))
+                .tile_scaled(f64::from(layout.width), f64::from(layout.scale), layout.base_zoom, f64::from(top), f64::from(height))
                 .await;
             let Some(drawn) = drawn else { return };
             let image = executor.spawn(async move { render_image(drawn) }).await;
@@ -750,6 +751,7 @@ mod tests {
                                         super::HtmlPart::Main,
                                         theme,
                                         false,
+                                        1.0,
                                         bounds,
                                         hitbox,
                                         &focus,

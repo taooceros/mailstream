@@ -48,22 +48,23 @@ impl MailApp {
         let loading = self.list().is_some_and(|list| list.loading || list.fetching);
         let subtitle = if loading { Some("Loading…".into()) } else { subtitle };
         if compact {
+            let ts = design::type_scale(true);
             let leading = if bundle.is_some() || self.query.is_some() {
-                icon_button("back", Icon::Back, "Back (Esc)", true, p.glyph)
+                compact_icon_button("back", Icon::Back, "Back (Esc)", true, p.glyph)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.list_back(window, cx)))
             } else {
-                icon_button("compact-menu", Icon::Menu, "Mailboxes", true, p.glyph)
+                compact_icon_button("compact-menu", Icon::Menu, "Mailboxes", true, p.glyph)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_drawer(cx)))
             };
             return div()
                 .id("list-header")
                 .flex_shrink_0()
                 .h(px(design::compact::TOP_BAR_HEIGHT))
-                .px(px(space::S10))
+                .px(px(space::S12))
                 .flex()
                 .items_center()
                 .gap(px(space::S10))
-                .child(capsule(p).child(leading))
+                .child(compact_capsule(p).child(leading))
                 .child(
                     div()
                         .flex_1()
@@ -73,22 +74,23 @@ impl MailApp {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(design::compact::HEADER_TITLE))
+                                .text_size(px(ts.header_title))
+                                .line_height(relative(1.15))
                                 .font_weight(FontWeight::BOLD)
                                 .child(title),
                         )
                         .when_some(subtitle, |d, subtitle| {
-                            d.child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
+                            d.child(div().truncate().text_size(px(ts.caption)).text_color(p.muted).child(subtitle))
                         }),
                 )
                 .child(
-                    capsule(p)
+                    compact_capsule(p)
                         .child(
-                            icon_button("compact-search-open", Icon::Search, "Search", true, p.glyph)
+                            compact_icon_button("compact-search-open", Icon::Search, "Search", true, p.glyph)
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_compact_search(window, cx))),
                         )
                         .child(
-                            icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.glyph)
+                            compact_icon_button("refresh", Icon::Refresh, "Get New Mail", true, p.glyph)
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
                         ),
                 )
@@ -113,17 +115,18 @@ impl MailApp {
     /// search row while browsing the inbox.
     fn render_compact_search_bar(&self, p: &'static Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let focused = self.search.focus_handle(cx).is_focused(window);
+        let ts = design::type_scale(true);
         div()
             .id("compact-search-header")
             .flex_shrink_0()
             .h(px(design::compact::TOP_BAR_HEIGHT))
-            .px(px(space::S10))
+            .px(px(space::S12))
             .flex()
             .items_center()
             .gap(px(space::S8))
             .child(
-                capsule(p).child(
-                    icon_button("compact-search-back", Icon::Back, "Close Search", true, p.glyph).on_click(cx.listener(
+                compact_capsule(p).child(
+                    compact_icon_button("compact-search-back", Icon::Back, "Close Search", true, p.glyph).on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| {
                             this.cancel_search(&gpui::component::input::Escape, window, cx);
                         },
@@ -135,14 +138,15 @@ impl MailApp {
                     .id("search")
                     .flex_1()
                     .min_w_0()
-                    .h(px(layout::CAPSULE_HEIGHT))
+                    .h(px(design::compact::SEARCH_HEIGHT))
                     .pl(px(space::S12))
                     .pr(px(space::S10))
                     .gap(px(space::S8))
-                    .line_height(px(20.))
+                    .text_size(px(ts.body))
+                    .line_height(px((ts.body * 1.35).round()))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_action(cx.listener(Self::cancel_search))
-                    .child(icon(Icon::Search, 15., p.muted))
+                    .child(icon(Icon::Search, 17., p.muted))
                     .child(div().flex_1().min_w_0().child(input::field(&self.search))),
             )
             .into_any_element()
@@ -165,14 +169,19 @@ impl MailApp {
         } else {
             None
         };
+        let ts = design::type_scale(compact);
+        let bar_capsule = |p: &'static Palette| if compact { compact_capsule(p) } else { capsule(p) };
+        let bar_icon = |id: &'static str, glyph: Icon, tip: &'static str, enabled: bool, color: gpui::Hsla| {
+            if compact { compact_icon_button(id, glyph, tip, enabled, color) } else { icon_button(id, glyph, tip, enabled, color) }
+        };
         title_bar("list-header", window, cx)
             .flex_shrink_0()
             .h(px(if compact { design::compact::TOP_BAR_HEIGHT } else { layout::HEADER_HEIGHT }))
-            .px(px(if compact { space::S8 } else { space::S10 }))
+            .px(px(if compact { space::S12 } else { space::S10 }))
             .flex()
             .items_center()
             .gap(px(if compact { space::S8 } else { space::S10 }))
-            .child(capsule(p).child(icon_button("selection-clear", Icon::Close, "Clear Selection (Esc)", true, p.glyph).on_click(
+            .child(bar_capsule(p).child(bar_icon("selection-clear", Icon::Close, "Clear Selection (Esc)", true, p.glyph).on_click(
                 cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.clear_selection(cx);
                 }),
@@ -182,14 +191,14 @@ impl MailApp {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(text::PANE_TITLE))
+                    .text_size(px(ts.pane_title))
                     .font_weight(FontWeight::BOLD)
                     .child(format!("{} selected", picked.len())),
             )
             .child(
-                capsule(p)
+                bar_capsule(p)
                     .when_some(filing, |d, (id, glyph, tip, removal)| {
-                        d.child(icon_button(id, glyph, tip, true, p.glyph).on_click(cx.listener(
+                        d.child(bar_icon(id, glyph, tip, true, p.glyph).on_click(cx.listener(
                             move |this, _: &ClickEvent, window, cx| match removal {
                                 Removal::Restore => this.restore(&Restore, window, cx),
                                 _ => this.archive(&Archive, window, cx),
@@ -197,7 +206,7 @@ impl MailApp {
                         )))
                     })
                     .child(
-                        icon_button(
+                        bar_icon(
                             "selection-trash",
                             Icon::Delete,
                             if cfg!(target_os = "macos") { "Move to Trash (⌘⌫)" } else { "Move to Trash (Ctrl+Backspace)" },
@@ -206,10 +215,10 @@ impl MailApp {
                         )
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx))),
                     )
-                    .child(icon_button("selection-read", read_icon, read_tip, true, p.glyph).on_click(
+                    .child(bar_icon("selection-read", read_icon, read_tip, true, p.glyph).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_read(&ToggleRead, window, cx)),
                     ))
-                    .child(icon_button("selection-star", star_icon, star_tip, true, star_color).on_click(
+                    .child(bar_icon("selection-star", star_icon, star_tip, true, star_color).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.star(&Star, window, cx)),
                     ))
                     .when_some(waiting, |d, waiting| {
@@ -218,7 +227,7 @@ impl MailApp {
                         } else {
                             (Icon::Waiting, "Mark as Waiting on You (D)", p.glyph)
                         };
-                        d.child(icon_button("selection-waiting", glyph, tip, true, color).on_click(
+                        d.child(bar_icon("selection-waiting", glyph, tip, true, color).on_click(
                             cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_waiting(&ToggleWaiting, window, cx)),
                         ))
                     }),
@@ -280,6 +289,7 @@ impl MailApp {
         let restoring = !can_archive && conversation.can_restore();
         let unread = conversation.unread;
         let starred = conversation.starred;
+        let ts = design::type_scale(true);
         let title = (self.reader_top == ReaderTop::PastTitle).then(|| SharedString::from(conversation.title.clone()));
         div()
             .id("detail-toolbar")
@@ -294,36 +304,36 @@ impl MailApp {
             .gap(px(space::S8))
             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
             .child(
-                capsule(p).child(
-                    icon_button("close", Icon::Back, "Back (Esc)", true, p.glyph)
+                compact_capsule(p).child(
+                    compact_icon_button("close", Icon::Back, "Back (Esc)", true, p.glyph)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx))),
                 ),
             )
             .child(div().flex_1().min_w_0().flex().justify_center().when_some(title, |d, title| {
-                d.child(div().min_w_0().truncate().text_size(px(text::BODY)).font_weight(FontWeight::SEMIBOLD).child(title))
+                d.child(div().min_w_0().truncate().text_size(px(ts.body)).font_weight(FontWeight::SEMIBOLD).child(title))
             }))
             .child(
-                capsule(p)
+                compact_capsule(p)
                     .when(conversation.waiting, |d| {
                         d.child(
-                            icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting).on_click(cx.listener(
+                            compact_icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting).on_click(cx.listener(
                                 |this, _: &ClickEvent, window, cx| this.toggle_waiting(&ToggleWaiting, window, cx),
                             )),
                         )
                     })
                     .child(if restoring {
-                        icon_button("restore", Icon::Restore, "Move to Inbox", true, p.glyph)
+                        compact_icon_button("restore", Icon::Restore, "Move to Inbox", true, p.glyph)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.restore(&Restore, window, cx)))
                     } else {
-                        icon_button("archive", Icon::Archive, "Archive (E)", can_archive, p.glyph)
+                        compact_icon_button("archive", Icon::Archive, "Archive (E)", can_archive, p.glyph)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.archive(&Archive, window, cx)))
                     })
                     .child(
-                        icon_button("trash", Icon::Delete, "Move to Trash", true, p.glyph)
+                        compact_icon_button("trash", Icon::Delete, "Move to Trash", true, p.glyph)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.trash(&Trash, window, cx))),
                     )
                     .child(
-                        icon_button(
+                        compact_icon_button(
                             "read",
                             if unread { Icon::MarkRead } else { Icon::MarkUnread },
                             if unread { "Mark as Read (U)" } else { "Mark as Unread (U)" },
@@ -333,7 +343,7 @@ impl MailApp {
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_read(&ToggleRead, window, cx))),
                     )
                     .child(
-                        icon_button(
+                        compact_icon_button(
                             "star",
                             if starred { Icon::Starred } else { Icon::Star },
                             if starred { "Unstar (S)" } else { "Star (S)" },
@@ -348,6 +358,7 @@ impl MailApp {
     /// Floating glass reply capsule at the bottom of the compact reader (MS-408, MS-417): echoes
     /// desktop's floating glass capsules over a soft bottom fade scrim.
     fn render_compact_reply_bar(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let label_size = 14.5 * design::compact::chrome_font_scale();
         let action_btn = |id: &'static str, glyph: Icon, label: &'static str, primary: bool| {
             let fg = if primary { p.on_accent } else { p.text };
             let glyph_color = if primary { p.on_accent } else { p.glyph };
@@ -365,10 +376,10 @@ impl MailApp {
                 .when(primary, |d| d.bg(p.accent).active(|s| s.opacity(0.86)))
                 .when(!primary, |d| d.hover(|s| s.bg(p.hover)).active(|s| s.bg(p.pressed)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(icon(glyph, 15., glyph_color))
+                .child(icon(glyph, 17., glyph_color))
                 .child(
                     div()
-                        .text_size(px(text::BODY))
+                        .text_size(px(label_size))
                         .font_weight(if primary { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                         .text_color(fg)
                         .child(label),

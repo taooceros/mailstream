@@ -15,7 +15,7 @@ use gpui::component::tab::TabBar;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     Anchor, AnyElement, ClickEvent, Context, Div, ElementId, Focusable, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ListOffset, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, list, px,
+    ListOffset, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, list, px, relative,
 };
 use mailstream::{CalendarInfo, CalendarPerson, Provider};
 
@@ -109,7 +109,12 @@ impl CalendarPane {
             .pb(px(space::S8))
             .flex()
             .flex_col()
-            .child(
+            .child({
+                let ts = design::type_scale(compact);
+                let bar_capsule = |p: &'static Palette| if compact { crate::controls::compact_capsule(p) } else { capsule(p) };
+                let bar_icon = |id: &'static str, glyph: Icon, tip: &'static str, enabled: bool, color: gpui::Hsla| {
+                    if compact { crate::controls::compact_icon_button(id, glyph, tip, enabled, color) } else { icon_button(id, glyph, tip, enabled, color) }
+                };
                 div()
                     .h(px(if compact { design::compact::TOP_BAR_HEIGHT } else { layout::HEADER_HEIGHT }))
                     .flex()
@@ -117,8 +122,8 @@ impl CalendarPane {
                     .gap(px(space::S10))
                     .when(compact, |d| {
                         d.child(
-                            capsule(p).child(
-                                icon_button("calendar-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
+                            bar_capsule(p).child(
+                                bar_icon("calendar-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
                                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(CalendarOpenDrawer))),
                             ),
                         )
@@ -137,18 +142,19 @@ impl CalendarPane {
                                     .gap(px(space::S8))
                                     .child(
                                         div()
-                                            .text_size(px(if compact { design::compact::HEADER_TITLE } else { text::PANE_TITLE }))
+                                            .text_size(px(if compact { ts.header_title } else { text::PANE_TITLE }))
+                                            .line_height(relative(if compact { 1.15 } else { 1.2 }))
                                             .font_weight(FontWeight::BOLD)
                                             .child("Calendar"),
                                     )
                                     .when(self.loading, |d| {
-                                        d.child(div().text_size(px(text::CAPTION)).text_color(p.muted).child("Updating…"))
+                                        d.child(div().text_size(px(ts.caption)).text_color(p.muted).child("Updating…"))
                                     }),
                             )
-                            .child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle)),
+                            .child(div().truncate().text_size(px(ts.caption)).text_color(p.muted).child(subtitle)),
                     )
                     .child(
-                        capsule(p)
+                        bar_capsule(p)
                             .child(self.calendar_list_button(p, window, cx))
                             .when(!compact, |d| {
                                 d.child(div().w(px(stroke::HAIRLINE)).h(px(16.)).mx(px(space::S2)).bg(p.line))
@@ -158,11 +164,11 @@ impl CalendarPane {
                                     )
                             })
                             .child(
-                                icon_button("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.glyph)
+                                bar_icon("calendar-refresh", Icon::Refresh, "Refresh", self.has_calendars(), p.glyph)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
                             ),
-                    ),
-            )
+                    )
+            })
             .child(
                 div()
                     .when(!compact, |d| d.pl(px(space::S6)))
@@ -788,10 +794,11 @@ impl CalendarPane {
     }
 
     fn render_entry(&self, ix: usize, now: DateTime<Local>, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+        let ts = design::type_scale(compact);
         let line = match &self.entries[ix] {
             Entry::Notice(account) => self.render_notice(*account, p, cx).into_any_element(),
             Entry::Day { title, summary, .. } => div()
-                .h(px(rows::SECTION_HEIGHT))
+                .h(px(if compact { design::compact::SECTION_HEIGHT } else { rows::SECTION_HEIGHT }))
                 .flex()
                 .items_end()
                 .gap(px(space::S8))
@@ -803,12 +810,12 @@ impl CalendarPane {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(text::FOOTNOTE))
+                        .text_size(px(ts.footnote))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(p.muted)
                         .child(title.clone()),
                 )
-                .child(div().flex_shrink_0().text_size(px(text::CAPTION)).text_color(p.muted).child(summary.clone()))
+                .child(div().flex_shrink_0().text_size(px(ts.caption)).text_color(p.muted).child(summary.clone()))
                 .into_any_element(),
             Entry::Event { index, day } => self.render_row(*index, *day, now, compact, p, cx),
             Entry::Note(note) => div()
@@ -938,7 +945,7 @@ impl CalendarPane {
                     .items_end()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(time))
                     .when_some(under, |d, under| {
-                        d.child(div().max_w_full().truncate().text_size(px(text::FOOTNOTE)).text_color(p.muted).child(under))
+                        d.child(div().max_w_full().truncate().text_size(px(design::type_scale(compact).footnote)).text_color(p.muted).child(under))
                     }),
             )
             .child(div().flex_shrink_0().w(px(space::S12)))

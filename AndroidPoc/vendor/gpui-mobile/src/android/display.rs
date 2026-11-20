@@ -73,15 +73,28 @@ impl AndroidDisplay {
     /// so the caller retains ownership of their handle.
     ///
     /// `density_dpi` — the screen density in dots-per-inch as returned by
-    /// `AConfiguration_getDensity()`.  Pass `0` or a negative value to fall
-    /// back to the baseline density (160 dpi).
+    /// `AConfiguration_getDensity()`.  Pass `0`, a negative value, or Android's
+    /// sentinel values (`ACONFIGURATION_DENSITY_ANY = 0xfffe`,
+    /// `ACONFIGURATION_DENSITY_NONE = 0xffff`) to fall back to the baseline
+    /// density (160 dpi).
     pub fn from_window(window: &NativeWindow, density_dpi: i32) -> Self {
-        let density = if density_dpi > 0 {
+        let density = if density_dpi > 0 && density_dpi < 0xfffe {
             density_dpi
         } else {
             DENSITY_DEFAULT
         };
         let scale_factor = density as f32 / DENSITY_DEFAULT as f32;
+        Self::from_window_scale(window, scale_factor)
+    }
+
+    /// Create an `AndroidDisplay` using an explicit logical scale factor (as
+    /// reported by Android's `DisplayMetrics.density`).
+    pub fn from_window_scale(window: &NativeWindow, scale_factor: f32) -> Self {
+        let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
         let id = PRIMARY_DISPLAY_ID;
 
         Self {
@@ -280,7 +293,7 @@ impl fmt::Display for AndroidDisplay {
         let ps = self.physical_size();
         write!(
             f,
-            "AndroidDisplay({}×{}px, {:.1}×, {}dpi)",
+            "AndroidDisplay({}×{}px, {:.3}×, {}dpi)",
             ps.width.0,
             ps.height.0,
             self.scale_factor,

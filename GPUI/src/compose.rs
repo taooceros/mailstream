@@ -234,8 +234,8 @@ enum Outgoing {
 }
 
 /// The accent Send button with its shortcut; dimmed and inert while sending.
-fn send_button(id: &'static str, sending: bool, show_shortcut: bool, p: &Palette) -> Button {
-    button(id, if sending { "Sending…" } else { "Send" }, ButtonKind::Primary, ControlSize::Regular, !sending, p).when(
+fn send_button(id: &'static str, sending: bool, show_shortcut: bool, compact: bool, p: &Palette) -> Button {
+    button(id, if sending { "Sending…" } else { "Send" }, ButtonKind::Primary, ControlSize::regular(compact), !sending, p).when(
         !sending && show_shortcut,
         |b| {
             b.child(
@@ -830,13 +830,16 @@ impl Compose {
     // MARK: Rendering
 
     /// One header line over a hairline: a right-aligned label, then the field.
-    fn header_row(&self, label: Option<&'static str>, invalid: bool, p: &Palette) -> Div {
+    fn header_row(&self, label: Option<&'static str>, invalid: bool, compact: bool, p: &Palette) -> Div {
+        let row_h = if compact { 44. } else { metrics::ROW_HEIGHT };
+        let margin = if compact { design::compact::READER_PADDING } else { metrics::MARGIN };
+        let label_w = if compact { 56. } else { metrics::LABEL_WIDTH };
         div()
             .relative()
             .flex_shrink_0()
-            .h(px(metrics::ROW_HEIGHT))
-            .ml(px(metrics::MARGIN))
-            .pr(px(metrics::MARGIN))
+            .h(px(row_h))
+            .ml(px(margin))
+            .pr(px(margin))
             .flex()
             .items_center()
             .gap(px(8.))
@@ -846,7 +849,7 @@ impl Compose {
                 row.child(
                     div()
                         .flex_shrink_0()
-                        .w(px(metrics::LABEL_WIDTH))
+                        .w(px(label_w))
                         .flex()
                         .justify_end()
                         .text_color(if invalid { p.danger } else { p.muted })
@@ -855,7 +858,7 @@ impl Compose {
             })
     }
 
-    fn render_from(&self, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_from(&self, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let options = from_options(&self.accounts);
         let selected = selected_from_option(&options, self.from.as_deref());
         let (title, address): (SharedString, Option<SharedString>) = match (selected, &self.from) {
@@ -942,10 +945,10 @@ impl Compose {
             )
             .with_priority(1)
         });
-        self.header_row(Some("From"), false, p).child(picker).children(menu)
+        self.header_row(Some("From"), false, compact, p).child(picker).children(menu)
     }
 
-    fn render_recipients(&self, field: Field, window: &Window, p: &'static Palette, cx: &mut Context<Self>) -> Div {
+    fn render_recipients(&self, field: Field, compact: bool, window: &Window, p: &'static Palette, cx: &mut Context<Self>) -> Div {
         let input = self.input(field);
         let suggestions = self
             .suggestions
@@ -1002,7 +1005,7 @@ impl Compose {
                 )
                 .with_priority(1)
             });
-        self.header_row(Some(field.label()), self.invalid.contains(&field), p)
+        self.header_row(Some(field.label()), self.invalid.contains(&field), compact, p)
             .key_context(RECIPIENTS)
             .child(div().flex_1().min_w_0().child(input::field(input)))
             .children(suggestions)
@@ -1052,6 +1055,8 @@ fn menu(p: &Palette) -> Div {
 impl Render for Compose {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = design::palette(window.appearance());
+        let compact = f32::from(window.viewport_size().width) < crate::design::layout::COMPACT_WIDTH;
+        let ts = design::type_scale(compact);
         let sending = matches!(self.status, Status::Sending);
         let attached = self.attachments.render("compose-attachment", !sending, &Self::remover(cx), p);
         div()
@@ -1075,7 +1080,7 @@ impl Render for Compose {
             .flex()
             .flex_col()
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(ts.body))
             .text_color(p.text)
             .child(
                 div()
@@ -1083,10 +1088,10 @@ impl Render for Compose {
                     .flex()
                     .flex_col()
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
-                    .child(self.render_from(p, cx))
-                    .child(self.render_recipients(Field::To, window, p, cx))
-                    .child(self.render_recipients(Field::Cc, window, p, cx).when(!self.show_bcc, |row| {
-                        row.child(button("show-bcc", "Bcc", ButtonKind::Plain(p.accent), ControlSize::Small, true, p).on_click(cx.listener(
+                    .child(self.render_from(compact, p, cx))
+                    .child(self.render_recipients(Field::To, compact, window, p, cx))
+                    .child(self.render_recipients(Field::Cc, compact, window, p, cx).when(!self.show_bcc, |row| {
+                        row.child(button("show-bcc", "Bcc", ButtonKind::Plain(p.accent), ControlSize::small(compact), true, p).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.show_bcc = true;
                                 window.focus(&this.bcc.focus_handle(cx), cx);
@@ -1094,19 +1099,20 @@ impl Render for Compose {
                             },
                         )))
                     }))
-                    .when(self.show_bcc, |d| d.child(self.render_recipients(Field::Bcc, window, p, cx)))
+                    .when(self.show_bcc, |d| d.child(self.render_recipients(Field::Bcc, compact, window, p, cx)))
                     .child(
-                        self.header_row(None, false, p)
-                            .h(px(metrics::SUBJECT_HEIGHT))
-                            .text_size(px(text::PANE_TITLE))
+                        self.header_row(None, false, compact, p)
+                            .h(px(if compact { 50. } else { metrics::SUBJECT_HEIGHT }))
+                            .text_size(px(ts.pane_title))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(div().flex_1().min_w_0().child(input::field(&self.subject))),
                     )
                     .when_some(attached, |d, attached| {
+                        let margin = if compact { design::compact::READER_PADDING } else { metrics::MARGIN };
                         d.child(
                             div()
-                                .ml(px(metrics::MARGIN))
-                                .pr(px(metrics::MARGIN))
+                                .ml(px(margin))
+                                .pr(px(margin))
                                 .py(px(space::S8))
                                 .border_b_1()
                                 .border_color(p.line)
@@ -1134,10 +1140,10 @@ impl Render for Compose {
                     }))
                     .flex_1()
                     .min_h_0()
-                    .pl(px(metrics::MARGIN - AREA_INSET))
-                    .pr(px(metrics::MARGIN - AREA_INSET))
+                    .pl(px(if compact { design::compact::READER_PADDING } else { metrics::MARGIN } - AREA_INSET))
+                    .pr(px(if compact { design::compact::READER_PADDING } else { metrics::MARGIN } - AREA_INSET))
                     .py(px(metrics::BODY_PADDING))
-                    .text_size(px(text::READING))
+                    .text_size(px(ts.reading))
                     .line_height(relative(editor::LEADING))
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
                     .child(input::editor(&self.body).full()),
@@ -1543,7 +1549,7 @@ impl Render for ReplyBox {
                     .gap(px(5.))
                     .pt(px(8.))
                     .px(px(metrics::REPLY_PADDING))
-                    .text_size(px(text::FOOTNOTE))
+                    .text_size(px(design::type_scale(f32::from(window.viewport_size().width) < crate::design::layout::COMPACT_WIDTH).footnote))
                     .text_color(p.muted)
                     .child(
                         div()
@@ -1564,7 +1570,7 @@ impl Render for ReplyBox {
                     .pl(px(metrics::REPLY_PADDING - AREA_INSET))
                     .pr(px(metrics::REPLY_PADDING - AREA_INSET))
                     .py(px(8.))
-                    .text_size(px(text::READING))
+                    .text_size(px(design::type_scale(f32::from(window.viewport_size().width) < crate::design::layout::COMPACT_WIDTH).reading))
                     .line_height(relative(editor::LEADING))
                     .text_color(p.text)
                     .when(sending, |d| d.opacity(metrics::SENT_TEXT_OPACITY))
@@ -1592,15 +1598,15 @@ impl Render for ReplyBox {
                             })),
                     )
                     .child(
-                        button("reply-discard", "Discard", ButtonKind::Secondary, ControlSize::Regular, !sending, p)
+                        button("reply-discard", "Discard", ButtonKind::Secondary, ControlSize::regular(f32::from(window.viewport_size().width) < crate::design::layout::COMPACT_WIDTH), !sending, p)
                             .when(!sending, |b| {
                                 b.on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ReplyEvent::Discarded)))
                             }),
                     )
                     .child({
-                        let show_shortcut =
-                            !cfg!(target_os = "android") && f32::from(window.viewport_size().width) >= crate::design::layout::COMPACT_WIDTH;
-                        send_button("reply-send", sending, show_shortcut, p)
+                        let compact = f32::from(window.viewport_size().width) < crate::design::layout::COMPACT_WIDTH;
+                        let show_shortcut = !cfg!(target_os = "android") && !compact;
+                        send_button("reply-send", sending, show_shortcut, compact, p)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.send(window, cx)))
                     }),
             )

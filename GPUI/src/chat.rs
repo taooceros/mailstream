@@ -37,8 +37,9 @@ use gpui::{
 
 use crate::avatars;
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, button, capsule, centered_note, hairline, icon_button, island, list_header, list_row,
-    mark_dot, notice, page_scrim, page_toolbar, pill, raised_capsule, row_layout, search_field,
+    ButtonKind, ControlSize, Tone, button, capsule, centered_note, compact_capsule, compact_icon_button, hairline,
+    icon_button, island, list_header, list_row, mark_dot, notice, page_scrim, page_toolbar, pill, raised_capsule,
+    row_layout, search_field_for,
 };
 use crate::design::{self, AttachmentKind, Palette, chat as metrics, layout, list as rows, log as log_metrics, radius, space, stroke, text};
 use crate::message_log;
@@ -2090,7 +2091,7 @@ impl Render for ChatPane {
             .relative()
             .size_full()
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(design::type_scale(f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH).body))
             .text_color(p.text)
             .map(|d| match page {
                 // Beside the list, which is as wide as mail's; the gap between them moves its edge
@@ -2123,9 +2124,10 @@ impl ChatPane {
         } else {
             (unread > 0).then(|| format!("{unread} unread").into())
         };
+        let ts = design::type_scale(compact);
         let actions = if compact {
-            capsule(p).child(
-                icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
+            compact_capsule(p).child(
+                compact_icon_button("chat-refresh", Icon::Refresh, "Refresh", true, p.glyph)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.refresh(&Refresh, window, cx))),
             )
         } else {
@@ -2140,8 +2142,8 @@ impl ChatPane {
                 )
         };
         let leading = compact.then(|| {
-            capsule(p).child(
-                icon_button("chat-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
+            compact_capsule(p).child(
+                compact_icon_button("chat-drawer", Icon::Menu, "Mailboxes", true, p.glyph)
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(ChatOpenDrawer))),
             )
         });
@@ -2151,7 +2153,7 @@ impl ChatPane {
             div()
                 .flex_shrink_0()
                 .h(px(design::compact::TOP_BAR_HEIGHT))
-                .px(px(space::S10))
+                .px(px(space::S12))
                 .flex()
                 .items_center()
                 .gap(px(space::S10))
@@ -2165,12 +2167,13 @@ impl ChatPane {
                         .child(
                             div()
                                 .truncate()
-                                .text_size(px(design::compact::HEADER_TITLE))
+                                .text_size(px(ts.header_title))
+                                .line_height(relative(1.15))
                                 .font_weight(FontWeight::BOLD)
                                 .child(title),
                         )
                         .when_some(subtitle, |d, subtitle| {
-                            d.child(div().truncate().text_size(px(text::CAPTION)).text_color(p.muted).child(subtitle))
+                            d.child(div().truncate().text_size(px(ts.caption)).text_color(p.muted).child(subtitle))
                         }),
                 )
                 .child(actions)
@@ -2184,7 +2187,7 @@ impl ChatPane {
                 .flex()
                 .flex_col()
                 .child(header)
-                .child(search_field("chat-search", search_focused, input::field(&self.search), cx.listener(Self::cancel_search), p))
+                .child(search_field_for("chat-search", search_focused, compact, input::field(&self.search), cx.listener(Self::cancel_search), p))
                 .child(hairline(p))
                 .child(div().flex_1().min_h_0().child(self.render_spaces(compact, p, cx))),
         )
@@ -2230,7 +2233,7 @@ impl ChatPane {
                     if range.end + metrics::MORE_AHEAD >= this.visible.len() {
                         this.load_more(cx);
                     }
-                    range.map(|position| this.render_row(position, p, cx)).collect::<Vec<_>>()
+                    range.map(|position| this.render_row(position, compact, p, cx)).collect::<Vec<_>>()
                 }),
             )
             .track_scroll(&self.scroll)
@@ -2243,16 +2246,18 @@ impl ChatPane {
     }
 
     /// The `position`th space in view.
-    fn render_row(&self, position: usize, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&self, position: usize, compact: bool, p: &'static Palette, cx: &mut Context<Self>) -> AnyElement {
         let space = &self.spaces[self.visible[position]];
         let key = space.key();
         let selected = self.highlight.as_ref() == Some(&key);
         let unread = space.unread;
         let next = self.visible.get(position + 1).map(|&next| self.spaces[next].key());
         let rule = next.is_some_and(|next| self.highlight.as_ref() != Some(&next));
+        let ts = design::type_scale(compact);
         let title = div()
             .min_w_0()
             .truncate()
+            .when(compact, |d| d.text_size(px(ts.reading)))
             .font_weight(if unread { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
             .child(space.title.clone());
         let meta = div()
@@ -2260,16 +2265,22 @@ impl ChatPane {
             .flex()
             .items_center()
             .gap(px(6.))
-            .text_size(px(text::FOOTNOTE))
+            .text_size(px(if compact { ts.caption } else { text::FOOTNOTE }))
             .text_color(if unread { p.accent } else { p.muted })
             .when_some(self.account_color(&space.account), |d, color| d.child(mark_dot(color)))
             .child(space.when.clone());
-        let subtitle = div().min_w_0().truncate().text_color(p.muted).child(space.snippet.clone());
+        let subtitle = div()
+            .min_w_0()
+            .truncate()
+            .when(compact, |d| d.text_size(px(ts.footnote)))
+            .text_color(p.muted)
+            .child(space.snippet.clone());
         list_row(ElementId::Name(format!("chat-row:{}:{}", space.account, space.id).into()), selected, rule, p)
+            .when(compact, |d| d.h(px(design::compact::bundle_row_height())))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.open(key.clone(), window, cx)))
             .child(row_layout(
                 unread,
-                avatars::avatar(&space.avatar_email, &space.avatar, rows::AVATAR, p, cx),
+                avatars::avatar(&space.avatar_email, &space.avatar, if compact { design::compact::AVATAR } else { rows::AVATAR }, p, cx),
                 title,
                 meta,
                 subtitle,
@@ -2542,7 +2553,7 @@ impl ChatPane {
                 div()
                     .max_w_full()
                     .min_w_0()
-                    .text_size(px(text::READING))
+                    .text_size(px(design::type_scale(f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH).reading))
                     .line_height(relative(text::READING_LEADING))
                     .when(matches!(message.status, Status::Failed(_)), |d| d.text_color(p.muted))
                     .child(message.body.element(&format!("{tag}{}", message.id), p))

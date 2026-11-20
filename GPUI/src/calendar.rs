@@ -37,7 +37,7 @@ use gpui::{
 };
 use mailstream::CalendarAccount;
 
-use crate::design::{self, layout, text};
+use crate::design::{self, layout};
 use crate::split;
 use crate::swipe;
 use crate::engine::engine;
@@ -1142,7 +1142,7 @@ impl Render for CalendarPane {
             .flex()
             .gap(px(layout::GAP))
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(design::type_scale(f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH).body))
             .text_color(p.text)
             .map(|d| match detail {
                 // Beside the list, which keeps its share of the room; the gap between them moves

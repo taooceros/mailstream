@@ -28,9 +28,10 @@ use crate::avatars;
 use crate::bench::{Bench, Turn};
 use crate::compose::{ComposeColumn, ResizeColumn};
 use crate::controls::{
-    ButtonKind, ControlSize, Tone, bottom_scrim, button, capsule, centered_note, hairline, icon_avatar, icon_button, island,
-    lifted_card, list_row, mark_dot, notice, notice_close, own_presses, pill, raised_capsule, row_layout, scrim, search_field,
-    section_header, tag, title_bar, unread_dot,
+    ButtonKind, ControlSize, Tone, bottom_scrim, button, capsule, centered_note, compact_capsule, compact_icon_button,
+    hairline, icon_avatar, icon_button, island, lifted_card, list_row, mark_dot, notice, notice_close, own_presses,
+    pill, pill_for, raised_capsule, row_layout, scrim, search_field, section_header_for, tag, tag_for, title_bar,
+    unread_dot,
 };
 #[cfg(target_os = "macos")]
 use crate::controls::{segment, segmented};
@@ -194,7 +195,7 @@ impl Render for MailApp {
             .flex()
             .when(compact, |d| d.flex_col().pt(px(safe_top)).when(!show_bottom_bar, |d| d.pb(px(safe_bottom))))
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(design::type_scale(compact).body))
             .text_color(p.text)
             // The window behind the islands: over a blur (an older Mac, a Linux desktop that blurs)
             // a wash, nothing over the Mac's glass, elsewhere opaque.
@@ -413,7 +414,7 @@ impl MailApp {
                             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer.id(), cx))
                             .child(match *kind {
                                 BundleKind::Mail(category) => self.render_bundle(category, compact, p, cx),
-                                BundleKind::Chat => self.render_chat_bundle(p, cx),
+                                BundleKind::Chat => self.render_chat_bundle(compact, p, cx),
                             })
                             .into_any_element(),
                     )

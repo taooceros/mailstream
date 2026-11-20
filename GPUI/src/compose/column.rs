@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use super::{ATTACH_TIP, Attach, CONTEXT, Cancel, Close, Compose, ComposeMode, DraftEvent, Send, send_button};
-use crate::controls::{capsule, hairline, icon_button, island, pill, raised_capsule, title_bar};
+use crate::controls::{capsule, compact_capsule, compact_icon_button, hairline, icon_button, island, pill, raised_capsule, title_bar};
 use crate::design::{self, Palette, compose as metrics, layout, radius, space, text};
 use crate::icons::{Icon, icon};
 use mailstream::Account;
@@ -409,16 +409,21 @@ impl ComposeColumn {
         let send_draft = draft.clone();
         let attach_draft = draft.clone();
         let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
+        let ts = design::type_scale(compact);
         let show_shortcut = !compact && !cfg!(target_os = "android");
+        let bar_capsule = |p: &'static Palette| if compact { compact_capsule(p) } else { capsule(p) };
+        let bar_icon = |id: &'static str, glyph: Icon, tip: &'static str, enabled: bool, color: gpui::Hsla| {
+            if compact { compact_icon_button(id, glyph, tip, enabled, color) } else { icon_button(id, glyph, tip, enabled, color) }
+        };
         bar.flex_shrink_0()
-            .h(px(layout::HEADER_HEIGHT))
-            .px(px(space::S10))
+            .h(px(if compact { design::compact::TOP_BAR_HEIGHT } else { layout::HEADER_HEIGHT }))
+            .px(px(if compact { space::S12 } else { space::S10 }))
             .flex()
             .items_center()
             .gap(px(space::S8))
             .child(
-                capsule(p)
-                    .child(icon_button("compose-close", Icon::Close, "Close Draft (⌘W)", !sending, p.glyph).on_click(
+                bar_capsule(p)
+                    .child(bar_icon("compose-close", Icon::Close, "Close Draft (⌘W)", !sending, p.glyph).on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.close_tab(this.active, window, cx)),
                     ))
                     .when(!compact, |d| {
@@ -433,12 +438,12 @@ impl ComposeColumn {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(if compact { design::compact::HEADER_TITLE } else { text::PANE_TITLE }))
+                    .text_size(px(if compact { ts.header_title } else { text::PANE_TITLE }))
                     .font_weight(if compact { FontWeight::BOLD } else { FontWeight::SEMIBOLD })
                     .child(title),
             )
             .child(
-                capsule(p)
+                bar_capsule(p)
                     .when(self.tabs.len() == 1 && !compact, |d| d.child(new_draft_button("compose-new", p, cx)))
                     .when(!self.floating && !compact, |d| {
                         d.child(
@@ -452,12 +457,12 @@ impl ComposeColumn {
                                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_floating(cx))),
                         )
                     })
-                    .child(icon_button("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.glyph).on_click(
+                    .child(bar_icon("compose-attach", Icon::Attachment, ATTACH_TIP, !sending, p.glyph).on_click(
                         move |_, window, cx| attach_draft.update(cx, |draft, cx| draft.pick_files(&Attach, window, cx)),
                     )),
             )
             .child(
-                send_button("compose-send", sending, show_shortcut, p)
+                send_button("compose-send", sending, show_shortcut, compact, p)
                     .on_click(move |_, window, cx| send_draft.update(cx, |draft, cx| draft.send(window, cx))),
             )
     }
@@ -540,7 +545,7 @@ impl Render for ComposeColumn {
             .flex()
             .flex_col()
             .font_family(design::ui_font())
-            .text_size(px(text::BODY))
+            .text_size(px(design::type_scale(compact).body))
             .text_color(p.text)
             .on_drag_move(cx.listener(Self::move_float))
             .on_drag_move(cx.listener(Self::size_float))

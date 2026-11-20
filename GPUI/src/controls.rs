@@ -49,13 +49,25 @@ pub enum ButtonKind {
 pub enum ControlSize {
     Small,
     Regular,
+    CompactSmall,
+    CompactRegular,
 }
 
 impl ControlSize {
+    pub fn small(compact: bool) -> Self {
+        if compact { Self::CompactSmall } else { Self::Small }
+    }
+
+    pub fn regular(compact: bool) -> Self {
+        if compact { Self::CompactRegular } else { Self::Regular }
+    }
+
     pub fn height(self) -> f32 {
         match self {
             ControlSize::Small => 22.,
             ControlSize::Regular => 28.,
+            ControlSize::CompactSmall => design::compact::BUTTON_SMALL_HEIGHT,
+            ControlSize::CompactRegular => design::compact::BUTTON_HEIGHT,
         }
     }
 
@@ -63,6 +75,8 @@ impl ControlSize {
         match self {
             ControlSize::Small => space::S8,
             ControlSize::Regular => space::S12,
+            ControlSize::CompactSmall => space::S10,
+            ControlSize::CompactRegular => 14.,
         }
     }
 
@@ -70,6 +84,17 @@ impl ControlSize {
         match self {
             ControlSize::Small => text::FOOTNOTE,
             ControlSize::Regular => text::BODY,
+            ControlSize::CompactSmall => design::type_scale(true).footnote,
+            ControlSize::CompactRegular => design::type_scale(true).body,
+        }
+    }
+
+    fn icon(self) -> f32 {
+        match self {
+            ControlSize::Small => icon_size::INLINE,
+            ControlSize::Regular => 14.,
+            ControlSize::CompactSmall => 14.,
+            ControlSize::CompactRegular => 16.,
         }
     }
 }
@@ -127,7 +152,7 @@ pub fn icon_label_button(
                 .text_size(px(size.font()))
                 .font_weight(if filled { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
                 .text_color(ink)
-                .children(glyph.map(|glyph| icon(glyph, if size == ControlSize::Small { icon_size::INLINE } else { 14. }, ink)))
+                .children(glyph.map(|glyph| icon(glyph, size.icon(), ink)))
                 .child(label.into()),
         )
 }
@@ -143,6 +168,14 @@ pub fn icon_button(id: impl Into<ElementId>, glyph: Icon, tip: impl Into<SharedS
         .child(icon(glyph, icon_size::TOOLBAR, if enabled { color } else { design::tint(color, 0.35) }))
 }
 
+/// Compact (phone / Android) round icon button sized for touch ergonomics and Material 3 visual balance.
+pub fn compact_icon_button(id: impl Into<ElementId>, glyph: Icon, tip: impl Into<SharedString>, enabled: bool, color: Hsla) -> Button {
+    kit_button(Button::new(id).ghost().tooltip(tip), enabled)
+        .size(px(design::compact::ICON_BUTTON))
+        .p_0()
+        .rounded_full()
+        .child(icon(glyph, design::compact::TOOLBAR_ICON, if enabled { color } else { design::tint(color, 0.35) }))
+}
 
 /// A labeled button inside a toolbar [`capsule`] (`MailCapsuleButton`): `icon::BUTTON` tall and
 /// fully round like [`icon_button`], with an optional `leading` mark (such as [`color_dots`]),
@@ -222,6 +255,11 @@ pub fn capsule(p: &Palette) -> Div {
         .border(px(stroke::HAIRLINE))
         .border_color(p.capsule_rim)
         .shadow(p.capsule_shadow.clone())
+}
+
+/// Compact (phone / Android) toolbar capsule sized to hold [`compact_icon_button`]s comfortably.
+pub fn compact_capsule(p: &Palette) -> Div {
+    capsule(p).h(px(design::compact::CAPSULE_HEIGHT))
 }
 
 /// The capsule floating over a row (its hover actions, `RaisedCapsule`): lit from above, a hairline
@@ -360,17 +398,34 @@ pub fn search_field(
     on_escape: impl Fn(&Escape, &mut Window, &mut App) + 'static,
     p: &Palette,
 ) -> Div {
+    search_field_for(id, focused, false, field, on_escape, p)
+}
+
+/// Like [`search_field`], using touch-friendly height and compact typography when `compact` is set.
+pub fn search_field_for(
+    id: impl Into<ElementId>,
+    focused: bool,
+    compact: bool,
+    field: impl IntoElement,
+    on_escape: impl Fn(&Escape, &mut Window, &mut App) + 'static,
+    p: &Palette,
+) -> Div {
+    let ts = design::type_scale(compact);
+    let height = if compact { design::compact::SEARCH_HEIGHT } else { 28. };
+    let icon_sz = if compact { 17. } else { 14. };
+    let lh = if compact { (ts.body * 1.35).round() } else { 18. };
     div().flex_shrink_0().px(px(space::S12)).pb(px(space::S10)).child(
         field_frame(focused, true, p)
             .id(id)
-            .h(px(28.))
-            .pl(px(space::S10))
-            .pr(px(space::S8))
-            .gap(px(space::S6))
-            .line_height(px(18.))
+            .h(px(height))
+            .pl(px(if compact { space::S12 } else { space::S10 }))
+            .pr(px(if compact { space::S10 } else { space::S8 }))
+            .gap(px(if compact { space::S8 } else { space::S6 }))
+            .text_size(px(ts.body))
+            .line_height(px(lh))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(on_escape)
-            .child(icon(Icon::Search, 14., p.muted))
+            .child(icon(Icon::Search, icon_sz, p.muted))
             .child(div().flex_1().min_w_0().child(field)),
     )
 }
@@ -440,15 +495,21 @@ pub fn hairline(p: &Palette) -> Div {
 /// on a wash of it, fully round; neutral (the secondary label) without a color. gpui-kit's [`Tag`]
 /// in the app's metrics, without its rim.
 pub fn tag(label: impl Into<SharedString>, color: Option<Hsla>, p: &Palette) -> Tag {
+    tag_for(label, color, false, p)
+}
+
+/// Like [`tag`], using compact Android typography and height when `compact` is set.
+pub fn tag_for(label: impl Into<SharedString>, color: Option<Hsla>, compact: bool, p: &Palette) -> Tag {
     let color = color.unwrap_or(p.muted);
+    let ts = design::type_scale(compact);
     Tag::custom(design::tint(color, tag_metrics::TINT), color, gpui::transparent_black())
         .rounded_full()
         .border_0()
         .flex_shrink_0()
-        .h(px(tag_metrics::HEIGHT))
-        .px(px(tag_metrics::PADDING))
+        .h(px(if compact { (design::compact::TAG_HEIGHT * design::compact::font_scale()).max(design::compact::TAG_HEIGHT).round() } else { tag_metrics::HEIGHT }))
+        .px(px(if compact { 7. } else { tag_metrics::PADDING }))
         .py_0()
-        .text_size(px(text::TAG))
+        .text_size(px(ts.tag))
         .font_weight(FontWeight::SEMIBOLD)
         .child(label.into())
 }
@@ -456,17 +517,23 @@ pub fn tag(label: impl Into<SharedString>, color: Option<Hsla>, p: &Palette) -> 
 /// A pill naming a thing (`Pill`): an attachment, a recipient, an account; `leading` (a glyph or a
 /// mark) before its label in the glyph tone, fully round on the quiet fill.
 pub fn pill(label: impl Into<SharedString>, leading: Option<AnyElement>, p: &Palette) -> Div {
+    pill_for(label, leading, false, p)
+}
+
+/// Like [`pill`], using compact Android typography and height when `compact` is set.
+pub fn pill_for(label: impl Into<SharedString>, leading: Option<AnyElement>, compact: bool, p: &Palette) -> Div {
+    let ts = design::type_scale(compact);
     div()
         .flex_shrink_0()
-        .h(px(22.))
-        .pl(px(if leading.is_some() { 7. } else { 9. }))
-        .pr(px(9.))
+        .h(px(if compact { (design::compact::PILL_HEIGHT * design::compact::chrome_font_scale()).max(design::compact::PILL_HEIGHT).round() } else { 22. }))
+        .pl(px(if leading.is_some() { if compact { 9. } else { 7. } } else if compact { 11. } else { 9. }))
+        .pr(px(if compact { 11. } else { 9. }))
         .flex()
         .items_center()
-        .gap(px(5.))
+        .gap(px(if compact { 6. } else { 5. }))
         .rounded_full()
         .bg(p.chip)
-        .text_size(px(text::FOOTNOTE))
+        .text_size(px(if compact { ts.caption } else { text::FOOTNOTE }))
         .font_weight(FontWeight::MEDIUM)
         .text_color(p.glyph)
         .children(leading)
@@ -648,6 +715,7 @@ pub struct Expander {
     id: ElementId,
     expanded: bool,
     small: bool,
+    compact: bool,
     leading: Option<AnyElement>,
     title: SharedString,
     title_color: Option<Hsla>,
@@ -668,6 +736,7 @@ pub fn expander(
         id: id.into(),
         expanded,
         small: false,
+        compact: false,
         leading: None,
         title: title.into(),
         title_color: None,
@@ -682,6 +751,11 @@ pub fn expander(
 impl Expander {
     pub fn small(mut self) -> Self {
         self.small = true;
+        self
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
         self
     }
 
@@ -729,8 +803,15 @@ impl RenderOnce for Expander {
             .read(cx)
             .clone();
         let focused = focus.is_focused(window);
-        let height = if self.small { design::calendar::LIST_GROUP + 2. } else { design::calendar::LIST_ROW - 2. };
-        let font_size = if self.small { text::TAG } else { text::FOOTNOTE };
+        let ts = design::type_scale(self.compact);
+        let height = if self.compact {
+            design::compact::SECTION_HEIGHT
+        } else if self.small {
+            design::calendar::LIST_GROUP + 2.
+        } else {
+            design::calendar::LIST_ROW - 2.
+        };
+        let font_size = if self.small { ts.tag } else { ts.footnote };
         let ink = self.title_color.unwrap_or(if self.small { p.muted } else { p.text });
         let expanded = self.expanded;
         let on_toggle = self.on_toggle.map(std::rc::Rc::new);
@@ -1083,14 +1164,20 @@ pub fn centered_note(note: impl Into<SharedString>, p: &Palette) -> Div {
 /// A group's title in a list (a date, "Waiting on you"), inside the rows' inset: small, bold,
 /// secondary, at the foot of its `SECTION_HEIGHT`; with a `count`, the title takes the waiting color and the count follows.
 pub fn section_header(title: impl Into<SharedString>, count: Option<usize>, p: &Palette) -> Div {
+    section_header_for(title, count, false, p)
+}
+
+/// Like [`section_header`], using compact Android typography and height when `compact` is set.
+pub fn section_header_for(title: impl Into<SharedString>, count: Option<usize>, compact: bool, p: &Palette) -> Div {
+    let ts = design::type_scale(compact);
     div()
-        .h(px(metrics::SECTION_HEIGHT))
+        .h(px(if compact { (design::compact::SECTION_HEIGHT * design::compact::chrome_font_scale()).round() } else { metrics::SECTION_HEIGHT }))
         .flex()
         .items_end()
         .gap(px(space::S8))
-        .pb(px(5.))
+        .pb(px(if compact { 6. } else { 5. }))
         .pl(px(metrics::SECTION_X - metrics::INSET))
-        .text_size(px(text::FOOTNOTE))
+        .text_size(px(ts.footnote))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(p.muted)
         .child(div().when(count.is_some(), |d| d.text_color(p.waiting)).child(title.into()))

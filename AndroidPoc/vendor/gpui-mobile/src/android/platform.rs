@@ -591,7 +591,7 @@ impl AndroidPlatform {
         )?;
         state.windows.push(Arc::clone(&window));
         log::info!(
-            "AndroidPlatform::open_window — id={:#x} scale={:.1}",
+            "AndroidPlatform::open_window — id={:#x} scale={:.3}",
             window.id(),
             scale_factor
         );
@@ -638,7 +638,12 @@ impl AndroidPlatform {
         native_window: &ndk::native_window::NativeWindow,
         asset_manager: &ndk::asset::AssetManager,
     ) {
-        let mut display = AndroidDisplay::from_activity(native_window, asset_manager);
+        let mut display = match super::jni::query_display_metrics_via_jni() {
+            Some((density, _font_scale)) => {
+                AndroidDisplay::from_window_scale(native_window, density)
+            }
+            None => AndroidDisplay::from_activity(native_window, asset_manager),
+        };
         if let Some(hz) = super::jni::query_refresh_rate_via_jni() {
             display = display.with_refresh_rate_hz(hz);
             if let Some(interval) = display.refresh_interval_duration() {

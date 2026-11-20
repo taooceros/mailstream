@@ -504,6 +504,95 @@ pub(crate) fn query_refresh_rate_via_jni() -> Option<f32> {
     .flatten()
 }
 
+/// Query exact `DisplayMetrics.density` and `Configuration.fontScale` via JNI.
+///
+/// Prefer this over `AConfiguration_getDensity()`, which can report bucketed or
+/// sentinel values (`ANY`/`NONE`) and does not expose `fontScale`.
+pub(crate) fn query_display_metrics_via_jni() -> Option<(f32, f32)> {
+    with_env(|env| {
+        let act = activity(env)?;
+        let resources = match env
+            .call_method(
+                &act,
+                jni::jni_str!("getResources"),
+                jni::jni_sig!("()Landroid/content/res/Resources;"),
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            Ok(r) if !r.is_null() => r,
+            _ => {
+                env.exception_clear();
+                return Ok(None);
+            }
+        };
+        let metrics = match env
+            .call_method(
+                &resources,
+                jni::jni_str!("getDisplayMetrics"),
+                jni::jni_sig!("()Landroid/util/DisplayMetrics;"),
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            Ok(m) if !m.is_null() => m,
+            _ => {
+                env.exception_clear();
+                return Ok(None);
+            }
+        };
+        let density = match env
+            .get_field(&metrics, jni::jni_str!("density"), jni::jni_sig!("F"))
+            .and_then(|v| v.f())
+        {
+            Ok(d) if d.is_finite() && d > 0.0 => d,
+            _ => {
+                env.exception_clear();
+                return Ok(None);
+            }
+        };
+        let font_scale = match env
+            .call_method(
+                &resources,
+                jni::jni_str!("getConfiguration"),
+                jni::jni_sig!("()Landroid/content/res/Configuration;"),
+                &[],
+            )
+            .and_then(|v| v.l())
+        {
+            Ok(cfg) if !cfg.is_null() => match env
+                .get_field(&cfg, jni::jni_str!("fontScale"), jni::jni_sig!("F"))
+                .and_then(|v| v.f())
+            {
+                Ok(s) if s.is_finite() && s > 0.0 => s,
+                _ => {
+                    env.exception_clear();
+                    1.0
+                }
+            },
+            _ => {
+                env.exception_clear();
+                1.0
+            }
+        };
+        log::info!(
+            "AndroidDisplay metrics: density={:.3} fontScale={:.3}",
+            density,
+            font_scale,
+        );
+        Ok(Some((density, font_scale)))
+    })
+    .ok()
+    .flatten()
+}
+
+/// Request a deferred configuration refresh on the native render thread (safe to
+/// call from the Android Java UI thread, e.g. `onConfigurationChanged`).
+pub fn request_config_refresh() {
+    CONFIG_CHANGED_PENDING.store(true, Ordering::Relaxed);
+    super::frame_source::wake();
+}
+
 thread_local! {
     static TOUCH_RESAMPLER: std::cell::RefCell<crate::touch_resampler::TouchResampler> =
         std::cell::RefCell::new(crate::touch_resampler::TouchResampler::new());
@@ -903,9 +992,11 @@ pub fn run_event_loop(app: &AndroidApp) {
                             }
                         }
 
-                        // Trigger GPUI resize so layout adapts to new dimensions.
-                        existing.handle_resize();
-
+                        // Refresh scale factor if density changed while backgrounded,
+                        // then trigger GPUI resize so layout adapts to new dimensions.
+                        if !existing.set_scale_factor(scale_factor) {
+                            existing.handle_resize();
+                        }
                         let cr = app.content_rect();
                         existing.update_safe_area_from_content_rect(
                             cr.left, cr.top, cr.right, cr.bottom,
@@ -916,7 +1007,7 @@ pub fn run_event_loop(app: &AndroidApp) {
                         match platform.open_window(native_window, scale_factor, false) {
                             Ok(win) => {
                                 log::info!(
-                                    "window opened — id={:#x} scale={:.1}",
+                                    "window opened — id={:#x} scale={:.3}",
                                     win.id(),
                                     scale_factor
                                 );
@@ -957,6 +1048,10 @@ pub fn run_event_loop(app: &AndroidApp) {
                 if let Some(native_window) = app.native_window() {
                     platform.update_primary_display(&native_window, &app.asset_manager());
                 }
+                let scale_factor = platform
+                    .primary_display()
+                    .map(|d| d.scale_factor())
+                    .unwrap_or(1.0);
                 let is_dark = query_night_mode_via_jni();
                 if let Some(win) = platform.primary_window() {
                     let appearance = if is_dark {
@@ -965,6 +1060,11 @@ pub fn run_event_loop(app: &AndroidApp) {
                         crate::android::window::WindowAppearance::Light
                     };
                     win.set_appearance(appearance);
+                    if !win.set_scale_factor(scale_factor) {
+                        // Font scale or other config changed without density change:
+                        // force a fresh render pass on the render thread.
+                        super::frame_source::resume();
+                    }
                 }
             }
         }

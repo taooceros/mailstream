@@ -203,16 +203,27 @@ impl HtmlPage {
     /// Lays the page out `width` points wide for `scale` pixels per point (unless it already
     /// is) and gives its height. `None` once closed.
     pub async fn layout(&self, width: f64, scale: f64) -> Option<HtmlSize> {
+        self.layout_scaled(width, scale, 1.0).await
+    }
+
+    /// Like [`HtmlPage::layout`], starting from `base_zoom` (for mobile typography and Android
+    /// `fontScale`) before fitting wider fixed-width content down to the viewport.
+    pub async fn layout_scaled(&self, width: f64, scale: f64, base_zoom: f32) -> Option<HtmlSize> {
         let (reply, answer) = oneshot::channel();
-        send(Job::Layout { id: self.id, width, scale, reply });
+        send(Job::Layout { id: self.id, width, scale, base_zoom, reply });
         answer.await.ok().flatten()
     }
 
     /// The part of the page from `top` down `height` points, laid out `width` points wide, in
     /// pixels at `scale` per point. `None` once closed.
     pub async fn tile(&self, width: f64, scale: f64, top: f64, height: f64) -> Option<HtmlTile> {
+        self.tile_scaled(width, scale, 1.0, top, height).await
+    }
+
+    /// Like [`HtmlPage::tile`], with `base_zoom` matching [`HtmlPage::layout_scaled`].
+    pub async fn tile_scaled(&self, width: f64, scale: f64, base_zoom: f32, top: f64, height: f64) -> Option<HtmlTile> {
         let (reply, answer) = oneshot::channel();
-        send(Job::Tile { id: self.id, width, scale, top, height, reply });
+        send(Job::Tile { id: self.id, width, scale, base_zoom, top, height, reply });
         answer.await.ok().flatten()
     }
 
@@ -295,8 +306,8 @@ enum Job {
     Open { id: u64, html: String, part: HtmlPart, theme: Option<HtmlTheme>, remote: bool, resources: Arc<Resources> },
     LoadRemote { id: u64 },
     Close { id: u64 },
-    Layout { id: u64, width: f64, scale: f64, reply: oneshot::Sender<Option<HtmlSize>> },
-    Tile { id: u64, width: f64, scale: f64, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
+    Layout { id: u64, width: f64, scale: f64, base_zoom: f32, reply: oneshot::Sender<Option<HtmlSize>> },
+    Tile { id: u64, width: f64, scale: f64, base_zoom: f32, top: f64, height: f64, reply: oneshot::Sender<Option<HtmlTile>> },
     LinkAt { id: u64, x: f64, y: f64, reply: oneshot::Sender<Option<String>> },
     Select { id: u64, from: (f64, f64), to: (f64, f64), reply: oneshot::Sender<bool> },
     ClearSelection { id: u64, reply: oneshot::Sender<bool> },
@@ -386,6 +397,7 @@ struct Page {
     /// that fit its content and the height that gave.
     width: f64,
     scale: f64,
+    base_zoom: f32,
     zoom: f32,
     height: f64,
     version: i64,
@@ -468,15 +480,15 @@ impl Pages {
                 self.pages.remove(&id);
                 self.arrived.remove(&id);
             }
-            Job::Layout { id, width, scale, reply } => {
+            Job::Layout { id, width, scale, base_zoom, reply } => {
                 let size = self.pages.get_mut(&id).map(|page| {
-                    page.lay_out(width, scale);
+                    page.lay_out_scaled(width, scale, base_zoom);
                     HtmlSize { height: page.height, version: page.version, blocked: page.gate.blocked() }
                 });
                 let _ = reply.send(size);
             }
-            Job::Tile { id, width, scale, top, height, reply } => {
-                let tile = self.pages.get_mut(&id).map(|page| page.tile(width, scale, top, height));
+            Job::Tile { id, width, scale, base_zoom, top, height, reply } => {
+                let tile = self.pages.get_mut(&id).map(|page| page.tile_scaled(width, scale, base_zoom, top, height));
                 let _ = reply.send(tile);
             }
             Job::LinkAt { id, x, y, reply } => {
@@ -548,6 +560,7 @@ impl Pages {
             page.recolour();
         }
         if page.scale > 0.0 {
+            page.zoom = page.base_zoom;
             page.fit();
         }
         page.version += 1;
@@ -772,6 +785,7 @@ impl Page {
             gate,
             width: 0.0,
             scale: 0.0,
+            base_zoom: 1.0,
             zoom: 1.0,
             height: 0.0,
             version: 0,
@@ -832,15 +846,22 @@ impl Page {
         }
     }
 
+    #[cfg(test)]
     fn lay_out(&mut self, width: f64, scale: f64) {
+        self.lay_out_scaled(width, scale, 1.0);
+    }
+
+    fn lay_out_scaled(&mut self, width: f64, scale: f64, base_zoom: f32) {
         // From now on, a font arriving late only goes to the cache.
         self.gate.shared.shown.get_or_init(Instant::now);
-        if width == self.width && scale == self.scale {
+        let base_zoom = if base_zoom.is_finite() && base_zoom > 0.0 { base_zoom.clamp(MIN_ZOOM, 3.0) } else { 1.0 };
+        if width == self.width && scale == self.scale && (base_zoom - self.base_zoom).abs() <= 1e-4 {
             return;
         }
         self.width = width;
         self.scale = scale;
-        self.zoom = 1.0;
+        self.base_zoom = base_zoom;
+        self.zoom = base_zoom;
         self.fit();
     }
 
@@ -879,8 +900,13 @@ impl Page {
         self.doc.as_mut().set_viewport(viewport);
     }
 
+    #[cfg(test)]
     fn tile(&mut self, width: f64, scale: f64, top: f64, height: f64) -> HtmlTile {
-        self.lay_out(width, scale);
+        self.tile_scaled(width, scale, 1.0, top, height)
+    }
+
+    fn tile_scaled(&mut self, width: f64, scale: f64, base_zoom: f32, top: f64, height: f64) -> HtmlTile {
+        self.lay_out_scaled(width, scale, base_zoom);
         let (pixel_width, pixel_height) = ((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32);
         let zoom = self.zoom as f64;
         let doc = self.doc.as_mut();
@@ -2223,6 +2249,20 @@ mod tests {
         assert!((page.zoom - 0.5).abs() < 0.05, "zoom {}", page.zoom);
         page.lay_out(800.0, 1.0);
         assert_eq!(page.zoom, 1.0);
+    }
+
+    #[test]
+    fn base_zoom_scales_reflowing_html_while_still_fitting_wide_tables() {
+        let mut reflow = page("<p>Short mobile paragraph that wraps cleanly.</p>");
+        reflow.lay_out_scaled(337.0, 3.25, 1.0);
+        let normal_height = reflow.height;
+        reflow.lay_out_scaled(337.0, 3.25, 16.0 / 14.0);
+        assert!((reflow.zoom - (16.0 / 14.0)).abs() < 1e-3, "zoom {}", reflow.zoom);
+        assert!(reflow.height >= normal_height, "scaled {} vs {}", reflow.height, normal_height);
+
+        let mut wide = page(r#"<table width="600" style="width:600px"><tr><td>Fixed newsletter</td></tr></table>"#);
+        wide.lay_out_scaled(300.0, 3.25, 16.0 / 14.0);
+        assert!((wide.zoom - 0.5).abs() < 0.05, "wide table should still shrink to fit: zoom {}", wide.zoom);
     }
 
     #[test]
