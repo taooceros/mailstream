@@ -9,8 +9,8 @@
 //! The registrations live in Application Support/Mailstream/push.json in the Swift engine's
 //! format. Every process with an engine shares the file, so a pass reads it afresh before it
 //! changes anything: a subscription another process made is renewed rather than made again.
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +51,50 @@ pub struct PushConfig {
     pub timing: PushTiming,
 }
 
+
+/// Portable push relay settings synced across paired devices (MS-444), omitting local timing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_client_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gmail_topic: Option<String>,
+}
+
+impl PushSettings {
+    pub fn is_configured(&self) -> bool {
+        PushConfig::configured(&self.url).is_some() && PushConfig::configured(&self.token).is_some()
+    }
+}
+
+const SYNCED_CONFIG_FILE: &str = "push-config.json";
+
+/// Reads push relay settings previously synced from a paired device (`peer-sync/push-config.json`).
+pub(crate) fn read_synced(support_directory: &Path) -> Option<PushSettings> {
+    let path = support_directory.join("peer-sync").join(SYNCED_CONFIG_FILE);
+    let data = std::fs::read(path).ok()?;
+    let settings: PushSettings = serde_json::from_slice(&data).ok()?;
+    settings.is_configured().then_some(settings)
+}
+
+/// Writes push relay settings received from a paired device (`peer-sync/push-config.json`, 0600).
+pub(crate) fn write_synced(support_directory: &Path, settings: &PushSettings) -> Result<(), String> {
+    let dir = support_directory.join("peer-sync");
+    let path = dir.join(SYNCED_CONFIG_FILE);
+    let data = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    crate::files::replace(&dir, &path, &data).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
 /// The socket's and the registrations' clocks; tests shorten them.
 #[derive(Clone, Debug)]
 pub struct PushTiming {
@@ -85,10 +129,30 @@ impl PushConfig {
         text.as_deref().map(str::trim).filter(|text| !text.is_empty())
     }
 
-    fn socket_configured(&self) -> bool {
+    pub(crate) fn socket_configured(&self) -> bool {
         Self::configured(&self.url).is_some() && Self::configured(&self.token).is_some()
     }
 
+    /// Portable relay settings (trimmed; empty strings normalized to `None`).
+    pub(crate) fn settings(&self) -> PushSettings {
+        PushSettings {
+            url: Self::configured(&self.url).map(String::from),
+            token: Self::configured(&self.token).map(String::from),
+            graph_client_state: Self::configured(&self.graph_client_state).map(String::from),
+            gmail_topic: Self::configured(&self.gmail_topic).map(String::from),
+        }
+    }
+
+    /// A copy with `settings` applied, preserving local [`PushTiming`].
+    pub(crate) fn with_settings(&self, settings: &PushSettings) -> Self {
+        Self {
+            url: Self::configured(&settings.url).map(String::from),
+            token: Self::configured(&settings.token).map(String::from),
+            graph_client_state: Self::configured(&settings.graph_client_state).map(String::from),
+            gmail_topic: Self::configured(&settings.gmail_topic).map(String::from),
+            timing: self.timing.clone(),
+        }
+    }
     /// `path` on the relay.
     fn endpoint(&self, path: &str) -> Option<String> {
         Some(format!("{}/{path}", Self::configured(&self.url)?.trim_end_matches('/')))
@@ -169,7 +233,8 @@ enum Ended {
 }
 
 pub struct Push {
-    config: PushConfig,
+    config: Mutex<PushConfig>,
+    timing: PushTiming,
     directory: PathBuf,
     file: PathBuf,
     gmail_root: String,
@@ -180,6 +245,8 @@ pub struct Push {
     started: AtomicBool,
     reconnect: Notify,
     state: Mutex<State>,
+    /// Called after local registration changes so device sync can share them across devices.
+    on_registrations: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Registration passes asked for; one runs at a time, and one asked for during a pass runs
     /// after it.
     requested: AtomicU64,
@@ -197,8 +264,10 @@ impl Push {
     ) -> Self {
         let file = directory.join("push.json");
         let registrations = read(&file);
+        let timing = config.timing.clone();
         Self {
-            config,
+            config: Mutex::new(config),
+            timing,
             directory,
             file,
             gmail_root: endpoints.gmail.root.clone(),
@@ -209,8 +278,59 @@ impl Push {
             started: AtomicBool::new(false),
             reconnect: Notify::new(),
             state: Mutex::new(State { registrations, ..State::default() }),
+            on_registrations: Mutex::new(None),
             requested: AtomicU64::new(0),
             passes: tokio::sync::Mutex::new(0),
+        }
+    }
+
+    fn config(&self) -> PushConfig {
+        self.config.lock().expect("push config").clone()
+    }
+
+    /// Current portable push settings, if configured.
+    pub fn settings(&self) -> Option<PushSettings> {
+        let settings = self.config().settings();
+        settings.is_configured().then_some(settings)
+    }
+
+    /// Registers a listener invoked whenever local push registrations change (MS-444).
+    pub fn on_registrations(&self, handler: impl Fn() + Send + Sync + 'static) {
+        *self.on_registrations.lock().expect("push registrations listener") = Some(Arc::new(handler));
+    }
+
+    fn notify_registrations(&self) {
+        if let Some(handler) = self.on_registrations.lock().expect("push registrations listener").clone() {
+            handler();
+        }
+    }
+
+    /// Applies updated push relay settings at runtime (MS-444): hot-starts `Push` when it was
+    /// previously unconfigured, or reconnects and re-registers when settings changed.
+    pub fn reconfigure(self: &Arc<Self>, settings: PushSettings) {
+        let (changed_socket, configured) = {
+            let mut guard = self.config.lock().expect("push config");
+            let previous = guard.settings();
+            let next = guard.with_settings(&settings);
+            let normalized = next.settings();
+            if previous == normalized {
+                return;
+            }
+            let changed_socket = previous.url != normalized.url || previous.token != normalized.token;
+            let configured = next.socket_configured();
+            *guard = next;
+            (changed_socket, configured)
+        };
+        if !configured {
+            return;
+        }
+        if !self.started.load(Ordering::SeqCst) {
+            self.start();
+        } else {
+            if changed_socket {
+                self.reconnect_now();
+            }
+            self.check();
         }
     }
 
@@ -232,21 +352,21 @@ impl Push {
     /// network comes back, and renews registrations hourly. Nothing without push configuration.
     /// Call on the engine's runtime.
     pub fn start(self: &Arc<Self>) {
-        if !self.config.socket_configured() || self.started.swap(true, Ordering::SeqCst) {
+        if !self.config().socket_configured() || self.started.swap(true, Ordering::SeqCst) {
             return;
         }
         tokio::spawn(self.clone().run_socket());
         let push = self.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(push.config.timing.renewal).await;
+                tokio::time::sleep(push.timing.renewal).await;
                 push.check();
             }
         });
         let push = self.clone();
         tokio::spawn(async move {
             loop {
-                crate::signal::next_wake(push.config.timing.wake_check).await;
+                crate::signal::next_wake(push.timing.wake_check).await;
                 push.reconnect_now();
                 push.check();
             }
@@ -274,10 +394,20 @@ impl Push {
         tokio::spawn(async move { push.settle().await });
     }
 
-    /// Stops a removed account's registration while its token still works: call after the
-    /// account left accounts.json and before its token goes. `api` is the account's, taken
-    /// before it was removed.
-    pub async fn sign_out(&self, account: &str, api: Option<Arc<Api>>) {
+    /// Drops a removed account's registration; when `unregister` is true, also tells Gmail/Graph
+    /// to stop/delete it while its token still works (call after the account left accounts.json
+    /// and before its token goes). When `unregister` is false (a removal synced from another
+    /// device that already stopped it, or a local sign-out while sync is paused), only the local
+    /// `push.json` entry is removed so other devices' shared watch/subscription stays intact
+    /// (MS-444).
+    pub async fn sign_out(&self, account: &str, api: Option<Arc<Api>>, unregister: bool) {
+        if !unregister {
+            self.state().apis.remove(account);
+            self.update_silent(|registrations| {
+                registrations.remove(account);
+            });
+            return;
+        }
         if !self.started.load(Ordering::SeqCst) {
             return;
         }
@@ -323,7 +453,7 @@ impl Push {
             match ended {
                 Ended::Reconnect => failures = 0,
                 Ended::Failed => {
-                    let delay = backoff(&self.config.timing, failures, jitter());
+                    let delay = backoff(&self.timing, failures, jitter());
                     failures += 1;
                     tokio::select! {
                         () = tokio::time::sleep(delay) => {}
@@ -338,7 +468,8 @@ impl Push {
     /// within `silence` of a ping is dead. The first ping goes out at once, so its pong is what
     /// marks the socket connected.
     async fn session(self: &Arc<Self>, failures: &mut u32) -> Ended {
-        let (Some(url), Some(token)) = (self.config.socket_url(), PushConfig::configured(&self.config.token)) else {
+        let config = self.config();
+        let (Some(url), Some(token)) = (config.socket_url(), PushConfig::configured(&config.token).map(String::from)) else {
             return std::future::pending().await;
         };
         let Ok(mut request) = url.into_client_request() else { return Ended::Failed };
@@ -352,7 +483,7 @@ impl Push {
             () = self.reconnect.notified() => return Ended::Reconnect,
         };
         let (mut write, mut read) = stream.split();
-        let timing = &self.config.timing;
+        let timing = &self.timing;
         let mut heard: Option<Instant> = None;
         let mut next_ping = Instant::now();
         // When the ping awaiting an answer went out.
@@ -472,17 +603,89 @@ impl Push {
         self.state().registrations = fresh;
     }
 
-    /// Changes push.json as it is now and writes it back.
+    /// Changes push.json as it is now, writes it back, and wakes listeners when it changed.
     fn update(&self, change: impl FnOnce(&mut Registrations)) {
-        let mut state = self.state();
-        state.registrations = read(&self.file);
-        change(&mut state.registrations);
-        let value = serde_json::to_value(&state.registrations).expect("registrations encode");
-        if let Err(error) = crate::files::replace(&self.directory, &self.file, &crate::json::encode(&value, true, true)) {
-            eprintln!("Could not save push registrations: {error}");
+        if self.update_silent(change) {
+            self.notify_registrations();
         }
     }
 
+    /// Changes push.json as it is now and writes it back without notifying sync listeners;
+    /// returns whether `push.json` actually changed.
+    fn update_silent(&self, change: impl FnOnce(&mut Registrations)) -> bool {
+        let mut state = self.state();
+        let before = read(&self.file);
+        let mut next = before.clone();
+        change(&mut next);
+        state.registrations = next.clone();
+        if next == before {
+            return false;
+        }
+        let value = serde_json::to_value(&next).expect("registrations encode");
+        if let Err(error) = crate::files::replace(&self.directory, &self.file, &crate::json::encode(&value, true, true)) {
+            eprintln!("Could not save push registrations: {error}");
+        }
+        true
+    }
+
+    /// Current registrations for signed-in accounts as `(kind, id, expires_iso)` for device sync.
+    pub(crate) fn registrations_snapshot(&self) -> BTreeMap<String, (String, String, String)> {
+        self.reload();
+        let state = self.state();
+        state
+            .registrations
+            .iter()
+            .filter(|(account, _)| self.accounts.record(account).is_some())
+            .map(|(account, reg)| {
+                let kind = match reg.kind {
+                    Kind::Gmail => "gmail",
+                    Kind::Graph => "graph",
+                };
+                (account.clone(), (kind.to_string(), reg.id.clone(), iso8601(reg.expires)))
+            })
+            .collect()
+    }
+
+    /// Adopts fresher shared registrations from paired devices into `push.json` so devices reuse
+    /// one Graph subscription id and avoid redundant Gmail watch calls (MS-444).
+    pub(crate) fn adopt_registrations(&self, incoming: &BTreeMap<String, crate::peer_sync::PushRegistration>) -> bool {
+        let config = self.config();
+        let gmail_topic = PushConfig::configured(&config.gmail_topic).map(String::from);
+        let current_time = now();
+        self.update_silent(|registrations| {
+            for (account, remote) in incoming {
+                if self.accounts.record(account).is_none() {
+                    continue;
+                }
+                let kind = match remote.kind.as_str() {
+                    "gmail" => Kind::Gmail,
+                    "graph" => Kind::Graph,
+                    _ => continue,
+                };
+                if kind == Kind::Gmail
+                    && let Some(topic) = &gmail_topic
+                    && topic != &remote.id
+                {
+                    continue;
+                }
+                let Some(expires) = parse_iso8601(&remote.expires) else { continue };
+                if expires <= current_time {
+                    continue;
+                }
+                let adopt = match registrations.get(account) {
+                    None => true,
+                    Some(local) => {
+                        local.kind != kind
+                            || expires > local.expires
+                            || (local.due() && expires >= local.expires)
+                    }
+                };
+                if adopt {
+                    registrations.insert(account.clone(), Registration { kind, id: remote.id.clone(), expires });
+                }
+            }
+        })
+    }
     fn registration(&self, account: &str) -> Option<Registration> {
         self.state().registrations.get(account).cloned()
     }
@@ -528,7 +731,7 @@ impl Push {
 
     /// Watches every change of the mailbox; renewing is the same call.
     async fn watch_gmail(&self, account: &str, api: &Api) -> Result<(), ApiError> {
-        let Some(topic) = PushConfig::configured(&self.config.gmail_topic).map(String::from) else { return Ok(()) };
+        let Some(topic) = PushConfig::configured(&self.config().gmail_topic).map(String::from) else { return Ok(()) };
         if let Some(current) = self.registration(account)
             && current.kind == Kind::Gmail
             && current.id == topic
@@ -555,8 +758,9 @@ impl Push {
     /// Renews a subscription that is due or asked for reauthorization; creates one when there is
     /// none or Graph no longer knows it.
     async fn subscribe_graph(&self, account: &str, api: &Api) -> Result<(), ApiError> {
+        let config = self.config();
         let (Some(endpoint), Some(client_state)) =
-            (self.config.endpoint("graph"), PushConfig::configured(&self.config.graph_client_state))
+            (config.endpoint("graph"), PushConfig::configured(&config.graph_client_state).map(String::from))
         else {
             return Ok(());
         };

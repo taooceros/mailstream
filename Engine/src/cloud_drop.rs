@@ -39,7 +39,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::answers::SyncCloud;
-use crate::peer_sync::{CloudConfig, Device, DeviceKey, PeerSync, PeerSyncError, SealedCredential, Snapshot, Stamped};
+use crate::peer_sync::{
+    CloudConfig, Device, DeviceKey, PeerSync, PeerSyncError, PushRegistration, SealedCredential, SealedPushConfig,
+    Snapshot, Stamped,
+};
 use crate::{EngineError, api, files, model};
 
 const FILE: &str = "cloud.json";
@@ -150,6 +153,10 @@ struct Contents {
     credentials: BTreeMap<String, SealedCredential>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cloud: Option<CloudConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    push_configs: BTreeMap<String, SealedPushConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    push_registrations: BTreeMap<String, PushRegistration>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -192,6 +199,8 @@ impl Contents {
             device_keys: snapshot.device_keys,
             credentials: snapshot.credentials,
             cloud: snapshot.cloud,
+            push_configs: snapshot.push_configs,
+            push_registrations: snapshot.push_registrations,
         }
     }
 
@@ -222,6 +231,8 @@ impl Contents {
             device_keys: self.device_keys,
             credentials: self.credentials,
             cloud: self.cloud,
+            push_configs: self.push_configs,
+            push_registrations: self.push_registrations,
             pending: Default::default(),
         }
     }

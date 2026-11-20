@@ -52,6 +52,7 @@ impl SyncNodeConfig {
 
 /// The node's accounts.json and sign-ins, as device sync bridges them.
 struct NodeAccounts {
+    support_directory: PathBuf,
     accounts: Accounts,
     keychain: Keychain,
 }
@@ -65,7 +66,12 @@ impl AccountHost for NodeAccounts {
         self.accounts.list()
     }
 
-    fn adopt(&self, record: AccountRecord, credential: Option<Credential>) -> Result<(), String> {
+    fn adopt(
+        &self,
+        record: AccountRecord,
+        credential: Option<Credential>,
+        _push_registration: Option<&crate::peer_sync::PushRegistration>,
+    ) -> Result<(), String> {
         if let Some(credential) = &credential {
             let mut sign_ins = self.keychain.load().map_err(|error| error.to_string())?;
             account_sync::adopt_sign_in(&mut sign_ins, &record.id, record.provider, credential);
@@ -82,6 +88,14 @@ impl AccountHost for NodeAccounts {
             sign_ins.clients.remove(&id);
             self.keychain.store(&sign_ins).map_err(|error| error.to_string())
         })
+    }
+
+    fn push_settings(&self) -> Option<crate::push::PushSettings> {
+        crate::push::read_synced(&self.support_directory)
+    }
+
+    fn adopt_push_settings(&self, settings: crate::push::PushSettings) -> Result<(), String> {
+        crate::push::write_synced(&self.support_directory, &settings)
     }
 }
 
@@ -154,6 +168,7 @@ impl SyncNode {
         let device_sync =
             DeviceSync::start(config.data_directory.clone(), config.network, settings.clone(), events.clone(), None);
         let accounts: Arc<dyn AccountHost> = Arc::new(NodeAccounts {
+            support_directory: config.data_directory.clone(),
             accounts: Accounts::new(&config.data_directory),
             keychain: Keychain::new(config.keychain_service, config.keychain_directory),
         });

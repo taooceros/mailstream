@@ -544,3 +544,164 @@ fn gmail_push_reconciles_trashed_and_read_messages_older_than_first_page() {
     drop(engine);
     cleanup(&config);
 }
+
+/// Provider server with future watch/subscription expirations for multi-device push sync tests.
+fn synced_push_server() -> FakeServer {
+    let tokens = AtomicUsize::new(0);
+    let gmail_exp_ms = (crate::model::unix_seconds(crate::model::now() + 5.0 * 86_400.0) * 1000.0) as u64;
+    let graph_exp_iso = crate::model::iso8601(crate::model::now() + 3.0 * 86_400.0);
+    FakeServer::start(move |request: &FakeRequest| {
+        let path = request.path.as_str();
+        let method = request.method.as_str();
+        match (method, path) {
+            (_, "/token") => {
+                let call = tokens.fetch_add(1, Ordering::SeqCst) + 1;
+                Reply::json(json!({ "access_token": format!("at{call}"), "expires_in": 3600 }))
+            }
+            ("POST", "/gmail/v1/users/me/watch") => {
+                Reply::json(json!({ "historyId": "9", "expiration": gmail_exp_ms.to_string() }))
+            }
+            ("POST", "/gmail/v1/users/me/stop") => Reply::status(204, Value::Null),
+            ("POST", "/v1.0/subscriptions") => {
+                Reply::status(201, json!({ "id": "sub-1", "expirationDateTime": graph_exp_iso }))
+            }
+            ("DELETE", "/v1.0/subscriptions/sub-1") => Reply::status(204, Value::Null),
+            ("GET", "/v1.0/me") => Reply::json(json!({ "displayName": "Me", "mail": "me@outlook.com" })),
+            ("GET", "/v1.0/me/mailFolders") => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "unreadItemCount": 1, "totalItemCount": 1 },
+                { "id": "F-sent", "displayName": "Sent Items", "childFolderCount": 0, "unreadItemCount": 0, "totalItemCount": 0 },
+            ]})),
+            ("GET", "/v1.0/me/mailFolders/inbox") => Reply::json(json!({ "id": "F-inbox" })),
+            ("GET", "/v1.0/me/mailFolders/sentitems") => Reply::json(json!({ "id": "F-sent" })),
+            ("GET", other) if other.starts_with("/v1.0/me/mailFolders/") && other.ends_with("/messages") => {
+                Reply::json(json!({ "value": [] }))
+            }
+            ("GET", "/gmail/v1/users/me/profile") => {
+                Reply::json(json!({ "emailAddress": "me@gmail.com", "historyId": "10" }))
+            }
+            ("GET", "/gmail/v1/users/me/settings/sendAs") => {
+                Reply::json(json!({ "sendAs": [{ "sendAsEmail": "me@gmail.com", "isPrimary": true }] }))
+            }
+            ("GET", "/gmail/v1/users/me/labels") => Reply::json(json!({ "labels": [
+                { "id": "INBOX", "name": "INBOX", "type": "system" },
+                { "id": "SENT", "name": "SENT", "type": "system" },
+            ]})),
+            ("GET", "/gmail/v1/users/me/messages") => Reply::json(json!({ "messages": [], "resultSizeEstimate": 0 })),
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        }
+    })
+}
+
+#[test]
+fn paired_device_receives_encrypted_push_config_hot_starts_and_reuses_shared_registrations() {
+    use iroh::address_lookup::MemoryLookup;
+    use crate::peer_sync::Network;
+    use crate::testkit::call;
+
+    let server = synced_push_server();
+    let relay = FakeRelay::start();
+    let lookup = MemoryLookup::new();
+
+    // Device A has host push config and both accounts.
+    let mut cfg_a = prepare(&server, &relay, &[("me@outlook.com", "microsoft"), ("me@gmail.com", "google")]);
+    cfg_a.device_sync = Some(Network::Loopback(lookup.clone()));
+    let engine_a = Engine::start(cfg_a.clone());
+    wait_until("A push connected", || engine_a.core.push.is_connected());
+    wait_until("A registrations", || registrations(&cfg_a).as_object().is_some_and(|all| all.len() == 2));
+    assert_eq!(requests(&server, "POST", "/v1.0/subscriptions").len(), 1);
+    assert_eq!(requests(&server, "POST", "/gmail/v1/users/me/watch").len(), 1);
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+
+    // Device B starts with NO host push config and NO accounts.
+    let mut cfg_b = server_config(&server);
+    cfg_b.push.timing = cfg_a.push.timing.clone();
+    cfg_b.device_sync = Some(Network::Loopback(lookup.clone()));
+    let engine_b = Engine::start(cfg_b.clone());
+    assert!(!engine_b.core.push.is_connected());
+
+    // B joins A's group: receives accounts, adopts shared push registrations, decrypts sealed
+    // push config, hot-starts Push, and connects to the relay without restarting.
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+    wait_until("B hot-started push and connected", || engine_b.core.push.is_connected());
+    wait_until("B adopted both registrations", || registrations(&cfg_b).as_object().is_some_and(|all| all.len() == 2));
+    assert_eq!(registrations(&cfg_b)["me@outlook.com"]["id"], json!("sub-1"));
+    // Give B's registration pass time to settle and confirm zero duplicate subscriptions/watches.
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(requests(&server, "POST", "/v1.0/subscriptions").len(), 1, "B reuses A's Graph subscription");
+    assert_eq!(requests(&server, "POST", "/gmail/v1/users/me/watch").len(), 1, "B reuses A's Gmail watch");
+
+    // A Graph notification for shared `sub-1` reaches B (even after A stops).
+    drop(engine_a);
+    wait_until("B outlook inbox initially loaded", || {
+        !requests(&server, "GET", "/v1.0/me/mailFolders/F-inbox/messages").is_empty()
+    });
+    let inbox_before = requests(&server, "GET", "/v1.0/me/mailFolders/F-inbox/messages").len();
+    relay.send(json!({ "source": "graph", "subscriptionId": "sub-1", "changeType": "updated", "lifecycleEvent": null }));
+    wait_until("B refreshes outlook inbox on shared sub-1 push", || {
+        requests(&server, "GET", "/v1.0/me/mailFolders/F-inbox/messages").len() > inbox_before
+    });
+
+    // Restarting B offline (A is gone, no host push config) loads persisted peer-sync/push-config.json.
+    drop(engine_b);
+    let engine_b2 = Engine::start(cfg_b.clone());
+    wait_until("B reconnects to relay after restart from persisted synced push config", || {
+        engine_b2.core.push.is_connected()
+    });
+    drop(engine_b2);
+    cleanup(&cfg_b);
+    cleanup(&cfg_a);
+}
+
+#[test]
+fn paused_sign_out_keeps_shared_watch_and_synced_removal_stops_once() {
+    use iroh::address_lookup::MemoryLookup;
+    use crate::peer_sync::Network;
+    use crate::testkit::call;
+
+    let server = synced_push_server();
+    let relay = FakeRelay::start();
+    let lookup = MemoryLookup::new();
+
+    let mut cfg_a = prepare(&server, &relay, &[("me@outlook.com", "microsoft"), ("me@gmail.com", "google")]);
+    cfg_a.device_sync = Some(Network::Loopback(lookup.clone()));
+    let engine_a = Engine::start(cfg_a.clone());
+    wait_until("A push connected", || engine_a.core.push.is_connected());
+    wait_until("A registrations", || registrations(&cfg_a).as_object().is_some_and(|all| all.len() == 2));
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+
+    let mut cfg_b = server_config(&server);
+    cfg_b.push.timing = cfg_a.push.timing.clone();
+    cfg_b.device_sync = Some(Network::Loopback(lookup.clone()));
+    let engine_b = Engine::start(cfg_b.clone());
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+    wait_until("B push connected and registered", || {
+        engine_b.core.push.is_connected() && registrations(&cfg_b).as_object().is_some_and(|all| all.len() == 2)
+    });
+
+    // 1. B pauses sync and signs out of Gmail locally: must NOT call Gmail `/stop` (A still uses it).
+    call(&engine_b, "sync.disable", json!({})).unwrap();
+    call(&engine_b, "accounts.remove", json!({ "account": "me@gmail.com", "yes": true })).unwrap();
+    assert_eq!(requests(&server, "POST", "/gmail/v1/users/me/stop").len(), 0, "paused sign-out preserves shared watch");
+    assert!(registrations(&cfg_b).get("me@gmail.com").is_none());
+
+    // 2. Active A removes Outlook from the group: stops Graph sub-1 ONCE; when B resumes and adopts
+    // the removal via AccountHost::remove, it does NOT issue a second DELETE.
+    call(&engine_a, "accounts.remove", json!({ "account": "me@outlook.com", "yes": true })).unwrap();
+    assert_eq!(requests(&server, "DELETE", "/v1.0/subscriptions/sub-1").len(), 1);
+    call(&engine_b, "sync.enable", json!({})).unwrap();
+    wait_until("B drops removed outlook account", || {
+        call(&engine_b, "accounts.list", json!({}))
+            .ok()
+            .and_then(|v| v.as_array().map(|a| !a.iter().any(|r| r["id"] == "me@outlook.com")))
+            .unwrap_or(false)
+    });
+    assert_eq!(requests(&server, "DELETE", "/v1.0/subscriptions/sub-1").len(), 1, "synced removal does not double-DELETE");
+    assert!(registrations(&cfg_b).get("me@outlook.com").is_none());
+
+    drop(engine_b);
+    drop(engine_a);
+    cleanup(&cfg_b);
+    cleanup(&cfg_a);
+}

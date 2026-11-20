@@ -280,6 +280,25 @@ impl DeviceSync {
         let _ = self.wake_tx.send(());
     }
 
+    /// Wakes the bridge after local push registrations changed so peers reuse them (MS-444).
+    pub fn push_changed(&self) {
+        let _ = self.wake_tx.send(());
+    }
+
+    /// Whether a local `accounts.remove` should also stop/delete the provider's push watch or
+    /// subscription (MS-444): false while paused in a sync group, because a paused local sign-out
+    /// leaves the account active on other devices sharing that watch/subscription.
+    pub(crate) async fn should_unregister_push(&self) -> bool {
+        if let Some(sync) = self.sync.read().await.as_ref() {
+            let status = sync.status().await;
+            return status.namespace.is_none() || !status.paused;
+        }
+        match PeerSync::stored(&self.support_directory) {
+            Ok(stored) => stored.namespace.is_none() || !stored.paused,
+            Err(_) => true,
+        }
+    }
+
     /// Records that `account` signed in here, so its new credential reaches the group's devices.
     pub(crate) fn account_signed_in(&self, account: &str) {
         if let Err(error) = account_sync::signed_in(&self.support_directory, account, now_ms()) {

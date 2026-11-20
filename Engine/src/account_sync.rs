@@ -36,14 +36,19 @@ use serde_json::Value;
 use crate::accounts::AccountRecord;
 use crate::keychain::{Keychain, SignIns};
 use crate::oauth::{OAuthClient, Provider};
-use crate::peer_sync::{PeerSync, SealedCredential, SealedDropKey, Snapshot, hex, unhex};
+use crate::model::{now, parse_iso8601};
+use crate::peer_sync::{
+    PeerSync, PushRegistration, SealedCredential, SealedDropKey, SealedPushConfig, Snapshot, hex, unhex,
+};
+use crate::push::PushSettings;
 use crate::{EngineError, files};
 
 const MAGIC: &[u8; 4] = b"msc1";
 const NONCE: usize = 12;
 const KEY_CONTEXT: &str = "mailstream device sync credential v1";
 const FILE: &str = "credentials.json";
-
+/// Associated-data slot name for sealed push relay settings (`v1/push/<recipient>`, MS-444).
+const PUSH_ACCOUNT: &str = "#push";
 /// What a sealed credential holds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,10 +64,34 @@ pub(crate) trait AccountHost: Send + Sync {
     /// The credential store the sign-ins and this device's credential key are kept in.
     fn keychain(&self) -> &Keychain;
     fn accounts(&self) -> Vec<AccountRecord>;
-    /// Keeps `record` as another device has it, with the credential it sent, if any.
-    fn adopt(&self, record: AccountRecord, credential: Option<Credential>) -> Result<(), String>;
+    /// Keeps `record` as another device has it, with the credential and shared push registration
+    /// it sent, if any.
+    fn adopt(
+        &self,
+        record: AccountRecord,
+        credential: Option<Credential>,
+        push_registration: Option<&PushRegistration>,
+    ) -> Result<(), String>;
     /// Signs out of `id`, which another device removed.
     fn remove(&self, id: String) -> BoxFuture<'_, Result<(), String>>;
+    /// Host-provided push relay config (from Info.plist / config.json), if any (MS-444).
+    fn host_push_settings(&self) -> Option<PushSettings> {
+        None
+    }
+    /// Active push relay config on this device (host or synced), if any (MS-444).
+    fn push_settings(&self) -> Option<PushSettings> {
+        None
+    }
+    /// Adopts push relay config received from the sync group (MS-444).
+    fn adopt_push_settings(&self, _settings: PushSettings) -> Result<(), String> {
+        Ok(())
+    }
+    /// Local push registrations (`account -> (kind, id, expires_iso)`) for signed-in accounts.
+    fn push_registrations(&self) -> BTreeMap<String, (String, String, String)> {
+        BTreeMap::new()
+    }
+    /// Adopts shared push registrations from the sync group into local `push.json`.
+    fn adopt_push_registrations(&self, _incoming: &BTreeMap<String, PushRegistration>) {}
 }
 
 /// Writes `credential` into `sign_ins` for `account` of `provider`; the client is offered for
@@ -158,6 +187,21 @@ fn aad(recipient: &str, account: &str) -> String {
 struct Issued {
     #[serde(default)]
     issued: BTreeMap<String, u64>,
+    /// Hash of the push relay settings this device last issued or adopted (MS-444).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push_hash: Option<String>,
+    /// When those push relay settings were issued, Unix ms.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    push_at: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn push_hash(settings: &PushSettings) -> String {
+    let bytes = serde_json::to_vec(settings).unwrap_or_default();
+    hex(blake3::hash(&bytes).as_bytes())
 }
 
 impl Issued {
@@ -320,7 +364,9 @@ pub(crate) async fn reconcile(
                     continue;
                 }
                 let at = credential.as_ref().map(|(at, _)| *at);
-                pass.host.adopt(record, credential.map(|(_, credential)| credential)).map_err(EngineError::failed)?;
+                pass.host
+                    .adopt(record, credential.map(|(_, credential)| credential), snapshot.push_registrations.get(id))
+                    .map_err(EngineError::failed)?;
                 if let Some(at) = at {
                     issued.issued.insert(id.clone(), at);
                     issued_changed = true;
@@ -329,6 +375,105 @@ pub(crate) async fn reconcile(
             }
         }
     }
+    pass.host.adopt_push_registrations(&snapshot.push_registrations);
+    // Adopt sealed push relay settings addressed to this device once any pending `v1/pushreg/`
+    // entries have downloaded, unless overridden by a local host config (Info.plist / config.json).
+    let pending_pushreg = snapshot.pending.iter().any(|key| key.starts_with("v1/pushreg/"));
+    if !pending_pushreg
+        && !snapshot.pending.contains(&format!("v1/push/{}", pass.me))
+        && pass.host.host_push_settings().is_none()
+        && let Some(sealed) = snapshot.push_configs.get(pass.me)
+        && sealed.to == hex(&key.public())
+        && let Some(ciphertext) = sealed.sealed.as_deref()
+        && let Some(settings) = key.open::<PushSettings>(pass.me, PUSH_ACCOUNT, ciphertext)
+        && settings.is_configured()
+        && (pass.host.push_settings().is_none() || sealed.issued > issued.push_at)
+    {
+        pass.host.adopt_push_settings(settings.clone()).map_err(EngineError::failed)?;
+        issued.push_at = sealed.issued;
+        issued.push_hash = Some(push_hash(&settings));
+        issued_changed = true;
+    }
+
+    let recipients = recipients(&snapshot, pass.me);
+
+    // Seal this device's push relay settings to every admitted device in the group, and withdraw
+    // slots of removed devices (MS-444).
+    if let Some(settings) = pass.host.push_settings().filter(PushSettings::is_configured) {
+        let digest = push_hash(&settings);
+        if issued.push_hash.as_deref() != Some(digest.as_str()) {
+            let max_issued = snapshot.push_configs.values().map(|s| s.issued.max(s.at)).max().unwrap_or(0);
+            issued.push_at = next_at(max_issued);
+            issued.push_hash = Some(digest);
+            issued_changed = true;
+        }
+        let mine = issued.push_at.max(pass.join_at);
+        for (recipient, to) in &recipients {
+            if snapshot.pending.contains(&format!("v1/push/{recipient}")) {
+                continue;
+            }
+            let existing = snapshot.push_configs.get(recipient);
+            let send = match existing {
+                None => true,
+                Some(existing) if existing.sealed.is_none() => mine > existing.at,
+                Some(existing) => existing.issued < mine || (existing.issued == mine && existing.to != hex(to)),
+            };
+            if !send {
+                continue;
+            }
+            let sealed = SealedPushConfig {
+                to: hex(to),
+                sealed: Some(seal(to, recipient, PUSH_ACCOUNT, &settings).map_err(EngineError::failed)?),
+                issued: mine,
+                at: next_at(existing.map_or(0, |existing| existing.at)),
+            };
+            sync.set_push_config(recipient, &sealed).await.map_err(map_error)?;
+        }
+    }
+    for (recipient, existing) in &snapshot.push_configs {
+        if existing.sealed.is_none() || snapshot.pending.contains(&format!("v1/push/{recipient}")) {
+            continue;
+        }
+        if snapshot.removed.contains_key(recipient) {
+            let withdrawn = SealedPushConfig {
+                to: existing.to.clone(),
+                sealed: None,
+                issued: existing.issued,
+                at: next_at(existing.at),
+            };
+            sync.set_push_config(recipient, &withdrawn).await.map_err(map_error)?;
+        }
+    }
+
+    // Publish fresher local push registrations so paired devices share Graph subscriptions and
+    // Gmail watch expiry metadata (MS-444).
+    let current_time = now();
+    for (account, (kind, id, expires)) in pass.host.push_registrations() {
+        if snapshot.pending.contains(&format!("v1/pushreg/{account}")) {
+            continue;
+        }
+        if snapshot.accounts.get(&account).is_none_or(|stamped| stamped.value.is_none()) {
+            continue;
+        }
+        let Some(local_exp) = parse_iso8601(&expires) else { continue };
+        if local_exp <= current_time {
+            continue;
+        }
+        let existing = snapshot.push_registrations.get(&account);
+        let publish = match existing {
+            None => true,
+            Some(existing) => {
+                let remote_exp = parse_iso8601(&existing.expires).unwrap_or(0.0);
+                local_exp > remote_exp
+                    || ((existing.kind != kind || existing.id != id) && local_exp >= remote_exp)
+            }
+        };
+        if publish {
+            let reg = PushRegistration { kind, id, expires, at: next_at(existing.map_or(0, |e| e.at)) };
+            sync.set_push_registration(&account, &reg).await.map_err(map_error)?;
+        }
+    }
+
     if issued_changed {
         issued.write(pass.support_directory)?;
     }
@@ -336,7 +481,7 @@ pub(crate) async fn reconcile(
     // This device's credentials, sealed to each device that may have them; withdrawn for
     // accounts removed and from devices removed from the group (MS-396).
     let sign_ins = pass.host.keychain().load().map_err(|error| EngineError::failed(error.to_string()))?;
-    let recipients = recipients(&snapshot, pass.me);
+    // `recipients` was computed above.
     for record in pass.host.accounts() {
         let (Some(refresh_token), Some(client)) =
             (sign_ins.refresh_tokens.get(&record.id), sign_ins.clients.get(&record.id))

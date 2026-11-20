@@ -300,6 +300,9 @@ struct Core {
     calendar: Arc<calendar::CalendarStore>,
     avatars: Arc<avatars::Avatars>,
     device_sync: Option<Arc<device_sync::DeviceSync>>,
+    support_directory: PathBuf,
+    /// Push relay settings provided by the host bundle / config.json, if any (MS-444).
+    host_push: Option<push::PushSettings>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -356,8 +359,16 @@ impl Engine {
             config.tool_environment.clone(),
             config.apple_tagger.clone(),
         ));
+        let host_push = config.push.socket_configured().then(|| config.push.settings());
+        let mut push_config = config.push.clone();
+        if !push_config.socket_configured()
+            && config.device_sync.is_some()
+            && let Some(synced) = push::read_synced(directory)
+        {
+            push_config = push_config.with_settings(&synced);
+        }
         let push = Arc::new(push::Push::new(
-            config.push.clone(),
+            push_config,
             directory.clone(),
             &config.endpoints,
             accounts.clone(),
@@ -435,10 +446,18 @@ impl Engine {
             calendar: calendar.clone(),
             avatars,
             device_sync,
+            support_directory: directory.clone(),
+            host_push,
         });
         if let Some(sync) = &core.device_sync {
             let host: std::sync::Weak<dyn account_sync::AccountHost> = Arc::downgrade(&core) as _;
             sync.attach_accounts(host);
+            let sync_weak = Arc::downgrade(sync);
+            push.on_registrations(move || {
+                if let Some(sync) = sync_weak.upgrade() {
+                    sync.push_changed();
+                }
+            });
         }
         let watcher = Self::follow_settings(&core);
         runtime.spawn(mail.start());
@@ -675,7 +694,11 @@ impl Core {
                         ),
                     ));
                 }
-                self.sign_out(&record.id).await?;
+                let unregister = match &self.device_sync {
+                    Some(sync) => sync.should_unregister_push().await,
+                    None => true,
+                };
+                self.sign_out(&record.id, unregister).await?;
                 if let Some(sync) = &self.device_sync {
                     sync.accounts_changed();
                 }
@@ -798,7 +821,7 @@ impl Core {
     }
 
     /// Signs out of `id`: deletes its record, its saved sign-in and its envelope cache.
-    async fn sign_out(&self, id: &str) -> Result<(), EngineError> {
+    async fn sign_out(&self, id: &str, unregister: bool) -> Result<(), EngineError> {
         // Push stops the account's registration with its API, taken before it goes, while the
         // token still works; the token goes after.
         let api = self.mail.api(id);
@@ -809,7 +832,7 @@ impl Core {
         self.chat.accounts_changed();
         self.calendar.accounts_changed();
         self.events.emit("accounts");
-        self.push.sign_out(id, api).await;
+        self.push.sign_out(id, api, unregister).await;
         let _ = std::fs::remove_file(gmail::cache_file(&self.mail.cache_root(), id));
         self.tokens.forget(id);
         Ok(())
@@ -826,17 +849,51 @@ impl account_sync::AccountHost for Core {
         self.accounts.list()
     }
 
-    fn adopt(&self, record: AccountRecord, credential: Option<account_sync::Credential>) -> Result<(), String> {
+    fn adopt(
+        &self,
+        record: AccountRecord,
+        credential: Option<account_sync::Credential>,
+        push_registration: Option<&peer_sync::PushRegistration>,
+    ) -> Result<(), String> {
+        let account_id = record.id.clone();
         let signed_in = tokens::SignedIn { provider: record.provider, scopes: record.scopes.clone() };
-        self.tokens.adopt(&record.id, signed_in, credential.as_ref()).map_err(|error| error.to_string())?;
-        if self.accounts.adopt(record)? || credential.is_some() {
+        self.tokens.adopt(&account_id, signed_in, credential.as_ref()).map_err(|error| error.to_string())?;
+        let changed = self.accounts.adopt(record)? || credential.is_some();
+        if let Some(reg) = push_registration {
+            let mut one = std::collections::BTreeMap::new();
+            one.insert(account_id, reg.clone());
+            self.push.adopt_registrations(&one);
+        }
+        if changed {
             self.accounts_updated();
         }
         Ok(())
     }
 
     fn remove(&self, id: String) -> futures::future::BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move { self.sign_out(&id).await.map_err(|error| error.message) })
+        Box::pin(async move { self.sign_out(&id, false).await.map_err(|error| error.message) })
+    }
+
+    fn host_push_settings(&self) -> Option<push::PushSettings> {
+        self.host_push.clone()
+    }
+
+    fn push_settings(&self) -> Option<push::PushSettings> {
+        self.push.settings()
+    }
+
+    fn adopt_push_settings(&self, settings: push::PushSettings) -> Result<(), String> {
+        push::write_synced(&self.support_directory, &settings)?;
+        self.push.reconfigure(settings);
+        Ok(())
+    }
+
+    fn push_registrations(&self) -> std::collections::BTreeMap<String, (String, String, String)> {
+        self.push.registrations_snapshot()
+    }
+
+    fn adopt_push_registrations(&self, incoming: &std::collections::BTreeMap<String, peer_sync::PushRegistration>) {
+        self.push.adopt_registrations(incoming);
     }
 }
 

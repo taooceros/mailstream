@@ -130,6 +130,8 @@ const DEVICE_KEY: &str = "v1/devkey/";
 const CREDENTIAL: &str = "v1/cred/";
 const DROP_KEY: &str = "v1/drop/";
 const CLOUD: &str = "v1/cloud";
+const PUSH_CONFIG: &str = "v1/push/";
+const PUSH_REG: &str = "v1/pushreg/";
 /// What the cloud drop's secret is derived from besides the group's write key and the drop key.
 const DROP_SECRET_CONTEXT: &str = "mailstream device sync drop secret v2";
 /// What a device signs to announce its credential key: this, its endpoint id, the key and when.
@@ -208,6 +210,10 @@ pub struct Snapshot {
     pub drop_keys: BTreeMap<String, SealedDropKey>,
     /// The group's optional Cloudflare fallback setting (MS-419).
     pub cloud: Option<CloudConfig>,
+    /// Push relay config sealed to each device's credential key, by recipient endpoint id (MS-444).
+    pub push_configs: BTreeMap<String, SealedPushConfig>,
+    /// Shared push registration metadata (Gmail watch / Graph subscription), by account (MS-444).
+    pub push_registrations: BTreeMap<String, PushRegistration>,
     /// Keys left out above because a value is still downloading: what they hold is unknown,
     /// not absent.
     pub pending: BTreeSet<String>,
@@ -235,6 +241,33 @@ pub struct SealedDropKey {
     /// The `at` of the removal it was made after: the latest removal's is the one in use.
     pub epoch: u64,
     /// When it was sealed, Unix ms: the latest wins.
+    pub at: u64,
+}
+
+/// Push relay settings sealed to one device's credential key (`v1/push/<recipient>`, MS-444).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SealedPushConfig {
+    /// The recipient's credential key it is sealed to, hex.
+    pub to: String,
+    /// The sealed [`crate::push::PushSettings`]; `None` once withdrawn (device removed).
+    pub sealed: Option<String>,
+    /// When the push settings inside were issued, Unix ms.
+    pub issued: u64,
+    /// When it was sealed, Unix ms: the latest wins.
+    pub at: u64,
+}
+
+/// Shared push registration metadata for an account (`v1/pushreg/<account>`, MS-444): lets paired
+/// devices reuse one Graph subscription id and avoid redundant Gmail watches.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PushRegistration {
+    /// `"gmail"` or `"graph"`.
+    pub kind: String,
+    /// Pub/Sub topic (Gmail) or subscription id (Graph).
+    pub id: String,
+    /// ISO 8601 UTC expiration timestamp.
+    pub expires: String,
+    /// When it was written, Unix ms: the latest wins.
     pub at: u64,
 }
 
@@ -878,6 +911,18 @@ impl PeerSync {
         self.set(CLOUD.to_string(), config, config.at).await
     }
 
+    /// Records sealed push config for `recipient` (an endpoint id); `false` when the group already
+    /// holds one from `config.at` or later, which stays (MS-444).
+    pub async fn set_push_config(&self, recipient: &str, config: &SealedPushConfig) -> Result<bool> {
+        self.set(format!("{PUSH_CONFIG}{recipient}"), config, config.at).await
+    }
+
+    /// Records shared push registration metadata for `account`; `false` when the group already
+    /// holds one from `registration.at` or later, which stays (MS-444).
+    pub async fn set_push_registration(&self, account: &str, registration: &PushRegistration) -> Result<bool> {
+        self.set(format!("{PUSH_REG}{account}"), registration, registration.at).await
+    }
+
     /// Removes device `id` (an endpoint id) from the group (MS-396): records its removal, so
     /// every device that reads it lets it in no more and ends its connections. The engine then
     /// withdraws the credentials sealed to it and makes the cloud drop a new key it never gets
@@ -978,6 +1023,18 @@ impl PeerSync {
         {
             inner.put(doc, CLOUD.to_string(), cloud).await?;
             wrote = true;
+        }
+        for (recipient, config) in &incoming.push_configs {
+            if newer(config.at, current.push_configs.get(recipient).map(|have| have.at)) {
+                inner.put(doc, format!("{PUSH_CONFIG}{recipient}"), config).await?;
+                wrote = true;
+            }
+        }
+        for (account, registration) in &incoming.push_registrations {
+            if newer(registration.at, current.push_registrations.get(account).map(|have| have.at)) {
+                inner.put(doc, format!("{PUSH_REG}{account}"), registration).await?;
+                wrote = true;
+            }
         }
         Ok(wrote)
     }
@@ -1222,6 +1279,12 @@ impl Inner {
                 Record::Cloud(config) => {
                     snapshot.cloud = Some(config);
                 }
+                Record::PushConfig(sealed) => {
+                    snapshot.push_configs.insert(key[PUSH_CONFIG.len()..].to_string(), sealed);
+                }
+                Record::PushReg(registration) => {
+                    snapshot.push_registrations.insert(key[PUSH_REG.len()..].to_string(), registration);
+                }
             }
         }
         Ok(snapshot)
@@ -1246,6 +1309,8 @@ enum Record {
     Credential(SealedCredential),
     DropKey(SealedDropKey),
     Cloud(CloudConfig),
+    PushConfig(SealedPushConfig),
+    PushReg(PushRegistration),
 }
 
 impl Record {
@@ -1272,6 +1337,10 @@ impl Record {
             serde_json::from_slice(data).ok().map(Self::DropKey)
         } else if key == CLOUD {
             serde_json::from_slice(data).ok().map(Self::Cloud)
+        } else if key.starts_with(PUSH_CONFIG) {
+            serde_json::from_slice(data).ok().map(Self::PushConfig)
+        } else if key.starts_with(PUSH_REG) {
+            serde_json::from_slice(data).ok().map(Self::PushReg)
         } else {
             None
         }
@@ -1289,6 +1358,8 @@ impl Record {
             Self::Credential(credential) => credential.at,
             Self::DropKey(key) => key.at,
             Self::Cloud(config) => config.at,
+            Self::PushConfig(config) => config.at,
+            Self::PushReg(registration) => registration.at,
         }
     }
 }
