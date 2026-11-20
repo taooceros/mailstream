@@ -148,6 +148,12 @@ pub fn bind_keys(cx: &mut App) {
 
 /// Conversations asked for per page (the engine's most).
 const PAGE: u32 = 100;
+/// Rows before the end of a list or bundle at which the next older page begins loading.
+pub(crate) const MORE_AHEAD: usize = 20;
+/// Consecutive older-mail pages that add no visible lines to the current view (e.g. all folded
+/// into Smart Inbox bundles) before automatic paging pauses and leaves the rest to the footer's
+/// "Load older mail" button.
+const AUTO_EMPTY_PAGES: u8 = 3;
 /// A list this young is served from memory when shown again; the engine's change events reload
 /// the one on screen sooner.
 const FRESH: Duration = Duration::from_secs(90);
@@ -216,7 +222,7 @@ impl ListKey {
 pub struct List {
     pub conversations: Vec<Conversation>,
     /// The following page's cursor.
-    next: Option<String>,
+    pub next: Option<String>,
     /// When the providers last answered for it.
     fetched: Option<Instant>,
     /// A read of what the engine holds (a search: any of its answers) is under way.
@@ -226,16 +232,89 @@ pub struct List {
     /// The providers are asked for its newest (`fetch_list`); what arrives meanwhile shows as
     /// the engine's change events bring it.
     pub fetching: bool,
-    loading_more: bool,
-    /// The view and its length that asked for the last page. A page that leaves that view's
-    /// length unchanged (all of it folded into bundles) asks for no more from that view.
-    paged_at: Option<(PagedView, usize)>,
+    /// A page of older conversations (`load_more`) is under way.
+    pub loading_more: bool,
+    /// Consecutive pages that left the asking view's length unchanged (all folded into bundles).
+    empty_pages: Option<(PagedView, usize, u8)>,
+    /// Why the last older-mail page failed, shown in the footer until the next attempt.
+    pub more_error: Option<SharedString>,
     /// The engine refused the last answer (no such mailbox yet).
     pub error: Option<SharedString>,
     /// The mailboxes whose providers failed when last asked.
     pub failures: Option<SharedString>,
     /// A search's answers so far (MS-352).
     search: Option<SearchRun>,
+}
+
+impl List {
+    /// Whether `view` (currently `shown` lines long, excluding the footer) may ask for the next
+    /// older page automatically (`manual = false`) or on click (`manual = true`).
+    fn next_cursor(&self, view: PagedView, shown: usize, manual: bool) -> Option<String> {
+        let cursor = self.next.as_ref()?;
+        if self.loading_more {
+            return None;
+        }
+        if !manual {
+            if self.more_error.is_some() {
+                return None;
+            }
+            if matches!(self.empty_pages, Some((v, len, count)) if v == view && len == shown && count >= AUTO_EMPTY_PAGES) {
+                return None;
+            }
+        }
+        Some(cursor.clone())
+    }
+
+    /// Merges a refreshed first page (`Arrival::Read` / `Arrival::Fetch`), keeping older pages
+    /// already loaded below it and preserving `next` whenever the engine reports more mail.
+    fn apply_first_page(&mut self, conversations: Vec<Conversation>, next: Option<String>, asked: bool) {
+        let oldest = conversations.last().and_then(ConversationExt::time);
+        let fresh: HashSet<String> = conversations.iter().map(|c| c.id.clone()).collect();
+        let tail: Vec<Conversation> = std::mem::take(&mut self.conversations)
+            .into_iter()
+            .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.time().is_none_or(|d| d <= oldest)))
+            .collect();
+        self.conversations = conversations;
+        self.empty_pages = None;
+        self.more_error = None;
+        if asked {
+            self.fetched = Some(Instant::now());
+        }
+        if tail.is_empty() {
+            self.next = next;
+        } else {
+            self.conversations.extend(tail);
+            if self.next.is_none() {
+                self.next = next;
+            }
+        }
+    }
+
+    /// Appends an older page (`Arrival::More`), returning whether any new conversation was added.
+    fn apply_more_page(&mut self, conversations: Vec<Conversation>, next: Option<String>, failures: &[String]) -> bool {
+        let known: HashSet<String> = self.conversations.iter().map(|c| c.id.clone()).collect();
+        let before = self.conversations.len();
+        self.conversations.extend(conversations.into_iter().filter(|c| !known.contains(&c.id)));
+        let added = self.conversations.len() > before;
+        self.next = next;
+        self.more_error = (!added && !failures.is_empty()).then(|| failures.join("; ").into());
+        added
+    }
+
+    /// Updates consecutive-empty-page tracking after `Arrival::More` rebuilt `view`; returns
+    /// whether automatic paging should immediately continue with the next page.
+    fn finish_more_view(&mut self, view: PagedView, before_shown: usize, after_shown: usize) -> bool {
+        if after_shown > before_shown || self.next.is_none() {
+            self.empty_pages = None;
+            return false;
+        }
+        let count = match self.empty_pages {
+            Some((v, len, count)) if v == view && len == after_shown => count.saturating_add(1),
+            _ => 1,
+        };
+        self.empty_pages = Some((view, after_shown, count));
+        self.more_error.is_none() && count < AUTO_EMPTY_PAGES
+    }
 }
 
 /// One run of a search (MS-352): the mail already loaded that matches shows at once, then each
@@ -269,8 +348,8 @@ enum Arrival {
     Read,
     /// The providers' newest.
     Fetch,
-    /// The page after the last.
-    More,
+    /// The page after the last, asked by `view` when it showed `shown` lines.
+    More(PagedView, usize),
 }
 
 /// A scrolling view that pages the list when its end comes into view.
@@ -292,6 +371,8 @@ pub enum Item {
     Bundle(Rc<Bundle>),
     /// Chat's spaces with unread messages, folded into one row over the bundles (MS-330).
     Chat(Rc<ChatBundle>),
+    /// Bottom footer while older mail can still be loaded ("Loading older mail…" / "Load older mail").
+    More,
 }
 
 /// What a bundle folds: service mail of one category, or Chat's unread spaces (MS-330).
@@ -685,8 +766,8 @@ impl MailApp {
             drawn_rows: HashSet::new(),
             window: window.window_handle(),
             hovered_row: None,
-            list_scroll: list_state(0),
-            bundle_scroll: list_state(0),
+            list_scroll: Self::new_list_scroll(PagedView::List, cx),
+            bundle_scroll: Self::new_list_scroll(PagedView::Bundle, cx),
             reader_scroll: ScrollHandle::new(),
             expanded: ["unified:inbox", "chat", "section:accounts"].into_iter().map(SharedString::from).collect(),
             sidebar_open: true,
@@ -1042,19 +1123,48 @@ impl MailApp {
         });
     }
 
+    /// A fresh `ListState` for `view` whose scroll handler pages older mail near the bottom even
+    /// when `gpui-fast`'s scroll layer reuses cached rows without re-invoking `render_item`.
+    pub(crate) fn new_list_scroll(view: PagedView, cx: &mut Context<Self>) -> ListState {
+        let state = list_state(0);
+        let weak = cx.weak_entity();
+        state.set_scroll_handler(move |event, _, cx| {
+            if event.count > 0 && event.visible_range.end + MORE_AHEAD >= event.count {
+                let _ = weak.update(cx, |this, cx| {
+                    let shown = this.view_item_count(view);
+                    this.load_more(view, shown, false, cx);
+                });
+            }
+        });
+        state
+    }
+
+    /// Visible line count of `view`, excluding the trailing `More` footer.
+    pub fn view_item_count(&self, view: PagedView) -> usize {
+        match view {
+            PagedView::List => self.items.iter().filter(|item| !matches!(item, Item::More)).count(),
+            PagedView::Bundle => match self.open_bundle() {
+                Some(BundleKind::Mail(category)) => self.bundle_members(category).map_or(0, |b| b.members.len()),
+                _ => 0,
+            },
+        }
+    }
+
     /// Asks for the page after the current list's last, when there is one and none is loading.
-    /// `shown` is the length of the view whose end the user reached.
-    pub fn load_more(&mut self, view: PagedView, shown: usize, cx: &mut Context<Self>) {
+    /// `shown` is the length of the view whose end the user reached (excluding the footer);
+    /// `manual` is true when triggered by clicking the footer's "Load older mail" button.
+    pub fn load_more(&mut self, view: PagedView, shown: usize, manual: bool, cx: &mut Context<Self>) {
         let key = self.key();
         let Some(list) = self.lists.get_mut(&key) else { return };
-        let Some(cursor) = list.next.clone() else { return };
-        if list.loading || list.loading_more || list.paged_at == Some((view, shown)) {
-            return;
-        }
+        let Some(cursor) = list.next_cursor(view, shown, manual) else { return };
         list.loading_more = true;
-        list.paged_at = Some((view, shown));
+        list.more_error = None;
+        if manual {
+            list.empty_pages = None;
+        }
+        cx.notify();
         self.background(cx, key.clone().fetch(Some(cursor), false), move |this, result, cx| {
-            this.list_arrived(key, result, Arrival::More, cx)
+            this.list_arrived(key, result, Arrival::More(view, shown), cx)
         });
     }
 
@@ -1063,36 +1173,22 @@ impl MailApp {
         match arrival {
             Arrival::Read => list.loading = false,
             Arrival::Fetch => list.fetching = false,
-            Arrival::More => list.loading_more = false,
+            Arrival::More(_, _) => list.loading_more = false,
         }
         let again = arrival == Arrival::Read && std::mem::take(&mut list.stale);
         // The providers answered.
         let asked = arrival == Arrival::Fetch;
+        let mut more_succeeded = false;
         match result {
             Ok(mut listing) => {
                 listing.conversations.retain(|c| !self.removing.contains(&c.id));
-                if arrival == Arrival::More {
-                    let known: HashSet<String> = list.conversations.iter().map(|c| c.id.clone()).collect();
-                    list.conversations.extend(listing.conversations.into_iter().filter(|c| !known.contains(&c.id)));
-                    list.next = listing.next;
-                } else {
-                    // A refreshed first page replaces its span; older pages already loaded stay,
-                    // with the cursor past them.
-                    let oldest = listing.conversations.last().and_then(ConversationExt::time);
-                    let fresh: HashSet<String> = listing.conversations.iter().map(|c| c.id.clone()).collect();
-                    let tail: Vec<Conversation> = std::mem::take(&mut list.conversations)
-                        .into_iter()
-                        .filter(|c| !fresh.contains(&c.id) && oldest.is_some_and(|oldest| c.time().is_some_and(|d| d < oldest)))
-                        .collect();
-                    list.conversations = listing.conversations;
-                    list.paged_at = None;
-                    if asked {
-                        list.fetched = Some(Instant::now());
+                match arrival {
+                    Arrival::More(_, _) => {
+                        list.apply_more_page(listing.conversations, listing.next, &listing.failures);
+                        more_succeeded = true;
                     }
-                    if tail.is_empty() {
-                        list.next = listing.next;
-                    } else {
-                        list.conversations.extend(tail);
+                    Arrival::Read | Arrival::Fetch => {
+                        list.apply_first_page(listing.conversations, listing.next, asked);
                     }
                 }
                 list.error = None;
@@ -1101,9 +1197,13 @@ impl MailApp {
                     list.failures = (!listing.failures.is_empty()).then(|| listing.failures.join("; ").into());
                 }
             }
-            Err(error) => list.error = Some(error.to_string().into()),
+            Err(error) => match arrival {
+                Arrival::More(_, _) => list.more_error = Some(error.to_string().into()),
+                Arrival::Read | Arrival::Fetch => list.error = Some(error.to_string().into()),
+            },
         }
-        if key == self.key() {
+        let current = key == self.key();
+        if current {
             self.rebuild_items();
             self.refresh_layers(cx);
         } else if self.beneath.as_ref().is_some_and(|beneath| beneath.key() == key) {
@@ -1111,7 +1211,17 @@ impl MailApp {
         }
         self.load_previews(&key, cx);
         if again {
-            self.read_list(key, cx);
+            self.read_list(key.clone(), cx);
+        }
+        if current && more_succeeded && let Arrival::More(view, before_shown) = arrival {
+            let after_shown = self.view_item_count(view);
+            let keep_going = self
+                .lists
+                .get_mut(&key)
+                .is_some_and(|list| list.finish_more_view(view, before_shown, after_shown));
+            if keep_going {
+                self.load_more(view, after_shown, false, cx);
+            }
         }
         cx.notify();
     }
@@ -1240,6 +1350,9 @@ impl MailApp {
                 }
             }
             items.push(Item::Row(index));
+        }
+        if key.query.is_none() && list.next.is_some() && !list.conversations.is_empty() {
+            items.push(Item::More);
         }
         Some(items)
     }
@@ -1433,6 +1546,7 @@ pub fn line_id(item: &Item, list: Option<&List>) -> String {
         Item::Row(index) => list.and_then(|l| l.conversations.get(*index)).map(|c| c.id.clone()).unwrap_or_default(),
         Item::Bundle(bundle) => BundleKind::Mail(bundle.category).id(),
         Item::Chat(_) => BundleKind::Chat.id(),
+        Item::More => "footer:more".into(),
     }
 }
 
@@ -1442,5 +1556,92 @@ struct Changes(UnboundedSender<Event>);
 impl EventListener for Changes {
     fn on_event(&self, change: Change) {
         let _ = self.0.unbounded_send(change.event);
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    fn conversation(id: &str, date: Option<&str>) -> Conversation {
+        Conversation {
+            id: id.into(),
+            account: "me@example.com".into(),
+            subject: id.into(),
+            date: date.map(String::from),
+            from: None,
+            from_me: false,
+            peers: Vec::new(),
+            participants: Vec::new(),
+            message_count: 1,
+            unread: false,
+            starred: false,
+            has_attachment: false,
+            mailboxes: vec![MailboxRole::Inbox],
+            snippet: None,
+            category: Some(Category::People),
+            waiting: false,
+            labels: Vec::new(),
+            started: false,
+            tag: String::new(),
+            title: id.into(),
+            when: String::new(),
+            section: String::new(),
+            avatar: Default::default(),
+        }
+    }
+
+    #[test]
+    fn bundled_pages_auto_continue_up_to_cap_then_allow_manual_load() {
+        let mut list = List {
+            conversations: vec![conversation("c0", Some("2026-11-19T12:00:00Z"))],
+            next: Some("cur1".into()),
+            ..List::default()
+        };
+        // Suppose Smart Inbox keeps visible length at 20 across 3 pages of bundled mail.
+        for step in 1..=AUTO_EMPTY_PAGES {
+            assert_eq!(list.next_cursor(PagedView::List, 20, false).as_deref(), Some(format!("cur{step}").as_str()));
+            list.apply_more_page(
+                vec![conversation(&format!("b{step}"), Some("2026-11-18T12:00:00Z"))],
+                Some(format!("cur{}", step + 1)),
+                &[],
+            );
+            let keep_going = list.finish_more_view(PagedView::List, 20, 20);
+            assert_eq!(keep_going, step < AUTO_EMPTY_PAGES);
+        }
+        // Automatic paging pauses at the cap, while manual "Load older mail" still proceeds.
+        assert_eq!(list.next_cursor(PagedView::List, 20, false), None);
+        assert_eq!(list.next_cursor(PagedView::List, 20, true).as_deref(), Some("cur4"));
+        // Once a page adds visible rows, automatic paging resumes.
+        assert!(!list.finish_more_view(PagedView::List, 20, 25));
+        assert_eq!(list.next_cursor(PagedView::List, 25, false).as_deref(), Some("cur4"));
+    }
+
+    #[test]
+    fn more_error_pauses_auto_paging_and_first_page_keeps_same_second_and_undated_tail() {
+        let mut list = List {
+            conversations: vec![
+                conversation("c1", Some("2026-11-19T10:00:00Z")),
+                conversation("c2", Some("2026-11-19T10:00:00Z")),
+                conversation("c3", None),
+            ],
+            next: Some("cur_old".into()),
+            ..List::default()
+        };
+        // Empty page with provider failure preserves `next`, records `more_error`, pauses auto,
+        // and still allows manual retry.
+        list.apply_more_page(Vec::new(), Some("cur_old".into()), &["gmail: timeout".into()]);
+        assert!(list.more_error.is_some());
+        assert_eq!(list.next_cursor(PagedView::List, 3, false), None);
+        assert_eq!(list.next_cursor(PagedView::List, 3, true).as_deref(), Some("cur_old"));
+
+        // A refreshed first page whose oldest shares the same second as `c2` keeps both `c2` and
+        // undated `c3` in the tail.
+        list.next = None;
+        list.apply_first_page(vec![conversation("c1", Some("2026-11-19T10:00:00Z"))], Some("cur_fresh".into()), true);
+        let ids: Vec<&str> = list.conversations.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["c1", "c2", "c3"]);
+        assert_eq!(list.next.as_deref(), Some("cur_fresh"));
+        assert!(list.more_error.is_none());
     }
 }

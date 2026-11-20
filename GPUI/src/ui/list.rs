@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::chat::UnreadSpace;
-use crate::state::{ChatBundle, line_id};
+use crate::state::{ChatBundle, MORE_AHEAD, line_id};
 use gpui::{ListState, MouseDownEvent, list};
 use mailstream::Account;
 
@@ -27,8 +27,9 @@ impl MailApp {
             scroll.clone(),
             cx.processor(move |this, ix: usize, _, cx| {
                 // The list beneath only shows as the search slides off; it pages once on screen.
-                if !beneath && ix + 20 >= this.items.len() {
-                    this.load_more(PagedView::List, this.items.len(), cx);
+                let shown = this.view_item_count(PagedView::List);
+                if !beneath && ix + MORE_AHEAD >= shown {
+                    this.load_more(PagedView::List, shown, false, cx);
                 }
                 if !beneath && this.query.is_some() {
                     this.row_drawn(ix, cx);
@@ -122,7 +123,7 @@ impl MailApp {
     /// The id of the row after `ix` in `items`, lines of `list`, if a row follows.
     fn next_row(items: &[Item], list: &List, ix: usize) -> Option<String> {
         match items.get(ix + 1)? {
-            Item::Section(_) | Item::Waiting(_) => None,
+            Item::Section(_) | Item::Waiting(_) | Item::More => None,
             item => Some(line_id(item, Some(list))),
         }
     }
@@ -178,6 +179,10 @@ impl MailApp {
             Item::Chat(bundle) => {
                 let selected = self.line_selected(&BundleKind::Chat.id(), beneath);
                 self.render_chat_row(bundle, selected, rule, p, cx)
+            }
+            Item::More => {
+                let shown = self.view_item_count(PagedView::List);
+                self.render_more_footer(PagedView::List, shown, list, p, cx)
             }
         }
     }
@@ -379,17 +384,24 @@ impl MailApp {
         let Some(bundle) = self.bundle_members(category) else {
             return centered_note("Nothing here any more", p).into_any_element();
         };
-        let count = bundle.members.len();
+        let has_more = self.list().is_some_and(|list| list.next.is_some());
+        let count = bundle.members.len() + usize::from(has_more);
         if self.bundle_scroll.item_count() != count {
             keep_top(&self.bundle_scroll, count);
         }
         list(
             self.bundle_scroll.clone(),
             cx.processor(move |this, row: usize, _, cx| {
-                if row + 20 >= bundle.members.len() {
-                    this.load_more(PagedView::Bundle, bundle.members.len(), cx);
+                if row + MORE_AHEAD >= bundle.members.len() {
+                    this.load_more(PagedView::Bundle, bundle.members.len(), false, cx);
                 }
                 let Some(list) = this.list() else { return div().into_any_element() };
+                if row == bundle.members.len() {
+                    return div()
+                        .px(px(metrics::INSET))
+                        .child(this.render_more_footer(PagedView::Bundle, bundle.members.len(), list, p, cx))
+                        .into_any_element();
+                }
                 let Some(conversation) = bundle.members.get(row).and_then(|&ix| list.conversations.get(ix)) else {
                     return div().into_any_element();
                 };
@@ -402,6 +414,57 @@ impl MailApp {
         .size_full()
         .py(px(space::S6))
         .into_any_element()
+    }
+
+    /// Bottom footer while older mail can still be loaded: shows progress while fetching, or an
+    /// explicit "Load older mail" button (with any error note) when idle or paused.
+    fn render_more_footer(
+        &self,
+        view: PagedView,
+        shown: usize,
+        list: &List,
+        p: &'static Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = match view {
+            PagedView::List => "list-load-more",
+            PagedView::Bundle => "bundle-load-more",
+        };
+        if list.loading_more {
+            return div()
+                .w_full()
+                .py(px(space::S12))
+                .flex()
+                .justify_center()
+                .text_size(px(text::CAPTION))
+                .text_color(p.muted)
+                .child("Loading older mail…")
+                .into_any_element();
+        }
+        let kind = if list.more_error.is_some() { ButtonKind::Secondary } else { ButtonKind::Plain(p.accent) };
+        div()
+            .w_full()
+            .py(px(space::S10))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::S6))
+            .when_some(list.more_error.clone(), |d, error| {
+                d.child(
+                    div()
+                        .px(px(space::S12))
+                        .text_center()
+                        .text_size(px(text::CAPTION))
+                        .text_color(p.muted)
+                        .child(error),
+                )
+            })
+            .child(button(id, "Load older mail", kind, ControlSize::Small, true, p).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.load_more(view, shown, true, cx);
+                },
+            )))
+            .into_any_element()
     }
 
     /// The inbox's Chat bundle row (MS-330): its spaces with unread messages, named, and the

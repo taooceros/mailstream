@@ -194,6 +194,10 @@ fn answer(request: &FakeRequest) -> Reply {
         ("POST", "/v1.0/me/sendMail") => Reply::bytes(202, Vec::new()),
         ("POST", "/v1.0/$batch") => graph_batch(request, &mut lines),
         ("POST", "/batch/gmail/v1") => gmail_batch(request, &mut lines),
+        ("GET", "/v1.0/me/mailFolders/AAMk-archive/messages") => archive_page(request),
+        ("GET", _) if path.starts_with("/v1.0/me/messages/arch-") => {
+            Reply::json(json!({ "body": { "contentType": "text", "content": "Archived project update from earlier this quarter." } }))
+        }
         _ => calendar_reply(method, path, request).unwrap_or_else(refused),
     };
     let mut log = LOG.lock().expect("log lock");
@@ -255,6 +259,52 @@ fn refusal() -> Value {
 
 fn refused() -> Reply {
     Reply::status(400, refusal())
+}
+
+/// Synthetic multi-page Outlook Archive listing (220 messages across 5 pages) so `shots.py` can
+/// exercise scroll-to-bottom older-mail loading end to end without touching the seeded Inbox.
+fn archive_page(request: &FakeRequest) -> Reply {
+    let page = request.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    const TOTAL: usize = 220;
+    const SIZE: usize = 50;
+    let start = page * SIZE;
+    let end = (start + SIZE).min(TOTAL);
+    let now = model::now();
+    let senders = [
+        ("Dana White", "dana@contoso.example"),
+        ("Evan Ross", "evan@contoso.example"),
+        ("Jordan Park", "jordan.park@northwind.example"),
+        ("Priya Shah", "priya@example.org"),
+    ];
+    let value: Vec<Value> = (start..end)
+        .map(|n| {
+            let (name, email) = senders[n % senders.len()];
+            let id = format!("arch-{n:03}");
+            // Spread across recent days through ~3 months ago so date groups advance across pages.
+            let date = model::iso8601(now - (n as f64 + 1.0) * 10.0 * 3600.0);
+            json!({
+                "id": id,
+                "conversationId": format!("c-{id}"),
+                "internetMessageId": format!("<{id}@contoso.example>"),
+                "subject": format!("Archived report #{:03}", n + 1),
+                "from": { "emailAddress": { "name": name, "address": email } },
+                "toRecipients": [{ "emailAddress": { "name": "Sam Lee", "address": "sam.lee@contoso.example" } }],
+                "receivedDateTime": date,
+                "isRead": true,
+                "flag": { "flagStatus": "notFlagged" },
+                "isDraft": false,
+                "hasAttachments": false,
+            })
+        })
+        .collect();
+    let mut body = json!({ "value": value });
+    if end < TOTAL
+        && let Some(server) = PROVIDER.get()
+    {
+        body["@odata.nextLink"] =
+            json!(format!("{}/v1.0/me/mailFolders/AAMk-archive/messages?page={}", server.base, page + 1));
+    }
+    Reply::json(body)
 }
 
 #[derive(Default)]

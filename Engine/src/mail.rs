@@ -59,6 +59,10 @@ pub const PAGE_SIZE: usize = 50;
 /// Page fetches one listing request may make past the mail already kept, so a rare filter
 /// cannot page through a whole mailbox.
 const AGENT_PAGE_ROUNDS: usize = 6;
+/// Extra rounds allowed while a restarted stale cursor walks past envelopes already kept in
+/// mail.db (`!grew`), so a listing with several cached pages still reaches older mail in one
+/// request without risking an unbounded loop.
+const AGENT_CATCH_UP_ROUNDS: usize = 40;
 /// Conversations `mail.*` commands remember by id while the engine runs.
 const KNOWN_LIMIT: usize = 5000;
 /// How long push notifications for one account gather before the pass that picks them up.
@@ -148,6 +152,7 @@ struct AgentListing {
 
 /// The position after a conversation in a newest-first listing: its date and id, written
 /// `<milliseconds since 1970>|<conversation id>`.
+#[derive(Clone)]
 struct Cursor {
     date: f64,
     id: String,
@@ -956,11 +961,8 @@ impl Mail {
                 .collect();
             // Paging resumes after the older mail kept when the first page reaches it. Past a
             // gap (more new mail than a page) it goes on from the first page.
-            if !older.is_empty()
-                && let Some(next) = &before.next
-                && before.envelopes.iter().any(|envelope| ids.contains(envelope.id.as_str()))
-            {
-                listing.next = Some(next.clone());
+            if !older.is_empty() && before.envelopes.iter().any(|envelope| ids.contains(envelope.id.as_str())) {
+                listing.next = before.next.clone();
             }
             listing.envelopes.extend(older);
         }
@@ -981,8 +983,9 @@ impl Mail {
     }
 
     /// The next page of each of `keys` that has one, fetched at once and kept in mail.db with
-    /// the cursor after it; answers the keys whose page failed.
-    async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> HashMap<MailboxKey, ApiError> {
+    /// the cursor after it; answers the keys whose page failed and whether any mailbox gained new
+    /// envelopes (as opposed to only restarting or catching up past already-cached ones).
+    async fn fetch_next_pages(self: &Arc<Self>, keys: &[MailboxKey]) -> (HashMap<MailboxKey, ApiError>, bool) {
         let jobs: Vec<(MailboxKey, String)> = {
             let state = self.state();
             keys.iter()
@@ -999,6 +1002,7 @@ impl Mail {
             .collect();
         let mut grew = false;
         let mut failures = HashMap::new();
+        let mut needs_first_page: Vec<(MailboxKey, String)> = Vec::new();
         while let Some((key, cursor, result)) = running.next().await {
             let mut state = self.state();
             let Some(listing) = state.listings.get_mut(&key) else { continue };
@@ -1014,16 +1018,74 @@ impl Mail {
                     let kept = CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() };
                     self.cache.save_listing(kept, &key);
                     grew |= self.settle_pending(&mut state, &key);
+                    drop(state);
+                    self.account_loaded(&key.account);
                 }
                 Err(error) => {
                     // A cursor kept on disk went stale: page on from the first page's instead.
-                    if [400, 404, 410].contains(&error.status)
-                        && let Some(restart) = listing.restart.clone()
-                        && restart != cursor
-                    {
-                        listing.next = Some(restart);
-                    } else {
-                        drop(state);
+                    if [400, 404, 410].contains(&error.status) {
+                        if let Some(restart) = listing.restart.clone()
+                            && restart != cursor
+                        {
+                            listing.next = Some(restart);
+                            let kept = CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() };
+                            self.cache.save_listing(kept, &key);
+                            continue;
+                        }
+                        if listing.restart.is_none() {
+                            needs_first_page.push((key, cursor));
+                            continue;
+                        }
+                    }
+                    drop(state);
+                    self.report(&error, Some(&key.account));
+                    if error.cuts_off() {
+                        self.account_failed(&key.account, &error);
+                    }
+                    failures.insert(key, error);
+                }
+            }
+        }
+        // Mailboxes loaded straight from mail.db had no fresh first page yet: fetch page 1 to
+        // replace the stale disk cursor with a live restart token.
+        if !needs_first_page.is_empty() {
+            let mut restarts: FuturesUnordered<_> = needs_first_page
+                .into_iter()
+                .filter_map(|(key, stale)| self.backend(&key.account).map(|backend| (key, stale, backend)))
+                .map(|(key, stale, backend)| async move {
+                    let result = backend.envelopes(&key.mailbox, None, PAGE_SIZE, Priority::Interactive).await;
+                    (key, stale, result)
+                })
+                .collect();
+            while let Some((key, stale, result)) = restarts.next().await {
+                match result {
+                    Ok(page) => {
+                        let mut state = self.state();
+                        let Some(listing) = state.listings.get_mut(&key) else { continue };
+                        if listing.next.as_deref() != Some(stale.as_str()) {
+                            continue;
+                        }
+                        let before_len = listing.envelopes.len();
+                        let fresh: Vec<Arc<Envelope>> = page.envelopes.into_iter().map(Arc::new).collect();
+                        let fresh_ids: HashSet<&str> = fresh.iter().map(|e| e.id.as_str()).collect();
+                        let oldest = fresh.iter().filter_map(|e| e.date).reduce(f64::min).unwrap_or(DISTANT_PAST);
+                        let older: Vec<Arc<Envelope>> = listing
+                            .envelopes
+                            .iter()
+                            .filter(|e| !fresh_ids.contains(e.id.as_str()) && e.date.unwrap_or(DISTANT_PAST) <= oldest)
+                            .cloned()
+                            .collect();
+                        let mut merged = fresh;
+                        merged.extend(older);
+                        listing.envelopes = merged;
+                        listing.next = page.next.clone();
+                        listing.restart = page.next;
+                        grew |= listing.envelopes.len() != before_len;
+                        let kept = CachedListing { envelopes: listing.envelopes.clone(), next: listing.next.clone() };
+                        self.cache.save_listing(kept, &key);
+                        grew |= self.settle_pending(&mut state, &key);
+                    }
+                    Err(error) => {
                         self.report(&error, Some(&key.account));
                         if error.cuts_off() {
                             self.account_failed(&key.account, &error);
@@ -1039,7 +1101,7 @@ impl Mail {
                 self.conversations_changed();
             }
         }
-        failures
+        (failures, grew)
     }
 
     fn messages(state: &State, key: &MailboxKey, envelopes: &[Arc<Envelope>]) -> Vec<MailMessage> {
@@ -1114,7 +1176,9 @@ impl Mail {
         }
         failures.sort();
         let mut given_up: HashSet<MailboxKey> = HashSet::new();
+        let mut seen_cursors: HashSet<(MailboxKey, String)> = HashSet::new();
         let mut round = 0;
+        let mut catch_up_rounds = 0;
         loop {
             let step = {
                 let state = self.state();
@@ -1150,13 +1214,34 @@ impl Mail {
                     })
                     .cloned()
                     .collect();
-                if short.is_empty() || round == AGENT_PAGE_ROUNDS {
+                if short.is_empty() || round == AGENT_PAGE_ROUNDS || catch_up_rounds == AGENT_CATCH_UP_ROUNDS {
                     let page: Vec<Conversation> = matching[start..end].to_vec();
                     let more = matching.len() > end || paged.iter().any(|key| Self::has_next_page(&state, key));
-                    let next = if more { page.last().map(Cursor::after) } else { None };
+                    // Never drop the caller's cursor while more mail remains: an empty page from
+                    // a transient failure, a catch-up cap, or newly fetched mail that merged into
+                    // existing threads must still let the next request continue.
+                    let next = if more { page.last().map(Cursor::after).or_else(|| cursor.cloned()) } else { None };
                     Ok(AgentListing { conversations: page, next, ..listed })
                 } else {
-                    Err(short)
+                    let mut ask = Vec::with_capacity(short.len());
+                    for key in short {
+                        let Some(next) = state.listings.get(&key).and_then(|listing| listing.next.clone()) else {
+                            continue;
+                        };
+                        if seen_cursors.insert((key.clone(), next)) {
+                            ask.push(key);
+                        } else {
+                            given_up.insert(key);
+                        }
+                    }
+                    if ask.is_empty() {
+                        let page: Vec<Conversation> = matching[start..end].to_vec();
+                        let more = matching.len() > end || paged.iter().any(|key| Self::has_next_page(&state, key));
+                        let next = if more { page.last().map(Cursor::after).or_else(|| cursor.cloned()) } else { None };
+                        Ok(AgentListing { conversations: page, next, ..listed })
+                    } else {
+                        Err(ask)
+                    }
                 }
             };
             match step {
@@ -1165,7 +1250,7 @@ impl Mail {
                     return listing;
                 }
                 Err(short) => {
-                    let failed = self.fetch_next_pages(&short).await;
+                    let (failed, grew) = self.fetch_next_pages(&short).await;
                     let state = self.state();
                     for (key, error) in failed {
                         let name = Self::mailbox(&state, &key).map_or(key.mailbox.as_str(), Mailbox::display_name);
@@ -1173,7 +1258,11 @@ impl Mail {
                         given_up.insert(key);
                     }
                     failures.sort();
-                    round += 1;
+                    if grew {
+                        round += 1;
+                    } else {
+                        catch_up_rounds += 1;
+                    }
                 }
             }
         }

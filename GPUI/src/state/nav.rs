@@ -33,7 +33,7 @@ impl MailApp {
         self.layers.clear();
         if !same {
             self.highlight = None;
-            self.list_scroll = list_state(0);
+            self.list_scroll = Self::new_list_scroll(PagedView::List, cx);
         }
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
@@ -102,7 +102,7 @@ impl MailApp {
             self.beneath = Some(Beneath {
                 source: source.clone(),
                 items: std::mem::take(&mut self.items),
-                scroll: std::mem::replace(&mut self.list_scroll, list_state(0)),
+                scroll: std::mem::replace(&mut self.list_scroll, Self::new_list_scroll(PagedView::List, cx)),
                 highlight: self.highlight.take(),
             });
             false
@@ -110,7 +110,7 @@ impl MailApp {
             false
         } else {
             self.beneath =
-                Some(Beneath { source: source.clone(), items: Vec::new(), scroll: list_state(0), highlight: None });
+                Some(Beneath { source: source.clone(), items: Vec::new(), scroll: Self::new_list_scroll(PagedView::List, cx), highlight: None });
             true
         };
         self.source = source;
@@ -118,7 +118,7 @@ impl MailApp {
         self.layers.clear();
         self.push_layer(Layer::Search, true);
         self.highlight = None;
-        self.list_scroll = list_state(0);
+        self.list_scroll = Self::new_list_scroll(PagedView::List, cx);
         self.drawn_rows.clear();
         self.rebuild_items();
         self.load_list(self.key(), false, cx);
@@ -163,7 +163,7 @@ impl MailApp {
                 }
                 None => {
                     self.highlight = None;
-                    self.list_scroll = list_state(0);
+                    self.list_scroll = Self::new_list_scroll(PagedView::List, cx);
                 }
             }
             self.rebuild_items();
@@ -233,7 +233,7 @@ impl MailApp {
             .iter()
             .enumerate()
             .filter_map(|(position, item)| match item {
-                Item::Section(_) | Item::Waiting(_) => None,
+                Item::Section(_) | Item::Waiting(_) | Item::More => None,
                 _ => Some((self.item_id(item), position)),
             })
             .collect();
@@ -559,7 +559,7 @@ impl MailApp {
                 self.highlight = Some(id.to_owned());
             }
             self.bundle_highlight = None;
-            self.bundle_scroll = list_state(0);
+            self.bundle_scroll = Self::new_list_scroll(PagedView::Bundle, cx);
             self.push_layer(Layer::Bundle(kind), animate);
             cx.notify();
             return;

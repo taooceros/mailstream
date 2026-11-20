@@ -1196,3 +1196,204 @@ fn fetches_gmail_body_over_imap_before_api_and_falls_back_when_missing() {
     drop(engine);
     cleanup(&config);
 }
+
+/// When fetching older pages fails transiently (leaving the page empty while the provider still
+/// has more mail), `mail.list` must keep the caller's `next` cursor so a later retry loads the
+/// older messages instead of stopping pagination permanently (MS-415).
+#[test]
+fn paging_preserves_cursor_on_transient_failure_and_recovers() {
+    let fail_page_two = Arc::new(AtomicBool::new(true));
+    let failing = fail_page_two.clone();
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let base_url = Arc::new(std::sync::OnceLock::<String>::new());
+    let base_for_handler = base_url.clone();
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            return token_reply(&tokens);
+        }
+        let Some(resource) = request.path.strip_prefix("/v1.0/") else {
+            return Reply::status(404, json!({ "error": { "message": "Not found" } }));
+        };
+        match resource {
+            "me" => Reply::json(json!({ "displayName": "Me", "mail": "me@outlook.com" })),
+            "me/mailFolders" => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "totalItemCount": 80, "unreadItemCount": 0 },
+                { "id": "F-sent", "displayName": "Sent Items", "childFolderCount": 0, "totalItemCount": 0, "unreadItemCount": 0 },
+            ]})),
+            "me/mailFolders/inbox" => Reply::json(json!({ "id": "F-inbox" })),
+            "me/mailFolders/sentitems" => Reply::json(json!({ "id": "F-sent" })),
+            "me/mailFolders/F-inbox/messages" => {
+                let page = request.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                if page == 1 && failing.load(Ordering::SeqCst) {
+                    return Reply::status(403, json!({ "error": { "message": "Forbidden temporarily" } }));
+                }
+                let start = page * 50;
+                let end = (start + 50).min(80);
+                let value: Vec<Value> = (start..end)
+                    .map(|n| graph_message(&format!("m{n:03}"), &format!("c{n:03}"), ("Person", "p@x.com"), &format!("Topic {n}"), -(n as i64)))
+                    .collect();
+                let mut body = json!({ "value": value });
+                if end < 80 {
+                    body["@odata.nextLink"] = json!(format!("{}/v1.0/me/mailFolders/F-inbox/messages?page={}", base_for_handler.get().unwrap(), page + 1));
+                }
+                Reply::json(body)
+            }
+            other if other.starts_with("me/mailFolders/") && other.ends_with("/messages") => {
+                Reply::json(json!({ "value": [] }))
+            }
+            other if other.starts_with("me/messages/") => {
+                Reply::json(json!({ "body": { "contentType": "text", "content": "ok" } }))
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        }
+    });
+    base_url.set(server.base.clone()).unwrap();
+
+    let (engine, config) = engine_for(&server, &[("me@outlook.com", "microsoft")]);
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@outlook.com"].as_array().is_some_and(|boxes| !boxes.is_empty())
+    });
+
+    let first = call(&engine, "mail.list", json!({ "limit": 50 })).unwrap();
+    assert_eq!(ids(&first).len(), 50);
+    let cursor = first["next"].as_str().expect("first page must carry a next cursor").to_string();
+
+    // Transient failure on page 2 returns an empty page with a failure message, yet preserves `next`.
+    let failed = call(&engine, "mail.list", json!({ "limit": 50, "cursor": cursor })).unwrap();
+    assert_eq!(ids(&failed).len(), 0);
+    assert!(!failed["failures"].as_array().unwrap().is_empty(), "{failed}");
+    assert_eq!(failed["next"].as_str(), Some(cursor.as_str()), "cursor must be kept when more mail remains");
+
+    // Once the provider recovers, retrying with the preserved cursor loads the remaining 30 messages.
+    fail_page_two.store(false, Ordering::SeqCst);
+    let second = call(&engine, "mail.list", json!({ "limit": 50, "cursor": cursor })).unwrap();
+    assert_eq!(ids(&second).len(), 30);
+    assert_eq!(second["failures"], json!([]));
+    assert!(second["next"].is_null(), "reached end of mailbox: {second}");
+    drop(engine);
+    cleanup(&config);
+}
+
+/// When mail.db holds >6 pages (350 envelopes) with a stale cursor and no in-memory restart
+/// cursor yet, paging past the cached mail recovers via a fresh first page, catches up past all
+/// 350 already-cached envelopes without tripping `AGENT_PAGE_ROUNDS`, and returns the older mail
+/// (MS-415).
+#[test]
+fn paging_recovers_stale_disk_cursor_past_more_than_six_cached_pages() {
+    use crate::cache::{CachedListing, MailCache};
+    use crate::model::{Address, Envelope, Mailbox, MailboxKey, MailboxRole, date_from_unix};
+    use std::collections::BTreeSet;
+
+    let mut cached_envelopes = Vec::new();
+    for n in 0..350 {
+        let id = format!("old{n:03}");
+        cached_envelopes.push(Arc::new(Envelope {
+            id: id.clone(),
+            thread: Some(format!("c-{id}")),
+            message_id: Some(format!("{id}@outlook")),
+            in_reply_to: Vec::new(),
+            flags: BTreeSet::new(),
+            subject: format!("Archive {n}"),
+            from: vec![Address::new(Some(format!("Person {n}")), &format!("p{n}@x.com"))],
+            to: vec![Address::new(Some("Me".into()), "me@outlook.com")],
+            date: Some(date_from_unix((BASE_MS / 1000 - (n as i64) * 60) as f64)),
+            size: 100,
+            has_attachment: Some(false),
+            tags: BTreeSet::new(),
+            provider_category: None,
+            important: false,
+        }));
+    }
+
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let base_url = Arc::new(std::sync::OnceLock::<String>::new());
+    let base_for_handler = base_url.clone();
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            return token_reply(&tokens);
+        }
+        let Some(resource) = request.path.strip_prefix("/v1.0/") else {
+            return Reply::status(404, json!({ "error": { "message": "Not found" } }));
+        };
+        match resource {
+            "me" => Reply::json(json!({ "displayName": "Me", "mail": "me@outlook.com" })),
+            "me/mailFolders" => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "totalItemCount": 0, "unreadItemCount": 0 },
+                { "id": "F-sent", "displayName": "Sent Items", "childFolderCount": 0, "totalItemCount": 0, "unreadItemCount": 0 },
+                { "id": "F-projects", "displayName": "Projects", "childFolderCount": 0, "totalItemCount": 400, "unreadItemCount": 0 },
+            ]})),
+            "me/mailFolders/inbox" => Reply::json(json!({ "id": "F-inbox" })),
+            "me/mailFolders/sentitems" => Reply::json(json!({ "id": "F-sent" })),
+            "me/mailFolders/F-projects/messages" => {
+                if request.param("stale").is_some() {
+                    return Reply::status(410, json!({ "error": { "message": "Expired skiptoken" } }));
+                }
+                let page = request.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                let start = page * 50;
+                let end = (start + 50).min(400);
+                let value: Vec<Value> = (start..end)
+                    .map(|n| graph_message(&format!("old{n:03}"), &format!("c-old{n:03}"), ("Person", "p@x.com"), &format!("Archive {n}"), -(n as i64)))
+                    .collect();
+                let mut body = json!({ "value": value });
+                if end < 400 {
+                    body["@odata.nextLink"] = json!(format!("{}/v1.0/me/mailFolders/F-projects/messages?page={}", base_for_handler.get().unwrap(), page + 1));
+                }
+                Reply::json(body)
+            }
+            other if other.starts_with("me/mailFolders/") && other.ends_with("/messages") => {
+                Reply::json(json!({ "value": [] }))
+            }
+            other if other.starts_with("me/messages/") => {
+                Reply::json(json!({ "body": { "contentType": "text", "content": "ok" } }))
+            }
+            _ => Reply::status(404, json!({ "error": { "message": "Not found" } })),
+        }
+    });
+    base_url.set(server.base.clone()).unwrap();
+
+    let config = crate::testkit::server_config(&server);
+    crate::testkit::sign_in_all(&config, &[crate::testkit::mail_account("me@outlook.com", "microsoft")]);
+    let stale_link = format!("{}/v1.0/me/mailFolders/F-projects/messages?stale=1", server.base);
+    {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let cache = MailCache::new(config.support_directory.join("mail.db"), config.cache_directory.clone());
+            cache.save_mailboxes(
+                &[
+                    Mailbox { account: "me@outlook.com".into(), id: "F-inbox".into(), name: "Inbox".into(), role: MailboxRole::Inbox, unread: None, total: None },
+                    Mailbox { account: "me@outlook.com".into(), id: "F-sent".into(), name: "Sent".into(), role: MailboxRole::Sent, unread: None, total: None },
+                    Mailbox { account: "me@outlook.com".into(), id: "F-projects".into(), name: "Projects".into(), role: MailboxRole::Other, unread: None, total: None },
+                ],
+                "me@outlook.com",
+            );
+            cache.save_listing(
+                CachedListing { envelopes: cached_envelopes, next: Some(stale_link) },
+                &MailboxKey::new("me@outlook.com", "F-projects"),
+            );
+            cache.flush().await;
+        });
+    }
+
+    let engine = Engine::start(config.clone());
+    wait_until("mailboxes", || {
+        call(&engine, "mailboxes", json!({})).unwrap()["me@outlook.com"].as_array().is_some_and(|boxes| boxes.len() >= 3)
+    });
+
+    let cached = call(&engine, "mail.list", json!({ "mailbox": "F-projects", "account": "me@outlook.com", "cached": true, "limit": 200 })).unwrap();
+    assert_eq!(ids(&cached).len(), 200);
+    let c200 = cached["next"].as_str().unwrap().to_string();
+    let cached2 = call(&engine, "mail.list", json!({ "mailbox": "F-projects", "account": "me@outlook.com", "cached": true, "limit": 200, "cursor": c200 })).unwrap();
+    assert_eq!(ids(&cached2).len(), 150);
+    let c350 = cached2["next"].as_str().expect("cached listing still has disk cursor").to_string();
+
+    // Hits stale cursor (410), restarts from page 1, catches up past all 7 cached pages, and
+    // returns the 50 older conversations (350..400) in one call.
+    let older = call(&engine, "mail.list", json!({ "mailbox": "F-projects", "account": "me@outlook.com", "limit": 100, "cursor": c350 })).unwrap();
+    assert_eq!(ids(&older).len(), 50, "expected all 50 older conversations after catch-up: {older}");
+    assert_eq!(older["failures"], json!([]));
+    assert!(older["next"].is_null());
+    assert_eq!(older["conversations"][0]["id"], "me@outlook.com|old350@outlook");
+    assert_eq!(older["conversations"][49]["id"], "me@outlook.com|old399@outlook");
+    drop(engine);
+    cleanup(&config);
+}
