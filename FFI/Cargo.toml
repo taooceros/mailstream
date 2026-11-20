@@ -33,6 +33,7 @@ blitz-traits = { optional = true, version = "=0.3.0-beta.4", default-features = 
 html5ever = { version = "=0.40.1", optional = true }
 anyrender = { version = "0.14", optional = true }
 anyrender_vello_cpu = { version = "0.18", optional = true }
+vello_cpu = { version = "0.3", optional = true, default-features = false, features = ["png"] }
 peniko = { version = "0.6", optional = true }
 # Per page, a copy of the system font collection scanned once.
 parley = { version = "0.12", optional = true, default-features = false, features = ["std", "system"] }
@@ -44,6 +45,8 @@ sha2 = { version = "0.10", optional = true }
 data-url = { version = "0.3", optional = true }
 # Remote images, stylesheets and fonts fetch on a runtime of their own (the engine's is private).
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+# General Android system font discovery (NDK API 29+ + XML + directory scan), also tested on desktop.
+mailstream-android-fonts = { path = "../AndroidPoc/android-fonts" }
 
 # Windows: the message-only window listeners are called through.
 [target.'cfg(windows)'.dependencies]
@@ -57,7 +60,7 @@ glib-sys = "0.21"
 # The Blitz HTML pages (html_page.rs) the Flutter and GPUI readers draw with. On by default (the
 # dylib ffi.py builds); GPUI turns it on itself (it takes no default features).
 default = ["blitz"]
-blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:html5ever", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:peniko", "dep:parley", "dep:style", "dep:sha2", "dep:data-url", "dep:tokio"]
+blitz = ["dep:blitz-dom", "dep:blitz-html", "dep:blitz-paint", "dep:blitz-traits", "dep:html5ever", "dep:anyrender", "dep:anyrender_vello_cpu", "dep:vello_cpu", "dep:peniko", "dep:parley", "dep:style", "dep:sha2", "dep:data-url", "dep:tokio"]
 # MAILSTREAM_ENGINE=swift runs the Swift engine (libMailstreamKit.dylib, which `swift build
 # --product MailstreamKit` makes) instead, for examples/bench.rs; front ends never build it.
 swift-engine = []

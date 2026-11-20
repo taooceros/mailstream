@@ -52,8 +52,9 @@ struct CosmicTextSystemState {
     font_system: FontSystem,
     scratch: ShapeBuffer,
     swash_scale_context: ScaleContext,
+    /// Mailstream patch (MS-434): cached vello_cpu resources for COLR v1 / color glyph rasterization.
+    vello_resources: parking_lot::Mutex<vello_cpu::Resources>,
     pending_glyph_images: HashMap<RenderGlyphParams, swash::scale::image::Image>,
-    /// Contains all already loaded fonts, including all faces. Indexed by `FontId`.
     loaded_fonts: Vec<LoadedFont>,
     loaded_font_ids_by_key: HashMap<LoadedFontKey, FontId>,
     /// Caches the `FontId`s associated with a specific family to avoid iterating the font database
@@ -65,8 +66,12 @@ struct CosmicTextSystemState {
 
 struct LoadedFont {
     font: Arc<CosmicTextFont>,
+    /// Mailstream patch (MS-434): face index in TTC/OTC font collections.
+    face_index: u32,
     features: CosmicFontFeatures,
-    is_known_emoji_font: bool,
+    /// Mailstream patch (MS-434): true when this face carries OpenType color tables
+    /// (COLR/CPAL, CBDT/CBLC, or sbix), replacing hardcoded emoji font name checks.
+    has_color_tables: bool,
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
@@ -134,13 +139,14 @@ impl CosmicTextSystem {
             .missing_glyphs(text, font_runs, missing_text_indices)
     }
 
-    pub fn new(system_font_fallback: &str) -> Self {
-        let font_system = FontSystem::new();
-
+    /// Mailstream patch (MS-434): creates a `CosmicTextSystem` backed by a caller-configured
+    /// `FontSystem` (custom database, locale, and platform `Fallback`).
+    pub fn new_with_font_system(font_system: FontSystem, system_font_fallback: &str) -> Self {
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
             scratch: ShapeBuffer::default(),
             swash_scale_context: ScaleContext::new(),
+            vello_resources: parking_lot::Mutex::new(vello_cpu::Resources::new()),
             pending_glyph_images: HashMap::default(),
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
@@ -150,23 +156,16 @@ impl CosmicTextSystem {
         }))
     }
 
+    pub fn new(system_font_fallback: &str) -> Self {
+        Self::new_with_font_system(FontSystem::new(), system_font_fallback)
+    }
+
     pub fn new_without_system_fonts(system_font_fallback: &str) -> Self {
         let font_system = FontSystem::new_with_locale_and_db(
             "en-US".to_string(),
             cosmic_text::fontdb::Database::new(),
         );
-
-        Self(RwLock::new(CosmicTextSystemState {
-            font_system,
-            scratch: ShapeBuffer::default(),
-            swash_scale_context: ScaleContext::new(),
-            pending_glyph_images: HashMap::default(),
-            loaded_fonts: Vec::new(),
-            loaded_font_ids_by_key: HashMap::default(),
-            font_ids_by_family_cache: HashMap::default(),
-            system_font_fallback: system_font_fallback.to_string(),
-            missing_glyph_sink: None,
-        }))
+        Self::new_with_font_system(font_system, system_font_fallback)
     }
 }
 
@@ -395,19 +394,45 @@ impl CosmicTextSystemState {
         };
 
         let name = gpui::font_name_with_fallbacks(name, &self.system_font_fallback);
-
-        let families = self
+        // Mailstream patch (MS-434): resolve CSS generic family names (`sans-serif`, `serif`,
+        // `monospace`, `system-ui`) through the database's configured generic families when no
+        // literal family matches.
+        let mut families = self
             .font_system
             .db()
             .faces()
             .filter(|face| face.families.iter().any(|family| *name == family.0))
-            .map(|face| (face.id, face.post_script_name.clone(), face.weight))
+            .map(|face| (face.id, face.index, face.post_script_name.clone(), face.weight))
             .collect::<SmallVec<[_; 4]>>();
+        if families.is_empty() {
+            let generic_target: Option<&str> = match name {
+                "sans-serif" | "system-ui" => {
+                    let db_sans = self.font_system.db().family_name(&Family::SansSerif);
+                    Some(if db_sans.is_empty() {
+                        self.system_font_fallback.as_str()
+                    } else {
+                        db_sans
+                    })
+                }
+                "serif" => Some(self.font_system.db().family_name(&Family::Serif)),
+                "monospace" => Some(self.font_system.db().family_name(&Family::Monospace)),
+                _ => None,
+            };
+            if let Some(target) = generic_target.filter(|t| !t.is_empty() && *t != name) {
+                families = self
+                    .font_system
+                    .db()
+                    .faces()
+                    .filter(|face| face.families.iter().any(|family| target == family.0))
+                    .map(|face| (face.id, face.index, face.post_script_name.clone(), face.weight))
+                    .collect::<SmallVec<[_; 4]>>();
+            }
+        }
 
         let cosmic_features = cosmic_font_features(features)?;
 
         let mut loaded_font_ids = SmallVec::new();
-        for (database_id, postscript_name, weight) in families {
+        for (database_id, face_index, postscript_name, weight) in families {
             let key = LoadedFontKey {
                 database_id,
                 font: loaded_font_key.clone(),
@@ -446,12 +471,14 @@ impl CosmicTextSystemState {
                 continue;
             };
 
+            let has_color_tables = face_has_color_tables(font.data(), face_index);
             let font_id = FontId(self.loaded_fonts.len());
             loaded_font_ids.push(font_id);
             self.loaded_fonts.push(LoadedFont {
                 font,
+                face_index,
                 features: cosmic_features.clone(),
-                is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
+                has_color_tables,
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
                 weight,
             });
@@ -485,8 +512,9 @@ impl CosmicTextSystemState {
             return Ok(font_id);
         }
         let database_id = loaded_font.font.id();
+        let face_index = loaded_font.face_index;
         let features = loaded_font.features.clone();
-        let is_known_emoji_font = loaded_font.is_known_emoji_font;
+        let has_color_tables = loaded_font.has_color_tables;
         let user_fallback_chain = Arc::clone(&loaded_font.user_fallback_chain);
         let key = LoadedFontKey {
             database_id,
@@ -504,8 +532,9 @@ impl CosmicTextSystemState {
         let weighted_id = FontId(self.loaded_fonts.len());
         self.loaded_fonts.push(LoadedFont {
             font,
+            face_index,
             features,
-            is_known_emoji_font,
+            has_color_tables,
             user_fallback_chain,
             weight,
         });
@@ -581,9 +610,30 @@ impl CosmicTextSystemState {
         &mut self,
         params: &RenderGlyphParams,
     ) -> Result<swash::scale::image::Image> {
+        let glyph_id: u16 = params.glyph_id.0.try_into()?;
+        let pixel_size = f32::from(params.font_size);
+
+        // Mailstream patch (MS-434): rasterize COLR v1 (and COLR v0) color glyphs with
+        // `vello_cpu` + `skrifa`, since `swash` only supports COLR v0 and CBDT bitmaps.
+        if params.is_emoji {
+            let (font, face_index, weight) = {
+                let loaded = &self.loaded_fonts[params.font_id.0];
+                (Arc::clone(&loaded.font), loaded.face_index, loaded.weight)
+            };
+            if glyph_has_colr_table(font.data(), face_index, glyph_id) {
+                return Ok(render_color_glyph_vello(
+                    self.vello_resources.get_mut(),
+                    font,
+                    face_index,
+                    weight,
+                    glyph_id,
+                    pixel_size * params.scale_factor,
+                ));
+            }
+        }
+
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
-        let pixel_size = f32::from(params.font_size);
 
         let subpixel_offset = Vector::new(
             params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor,
@@ -624,10 +674,28 @@ impl CosmicTextSystemState {
             renderer.format(Format::Alpha).offset(subpixel_offset);
         }
 
-        let glyph_id: u16 = params.glyph_id.0.try_into()?;
-        renderer
-            .render(&mut scaler, glyph_id)
-            .with_context(|| format!("unable to render glyph via swash for {params:?}"))
+        if let Some(image) = renderer.render(&mut scaler, glyph_id) {
+            return Ok(image);
+        }
+
+        // Fallback to vello_cpu for color formats swash cannot decode (e.g. sbix or unusual
+        // CBDT strikes), returning an empty image if the glyph has no visible ink.
+        if params.is_emoji {
+            let (font, face_index, weight) = {
+                let loaded = &self.loaded_fonts[params.font_id.0];
+                (Arc::clone(&loaded.font), loaded.face_index, loaded.weight)
+            };
+            return Ok(render_color_glyph_vello(
+                self.vello_resources.get_mut(),
+                font,
+                face_index,
+                weight,
+                glyph_id,
+                pixel_size * params.scale_factor,
+            ));
+        }
+
+        anyhow::bail!("unable to render glyph via swash for {params:?}")
     }
 
     /// This is used when cosmic_text has chosen a fallback font instead of using the requested
@@ -662,11 +730,14 @@ impl CosmicTextSystemState {
                 .face(id)
                 .context("fallback font face not found in cosmic-text database")?;
 
+            let face_index = face.index;
+            let has_color_tables = face_has_color_tables(font.data(), face_index);
             let font_id = FontId(self.loaded_fonts.len());
             self.loaded_fonts.push(LoadedFont {
                 font,
+                face_index,
                 features: CosmicFontFeatures::new(),
-                is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
+                has_color_tables,
                 user_fallback_chain: Arc::from(Vec::new()),
                 weight,
             });
@@ -889,7 +960,12 @@ impl CosmicTextSystemState {
                     }
                 }
             }
-            let is_emoji = loaded_font.is_known_emoji_font;
+            let is_emoji = loaded_font.has_color_tables
+                && glyph_is_color(
+                    loaded_font.font.data(),
+                    loaded_font.face_index,
+                    glyph.glyph_id,
+                );
 
             // HACK: Prevent crash caused by variation selectors.
             if glyph.glyph_id == 3 && is_emoji {
@@ -1281,9 +1357,200 @@ fn face_info_into_properties(
     }
 }
 
-fn check_is_known_emoji_font(postscript_name: &str) -> bool {
-    // TODO: Include other common emoji fonts
-    postscript_name == "NotoColorEmoji"
+/// Mailstream patch (MS-434): zero-copy `AsRef<[u8]>` wrapper around `Arc<CosmicTextFont>`
+/// for `vello_cpu::peniko::Blob`.
+struct SharedCosmicFontBytes(Arc<CosmicTextFont>);
+
+impl AsRef<[u8]> for SharedCosmicFontBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.data()
+    }
+}
+
+fn face_has_color_tables(data: &[u8], face_index: u32) -> bool {
+    use skrifa::{MetadataProvider as _, bitmap::BitmapFormat, raw::TableProvider as _};
+    let std::result::Result::Ok(font_ref) = skrifa::FontRef::from_index(data, face_index) else {
+        return false;
+    };
+    if font_ref.colr().is_ok() && font_ref.cpal().is_ok() {
+        return true;
+    }
+    matches!(
+        font_ref.bitmap_strikes().format(),
+        Some(BitmapFormat::Cbdt | BitmapFormat::Sbix)
+    )
+}
+
+fn glyph_has_colr_table(data: &[u8], face_index: u32, glyph_id: u16) -> bool {
+    use skrifa::MetadataProvider as _;
+    let std::result::Result::Ok(font_ref) = skrifa::FontRef::from_index(data, face_index) else {
+        return false;
+    };
+    font_ref
+        .color_glyphs()
+        .get(skrifa::GlyphId::from(glyph_id))
+        .is_some()
+}
+
+fn glyph_is_color(data: &[u8], face_index: u32, glyph_id: u16) -> bool {
+    use skrifa::{MetadataProvider as _, bitmap::BitmapFormat, instance::Size as SkrifaSize};
+    let std::result::Result::Ok(font_ref) = skrifa::FontRef::from_index(data, face_index) else {
+        return false;
+    };
+    let gid = skrifa::GlyphId::from(glyph_id);
+    if font_ref.color_glyphs().get(gid).is_some() {
+        return true;
+    }
+    let strikes = font_ref.bitmap_strikes();
+    matches!(
+        strikes.format(),
+        Some(BitmapFormat::Cbdt | BitmapFormat::Sbix)
+    ) && strikes.glyph_for_size(SkrifaSize::unscaled(), gid).is_some()
+}
+
+/// Mailstream patch (MS-434): rasterizes a single COLR v1 / COLR v0 / bitmap color glyph with
+/// `vello_cpu` into a tightly-cropped straight-RGBA `swash::scale::image::Image`.
+fn render_color_glyph_vello(
+    resources: &mut vello_cpu::Resources,
+    font: Arc<CosmicTextFont>,
+    face_index: u32,
+    weight: Weight,
+    glyph_id: u16,
+    pixel_size: f32,
+) -> swash::scale::image::Image {
+    use skrifa::{MetadataProvider as _, instance::Size as SkrifaSize};
+
+    if !pixel_size.is_finite() || pixel_size <= 0.0 {
+        return swash::scale::image::Image::new();
+    }
+    let std::result::Result::Ok(font_ref) = skrifa::FontRef::from_index(font.data(), face_index) else {
+        return swash::scale::image::Image::new();
+    };
+    let gid = skrifa::GlyphId::from(glyph_id);
+    let skrifa_size = SkrifaSize::new(pixel_size);
+    let location = font_ref
+        .axes()
+        .location([(skrifa::Tag::new(b"wght"), f32::from(weight.0))]);
+    let location_ref = skrifa::instance::LocationRef::from(&location);
+
+    let (left, top_up, width, height) = if let Some(bbox) = font_ref
+        .color_glyphs()
+        .get(gid)
+        .and_then(|cg| cg.bounding_box(location_ref, skrifa_size))
+    {
+        let left = bbox.x_min.floor() as i32 - 1;
+        let right = bbox.x_max.ceil() as i32 + 1;
+        let top_up = bbox.y_max.ceil() as i32 + 1;
+        let bottom_up = bbox.y_min.floor() as i32 - 1;
+        (
+            left,
+            top_up,
+            (right - left).clamp(0, 1024) as u16,
+            (top_up - bottom_up).clamp(0, 1024) as u16,
+        )
+    } else {
+        let metrics = font_ref.metrics(skrifa_size, location_ref);
+        let advance = font_ref
+            .glyph_metrics(skrifa_size, location_ref)
+            .advance_width(gid)
+            .unwrap_or(pixel_size);
+        let pad = (pixel_size * 0.25).ceil().max(2.0);
+        let left = (-pad) as i32;
+        let right = (advance.max(pixel_size) + pad).ceil() as i32;
+        let top_up = (metrics.ascent.max(pixel_size) + pad).ceil() as i32;
+        let bottom_up = (metrics.descent.min(-pixel_size * 0.25) - pad).floor() as i32;
+        (
+            left,
+            top_up,
+            (right - left).clamp(0, 1024) as u16,
+            (top_up - bottom_up).clamp(0, 1024) as u16,
+        )
+    };
+
+    if width == 0 || height == 0 {
+        return swash::scale::image::Image::new();
+    }
+
+    let font_data = vello_cpu::peniko::FontData::new(
+        vello_cpu::peniko::Blob::new(Arc::new(SharedCosmicFontBytes(font))),
+        face_index,
+    );
+    let mut ctx = vello_cpu::RenderContext::new_with(
+        width,
+        height,
+        vello_cpu::RenderSettings {
+            num_threads: 0,
+            ..Default::default()
+        },
+    );
+    ctx.set_paint(vello_cpu::color::palette::css::BLACK);
+    let norm_coords: SmallVec<[i16; 4]> = location.coords().iter().map(|c| c.to_bits()).collect();
+    let _ = ctx
+        .glyph_run(resources, &font_data)
+        .font_size(pixel_size)
+        .normalized_coords(&norm_coords)
+        .fill_glyphs(std::iter::once(vello_cpu::Glyph {
+            id: u32::from(glyph_id),
+            x: -(left as f32),
+            y: top_up as f32,
+        }));
+    ctx.flush();
+
+    let mut pixmap = vello_cpu::Pixmap::new(width, height);
+    ctx.render(&mut pixmap, resources);
+
+    let w = width as usize;
+    let h = height as usize;
+    let pixels = pixmap.data();
+
+    // Trim fully transparent border rows/columns for tight atlas packing.
+    let mut min_x = w;
+    let mut max_x = 0usize;
+    let mut min_y = h;
+    let mut max_y = 0usize;
+    for y in 0..h {
+        let row = &pixels[y * w..(y + 1) * w];
+        for (x, px) in row.iter().enumerate() {
+            if px.a != 0 {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return swash::scale::image::Image::new();
+    }
+
+    let crop_w = max_x - min_x + 1;
+    let crop_h = max_y - min_y + 1;
+    let mut rgba = Vec::with_capacity(crop_w * crop_h * 4);
+    for y in min_y..=max_y {
+        let row = &pixels[y * w + min_x..=y * w + max_x];
+        for px in row {
+            if px.a == 0 {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            } else if px.a == 255 {
+                rgba.extend_from_slice(&[px.r, px.g, px.b, 255]);
+            } else {
+                let a = u32::from(px.a);
+                let unpremul = |c: u8| -> u8 { ((u32::from(c) * 255 + a / 2) / a).min(255) as u8 };
+                rgba.extend_from_slice(&[unpremul(px.r), unpremul(px.g), unpremul(px.b), px.a]);
+            }
+        }
+    }
+
+    let mut image = swash::scale::image::Image::new();
+    image.content = swash::scale::image::Content::Color;
+    image.placement = swash::zeno::Placement {
+        left: left + min_x as i32,
+        top: top_up - min_y as i32,
+        width: crop_w as u32,
+        height: crop_h as u32,
+    };
+    image.data = rgba;
+    image
 }
 
 #[cfg(test)]

@@ -571,84 +571,77 @@ impl Pages {
     }
 }
 
-/// Configures Android `fontique` fallbacks for CJK scripts and monospace (MS-420).
+/// Configures Android `fontique` fallbacks for emoji, CJK, all scripts, and generic families
+/// using `mailstream_android_fonts::AndroidFontConfig` (MS-420, MS-434).
 ///
-/// `fontique`'s Android backend parses `/system/etc/fonts.xml` for fallback scripts, which fails
-/// in three ways on real Android devices:
+/// `fontique`'s built-in Android backend only scans `/system/fonts` and reads `/system/etc/fonts.xml`:
 /// 1. SELinux (e.g. HyperOS symlinking `fonts.xml` into `theme_data_file`) or Android 15+
-///    `font_fallback.xml` makes `fonts.xml` unreadable, leaving `Script::Han` with no CJK fallback
-///    (so Chinese falls back to Roboto and renders as tofu).
+///    `font_fallback.xml` makes `fonts.xml` unreadable, leaving script fallbacks empty.
 /// 2. When `fonts.xml` is readable, `fontique` maps `Script::Han` (`Hani`) only from `zh-Hant`
-///    and returns a single family; on HyperOS that binds `Hani` solely to `Misans TC VF`, which
-///    omits common Simplified Chinese glyphs.
-/// 3. On stock AOSP `fonts.xml`, all CJK `<family>` entries share `postScriptName="NotoSansCJKJP-Regular"`
-///    and differentiate via `index`, which `fontique` ignores, routing `zh-Hans`/`Hani` to JP glyphs.
+///    and ignores TTC `index`, breaking Simplified Chinese.
+/// 3. Updatable fonts in `/data/fonts/files`, OEM fonts in `/product/fonts` & `/system_ext/fonts`,
+///    and flag emoji (`NotoColorEmojiFlags.ttf`) are missed by `fontique`'s default scanner.
 #[cfg(any(target_os = "android", test))]
 fn configure_android_fonts(collection: &mut parley::fontique::Collection) {
-    use parley::fontique::{FallbackKey, GenericFamily, Language, Script};
+    #[cfg(target_os = "android")]
+    let config = mailstream_android_fonts::AndroidFontConfig::discover();
+    #[cfg(not(target_os = "android"))]
+    let config = mailstream_android_fonts::AndroidFontConfig::default();
+    #[cfg(target_os = "android")]
+    configure_android_fonts_with_config(collection, config);
+    #[cfg(not(target_os = "android"))]
+    configure_android_fonts_with_config(collection, &config);
+}
 
-    const SC: &[&str] = &[
-        "Noto Sans CJK SC",
-        "Noto Sans SC",
-        "Source Han Sans CN",
-        "Source Han Sans SC",
-        "HarmonyOS Sans SC",
-        "MiSans VF",
-        "Noto Serif CJK SC",
-        "Droid Sans Fallback",
-        "Noto Sans CJK TC",
-        "Noto Sans CJK HK",
-        "Noto Sans CJK JP",
-        "Noto Sans CJK KR",
-        "Misans TC VF",
-        "MiSans L3",
-    ];
-    const TC: &[&str] = &[
-        "Noto Sans CJK TC",
-        "Noto Sans TC",
-        "Source Han Sans TW",
-        "Source Han Sans TC",
-        "HarmonyOS Sans TC",
-        "Misans TC VF",
-        "Noto Sans CJK HK",
-        "Noto Sans CJK SC",
-        "MiSans VF",
-        "Noto Serif CJK TC",
-        "Droid Sans Fallback",
-        "MiSans L3",
-    ];
-    const HK: &[&str] = &[
-        "Noto Sans CJK HK",
-        "Noto Sans HK",
-        "Noto Sans CJK TC",
-        "Misans TC VF",
-        "Noto Sans CJK SC",
-        "MiSans VF",
-        "Droid Sans Fallback",
-        "MiSans L3",
-    ];
-    const JP: &[&str] = &[
-        "Noto Sans CJK JP",
-        "Noto Sans JP",
-        "MiSans Japanese VF",
-        "Noto Sans CJK SC",
-        "MiSans VF",
-        "Droid Sans Fallback",
-    ];
-    const KR: &[&str] = &[
-        "Noto Sans CJK KR",
-        "Noto Sans KR",
-        "MiSans Korean VF",
-        "Noto Sans CJK SC",
-        "MiSans VF",
-        "Droid Sans Fallback",
-    ];
-    const SANS: &[&str] = &["Roboto Flex", "Roboto", "MiSans Latin VF", "Noto Sans", "MiSans VF"];
-    const MONO: &[&str] = &["Roboto Mono", "Droid Sans Mono", "Cutive Mono", "Noto Sans Mono"];
+#[cfg(any(target_os = "android", test))]
+fn configure_android_fonts_with_config(
+    collection: &mut parley::fontique::Collection,
+    config: &mailstream_android_fonts::AndroidFontConfig,
+) {
+    use mailstream_android_fonts::{
+        FontFileRef, GenericRole, SAFETY_NET_EMOJI, SAFETY_NET_HK, SAFETY_NET_JP, SAFETY_NET_KR,
+        SAFETY_NET_MATH, SAFETY_NET_MONO, SAFETY_NET_SANS, SAFETY_NET_SC, SAFETY_NET_SERIF,
+        SAFETY_NET_TC, safety_net_script_families,
+    };
+    use parley::fontique::{FallbackKey, FamilyId, GenericFamily, Language, Script, SourceKind};
+    use std::path::PathBuf;
 
-    let resolve = |collection: &mut parley::fontique::Collection, names: &[&str]| -> Vec<_> {
+    // Lazily register extra font directories discovered beyond `/system/fonts`
+    // (e.g. `/data/fonts/files` Play Services updates, `/product/fonts`, `/system_ext/fonts`).
+    if !config.extra_font_dirs.is_empty() {
+        collection.load_fonts_from_paths(&config.extra_font_dirs);
+    }
+
+    // Index loaded families by `(file_path, collection_index)` so NDK / XML matches resolve
+    // exact TTC sub-faces without PostScript-name collisions.
+    let family_ids: Vec<FamilyId> = collection.family_ids().collect();
+    let mut by_file: HashMap<(PathBuf, u32), FamilyId> = HashMap::new();
+    for id in family_ids {
+        if let Some(family) = collection.family(id) {
+            for font in family.fonts() {
+                if let SourceKind::Path(path) = font.source().kind() {
+                    by_file.entry((path.to_path_buf(), font.index())).or_insert(id);
+                }
+            }
+        }
+    }
+
+    let resolve_chain = |collection: &mut parley::fontique::Collection,
+                         faces: Option<&Vec<FontFileRef>>,
+                         safety_net: &[&str]|
+     -> Vec<FamilyId> {
         let mut ids = Vec::new();
-        for name in names {
+        if let Some(faces) = faces {
+            for face in faces {
+                if let Some(&id) = by_file.get(&(face.path.clone(), face.index))
+                    && collection.family(id).is_some_and(|family| !family.fonts().is_empty())
+                    && !ids.contains(&id)
+                {
+                    ids.push(id);
+                }
+            }
+        }
+        for &name in safety_net {
             if let Some(id) = collection.family_id(name)
                 && collection.family(id).is_some_and(|family| !family.fonts().is_empty())
                 && !ids.contains(&id)
@@ -664,43 +657,52 @@ fn configure_android_fonts(collection: &mut parley::fontique::Collection) {
         ids.into_iter().any(|id| collection.family(id).is_some_and(|family| !family.fonts().is_empty()))
     };
 
-    for generic in [GenericFamily::SansSerif, GenericFamily::SystemUi] {
-        if !has_generic_faces(collection, generic) {
-            let sans = resolve(collection, SANS);
-            if !sans.is_empty() {
-                collection.set_generic_families(generic, sans.into_iter());
+    // Configure generic families: prefer system-discovered matches; otherwise fill missing ones.
+    for (generic, role, safety) in [
+        (GenericFamily::SansSerif, GenericRole::SansSerif, SAFETY_NET_SANS),
+        (GenericFamily::SystemUi, GenericRole::SystemUi, SAFETY_NET_SANS),
+        (GenericFamily::Serif, GenericRole::Serif, SAFETY_NET_SERIF),
+        (GenericFamily::Monospace, GenericRole::Monospace, SAFETY_NET_MONO),
+        (GenericFamily::Math, GenericRole::Math, SAFETY_NET_MATH),
+        (GenericFamily::Cursive, GenericRole::Cursive, &[][..]),
+        (GenericFamily::Fantasy, GenericRole::Fantasy, &[][..]),
+    ] {
+        let discovered = config.generic_faces.get(&role);
+        if discovered.is_some_and(|v| !v.is_empty()) || !has_generic_faces(collection, generic) {
+            let ids = resolve_chain(collection, discovered, safety);
+            if !ids.is_empty() {
+                collection.set_generic_families(generic, ids.into_iter());
             }
-        }
-    }
-    if !has_generic_faces(collection, GenericFamily::Monospace) {
-        let mono = resolve(collection, MONO);
-        if !mono.is_empty() {
-            collection.set_generic_families(GenericFamily::Monospace, mono.into_iter());
         }
     }
 
-    #[cfg(target_os = "android")]
-    if resolve(collection, SC).is_empty() {
-        for path in [
-            "/system/fonts/NotoSansCJK-Regular.ttc",
-            "/product/fonts/NotoSansCJK-Regular.ttc",
-            "/system_ext/fonts/NotoSansCJK-Regular.ttc",
-            "/system/fonts/MiSansVF.ttf",
-            "/product/fonts/MiSansVF.ttf",
-            "/system/fonts/DroidSansFallback.ttf",
-        ] {
-            if let Ok(bytes) = fs::read(path) {
-                collection.register_fonts(peniko::Blob::new(Arc::new(bytes) as _), None);
-                if !resolve(collection, SC).is_empty() {
-                    break;
-                }
+    // Always configure `GenericFamily::Emoji` with full discovered + safety-net chain
+    // (including Play Services updated emoji and separate `NotoColorEmojiFlags.ttf`).
+    {
+        let mut emoji_ids = resolve_chain(
+            collection,
+            config.generic_faces.get(&GenericRole::Emoji),
+            SAFETY_NET_EMOJI,
+        );
+        let existing: Vec<FamilyId> = collection.generic_families(GenericFamily::Emoji).collect();
+        for id in existing {
+            if collection.family(id).is_some_and(|family| !family.fonts().is_empty())
+                && !emoji_ids.contains(&id)
+            {
+                emoji_ids.push(id);
             }
+        }
+        if !emoji_ids.is_empty() {
+            collection.set_generic_families(GenericFamily::Emoji, emoji_ids.into_iter());
         }
     }
 
     let hani = Script::from_bytes(*b"Hani");
-    let set_chain = |collection: &mut parley::fontique::Collection, key: FallbackKey, names: &[&str]| {
-        let ids = resolve(collection, names);
+    let set_chain = |collection: &mut parley::fontique::Collection,
+                     key: FallbackKey,
+                     faces: Option<&Vec<FontFileRef>>,
+                     safety: &[&str]| {
+        let ids = resolve_chain(collection, faces, safety);
         if !ids.is_empty() {
             collection.set_fallbacks(key, ids.into_iter());
         }
@@ -708,23 +710,53 @@ fn configure_android_fonts(collection: &mut parley::fontique::Collection) {
 
     // Default `Hani` handles untagged text as well as `zh`, `zh-CN`, and `zh-Hans` via
     // `fontique::FallbackKey`'s canonical locale mapping.
-    set_chain(collection, FallbackKey::new(hani, None), SC);
-    for (tag, names) in [
-        ("zh-SG", SC),
-        ("zh-TW", TC),
-        ("zh-HK", HK),
-        ("zh-MO", HK),
-        ("ja", JP),
-        ("ko", KR),
+    let sc_faces = config
+        .locale_script_faces
+        .get(&(*b"Hani", "zh-Hans".to_string()))
+        .or_else(|| config.script_faces.get(b"Hani"));
+    set_chain(collection, FallbackKey::new(hani, None), sc_faces, SAFETY_NET_SC);
+    for (tag, locale_key, safety) in [
+        ("zh-SG", "zh-Hans", SAFETY_NET_SC),
+        ("zh-TW", "zh-Hant", SAFETY_NET_TC),
+        ("zh-HK", "zh-HK", SAFETY_NET_HK),
+        ("zh-MO", "zh-HK", SAFETY_NET_HK),
+        ("ja", "ja", SAFETY_NET_JP),
+        ("ko", "ko", SAFETY_NET_KR),
     ] {
         if let Ok(lang) = Language::parse(tag) {
-            set_chain(collection, FallbackKey::new(hani, Some(&lang)), names);
+            let faces = config.locale_script_faces.get(&(*b"Hani", locale_key.to_string()));
+            set_chain(collection, FallbackKey::new(hani, Some(&lang)), faces, safety);
         }
     }
-    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Hira"), None), JP);
-    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Kana"), None), JP);
-    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Hang"), None), KR);
-    set_chain(collection, FallbackKey::new(Script::from_bytes(*b"Bopo"), None), TC);
+
+    // Configure all discovered non-Han scripts (from NDK `AFontMatcher` + Android XML)
+    // plus Tier-3 safety nets for common scripts so SELinux-blocked `fonts.xml` never yields tofu.
+    let mut configured_scripts: HashSet<[u8; 4]> = HashSet::new();
+    configured_scripts.insert(*b"Hani");
+    for (&tag, faces) in &config.script_faces {
+        if configured_scripts.insert(tag) {
+            set_chain(
+                collection,
+                FallbackKey::new(Script::from_bytes(tag), None),
+                Some(faces),
+                safety_net_script_families(tag),
+            );
+        }
+    }
+    for &tag in &[
+        *b"Hira", *b"Kana", *b"Hang", *b"Bopo", *b"Arab", *b"Hebr", *b"Thai", *b"Deva",
+        *b"Beng", *b"Taml", *b"Telu", *b"Knda", *b"Mlym", *b"Gujr", *b"Guru", *b"Orya",
+        *b"Sinh", *b"Mymr", *b"Khmr", *b"Laoo", *b"Tibt", *b"Geor", *b"Armn", *b"Ethi",
+    ] {
+        if configured_scripts.insert(tag) {
+            set_chain(
+                collection,
+                FallbackKey::new(Script::from_bytes(tag), None),
+                None,
+                safety_net_script_families(tag),
+            );
+        }
+    }
 }
 
 /// `html` parsed, its requests going to `net`, its fonts a copy of `fonts`.
@@ -3107,6 +3139,92 @@ mod tests {
         let ids: Vec<_> = collection.fallback_families(FallbackKey::new(hani, None)).collect();
         let names: Vec<_> = ids.into_iter().filter_map(|id| collection.family_name(id).map(str::to_owned)).collect();
         assert_eq!(names, vec!["MiSans VF", "Droid Sans Fallback"]);
+    }
+
+    #[test]
+    fn android_general_font_config_wires_emoji_flags_and_scripts() {
+        use mailstream_android_fonts::{AndroidFontConfig, FontFileRef, GenericRole};
+        use parley::fontique::{
+            Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, Script,
+        };
+        use std::path::PathBuf;
+
+        let mut collection = Collection::new(CollectionOptions { shared: false, system_fonts: false });
+        let blob = peniko::Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _);
+        for family in [
+            "Roboto",
+            "Noto Color Emoji",
+            "Noto Color Emoji Flags",
+            "Noto Naskh Arabic",
+            "Noto Sans Devanagari",
+            "Noto Sans Thai",
+            "Noto Sans Math",
+        ] {
+            collection.register_fonts(
+                blob.clone(),
+                Some(FontInfoOverride { family_name: Some(family), ..Default::default() }),
+            );
+        }
+
+        let mut cfg = AndroidFontConfig::default();
+        cfg.generic_faces
+            .entry(GenericRole::Emoji)
+            .or_default()
+            .push(FontFileRef::new(PathBuf::from("/nonexistent/ignored.ttf"), 0));
+        configure_android_fonts_with_config(&mut collection, &cfg);
+
+        let emoji_ids: Vec<_> = collection.generic_families(GenericFamily::Emoji).collect();
+        let emoji_names: Vec<_> = emoji_ids
+            .into_iter()
+            .filter_map(|id| collection.family_name(id).map(str::to_owned))
+            .collect();
+        assert_eq!(emoji_names, vec!["Noto Color Emoji", "Noto Color Emoji Flags"]);
+
+        let math_ids: Vec<_> = collection.generic_families(GenericFamily::Math).collect();
+        let math_names: Vec<_> = math_ids
+            .into_iter()
+            .filter_map(|id| collection.family_name(id).map(str::to_owned))
+            .collect();
+        assert_eq!(math_names.first().map(String::as_str), Some("Noto Sans Math"));
+
+        for (script, expected) in [
+            (*b"Arab", "Noto Naskh Arabic"),
+            (*b"Deva", "Noto Sans Devanagari"),
+            (*b"Thai", "Noto Sans Thai"),
+        ] {
+            let ids: Vec<_> = collection
+                .fallback_families(FallbackKey::new(Script::from_bytes(script), None))
+                .collect();
+            let names: Vec<_> = ids
+                .into_iter()
+                .filter_map(|id| collection.family_name(id).map(str::to_owned))
+                .collect();
+            assert_eq!(names.first().map(String::as_str), Some(expected), "script {:?}", script);
+        }
+    }
+
+    #[test]
+    fn blitz_renders_color_emoji_pixels() {
+        let mut page = page(
+            "<html><body style='background:#fff;font-family:emoji;font-size:32px;margin:0;padding:8px'>😀 🦀 ❤️</body></html>",
+        );
+        page.lay_out_scaled(240.0, 1.0, 1.0);
+        assert!(page.height > 0.0);
+        let tile = page.tile_scaled(240.0, 1.0, 1.0, 0.0, 80.0);
+        // With `vello_cpu/png` enabled, CBDT PNG / COLR color emoji must produce non-grayscale
+        // colored pixels on the white background rather than blank/skipped glyphs.
+        let colored_pixels = tile
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| {
+                let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+                a > 128 && (r.abs_diff(g) > 20 || g.abs_diff(b) > 20 || r.abs_diff(b) > 20)
+            })
+            .count();
+        assert!(
+            colored_pixels > 40,
+            "expected colored emoji pixels in Blitz tile, got {colored_pixels}"
+        );
     }
 
     /// A 2×2 red PNG.

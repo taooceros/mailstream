@@ -143,6 +143,21 @@ default-features = false
 [dependencies.unicode-segmentation]
 version = "1.10"
 
+[dependencies.skrifa]
+version = "0.44"
+default-features = false
+features = ["std"]
+
+[dependencies.vello_cpu]
+version = "0.3"
+default-features = false
+features = [
+    "std",
+    "text",
+    "png",
+    "u8_pipeline",
+]
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
 version = "=30.0.1"
 features = [

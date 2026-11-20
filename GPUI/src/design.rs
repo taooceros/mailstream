@@ -416,7 +416,7 @@ pub fn ui_font() -> &'static str {
     #[cfg(target_os = "macos")]
     return ".SystemUIFont";
     #[cfg(target_os = "android")]
-    return "Roboto";
+    return ".SystemUIFont";
     #[cfg(not(any(target_os = "macos", target_os = "android")))]
     {
         static FAMILY: LazyLock<String> = LazyLock::new(|| {
@@ -1270,4 +1270,312 @@ pub mod compose {
     pub const DROP_INSET: f32 = 8.0;
     pub const DROP_FILL_ALPHA: f32 = 0.92;
     pub const DROP_GLYPH: f32 = 36.0;
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod cosmic_text_tests {
+    use std::sync::Arc;
+
+    use cosmic_text::{Fallback, FontSystem, fontdb};
+    use gpui::{FontRun, PlatformTextSystem as _, RenderGlyphParams, px};
+    use gpui_wgpu::CosmicTextSystem;
+
+    /// Builds a minimal valid TrueType font for testing. When `colrv1_bgra` is `Some`,
+    /// adds pure COLR v1 (`version = 1`, `numBaseGlyphRecords = 0`, unsupported by `swash`)
+    /// + `CPAL` tables painting glyph 1 in that solid BGRA color.
+    fn build_minimal_ttf(
+        family: &str,
+        postscript: &str,
+        codepoint: u32,
+        colrv1_bgra: Option<[u8; 4]>,
+    ) -> Vec<u8> {
+        fn pad4(v: &mut Vec<u8>) {
+            while v.len() % 4 != 0 {
+                v.push(0);
+            }
+        }
+        fn checksum(data: &[u8]) -> u32 {
+            let mut sum = 0u32;
+            let mut i = 0;
+            while i < data.len() {
+                let b0 = data[i];
+                let b1 = *data.get(i + 1).unwrap_or(&0);
+                let b2 = *data.get(i + 2).unwrap_or(&0);
+                let b3 = *data.get(i + 3).unwrap_or(&0);
+                sum = sum.wrapping_add(u32::from_be_bytes([b0, b1, b2, b3]));
+                i += 4;
+            }
+            sum
+        }
+
+        let mut head = vec![0u8; 54];
+        head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        head[40..42].copy_from_slice(&1000i16.to_be_bytes());
+        head[42..44].copy_from_slice(&1000i16.to_be_bytes());
+        head[50..52].copy_from_slice(&1i16.to_be_bytes()); // long loca
+
+        let mut hhea = vec![0u8; 36];
+        hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        hhea[4..6].copy_from_slice(&900i16.to_be_bytes());
+        hhea[6..8].copy_from_slice(&(-100i16).to_be_bytes());
+        hhea[34..36].copy_from_slice(&2u16.to_be_bytes());
+
+        let mut maxp = vec![0u8; 32];
+        maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&2u16.to_be_bytes());
+        maxp[6..8].copy_from_slice(&4u16.to_be_bytes());
+        maxp[8..10].copy_from_slice(&1u16.to_be_bytes());
+
+        let mut hmtx = Vec::new();
+        for _ in 0..2 {
+            hmtx.extend_from_slice(&1000u16.to_be_bytes());
+            hmtx.extend_from_slice(&0i16.to_be_bytes());
+        }
+
+        let mut os2 = vec![0u8; 78];
+        os2[0..2].copy_from_slice(&1u16.to_be_bytes());
+        os2[4..6].copy_from_slice(&400u16.to_be_bytes());
+        os2[6..8].copy_from_slice(&5u16.to_be_bytes());
+        os2[62..64].copy_from_slice(&0x0040u16.to_be_bytes());
+        os2[68..70].copy_from_slice(&900i16.to_be_bytes());
+        os2[70..72].copy_from_slice(&(-100i16).to_be_bytes());
+        os2[74..76].copy_from_slice(&900u16.to_be_bytes());
+        os2[76..78].copy_from_slice(&100u16.to_be_bytes());
+
+        let mut post = vec![0u8; 32];
+        post[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+
+        let full_name = format!("{family} Regular");
+        let entries: &[(u16, &str)] = &[
+            (1, family),
+            (2, "Regular"),
+            (4, &full_name),
+            (6, postscript),
+            (16, family),
+        ];
+        let mut str_storage = Vec::new();
+        let mut records = Vec::new();
+        for &(name_id, text) in entries {
+            let offset = str_storage.len() as u16;
+            let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            let len = utf16.len() as u16;
+            str_storage.extend_from_slice(&utf16);
+            records.push((name_id, len, offset));
+        }
+        let mut name = Vec::new();
+        name.extend_from_slice(&0u16.to_be_bytes());
+        name.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        name.extend_from_slice(&((6 + records.len() * 12) as u16).to_be_bytes());
+        for (name_id, len, offset) in records {
+            name.extend_from_slice(&3u16.to_be_bytes());
+            name.extend_from_slice(&1u16.to_be_bytes());
+            name.extend_from_slice(&0x0409u16.to_be_bytes());
+            name.extend_from_slice(&name_id.to_be_bytes());
+            name.extend_from_slice(&len.to_be_bytes());
+            name.extend_from_slice(&offset.to_be_bytes());
+        }
+        name.extend_from_slice(&str_storage);
+
+        // cmap Format 12 mapping `codepoint` -> glyph 1
+        let mut cmap = Vec::new();
+        cmap.extend_from_slice(&0u16.to_be_bytes());
+        cmap.extend_from_slice(&1u16.to_be_bytes());
+        cmap.extend_from_slice(&3u16.to_be_bytes());
+        cmap.extend_from_slice(&10u16.to_be_bytes());
+        cmap.extend_from_slice(&12u32.to_be_bytes());
+        cmap.extend_from_slice(&12u16.to_be_bytes());
+        cmap.extend_from_slice(&0u16.to_be_bytes());
+        cmap.extend_from_slice(&28u32.to_be_bytes());
+        cmap.extend_from_slice(&0u32.to_be_bytes());
+        cmap.extend_from_slice(&1u32.to_be_bytes());
+        cmap.extend_from_slice(&codepoint.to_be_bytes());
+        cmap.extend_from_slice(&codepoint.to_be_bytes());
+        cmap.extend_from_slice(&1u32.to_be_bytes());
+
+        // glyf: glyph 0 empty; glyph 1 is an 800x800 square [100..900] x [50..850]
+        let mut glyf = Vec::new();
+        glyf.extend_from_slice(&1i16.to_be_bytes());
+        glyf.extend_from_slice(&100i16.to_be_bytes());
+        glyf.extend_from_slice(&50i16.to_be_bytes());
+        glyf.extend_from_slice(&900i16.to_be_bytes());
+        glyf.extend_from_slice(&850i16.to_be_bytes());
+        glyf.extend_from_slice(&3u16.to_be_bytes());
+        glyf.extend_from_slice(&0u16.to_be_bytes());
+        glyf.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+        for dx in [100i16, 800, 0, -800] {
+            glyf.extend_from_slice(&dx.to_be_bytes());
+        }
+        for dy in [50i16, 0, 800, 0] {
+            glyf.extend_from_slice(&dy.to_be_bytes());
+        }
+        pad4(&mut glyf);
+
+        let mut loca = Vec::new();
+        loca.extend_from_slice(&0u32.to_be_bytes());
+        loca.extend_from_slice(&0u32.to_be_bytes());
+        loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+
+        let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
+            (*b"OS/2", os2),
+            (*b"cmap", cmap),
+            (*b"glyf", glyf),
+            (*b"head", head),
+            (*b"hhea", hhea),
+            (*b"hmtx", hmtx),
+            (*b"loca", loca),
+            (*b"maxp", maxp),
+            (*b"name", name),
+            (*b"post", post),
+        ];
+
+        if let Some(bgra) = colrv1_bgra {
+            let mut cpal = Vec::new();
+            cpal.extend_from_slice(&0u16.to_be_bytes());
+            cpal.extend_from_slice(&1u16.to_be_bytes());
+            cpal.extend_from_slice(&1u16.to_be_bytes());
+            cpal.extend_from_slice(&1u16.to_be_bytes());
+            cpal.extend_from_slice(&14u32.to_be_bytes());
+            cpal.extend_from_slice(&0u16.to_be_bytes());
+            cpal.extend_from_slice(&bgra);
+
+            // Pure COLR v1 (numBaseGlyphRecords = 0 so swash cannot render it)
+            let mut colr = Vec::new();
+            colr.extend_from_slice(&1u16.to_be_bytes());
+            colr.extend_from_slice(&0u16.to_be_bytes());
+            colr.extend_from_slice(&0u32.to_be_bytes());
+            colr.extend_from_slice(&0u32.to_be_bytes());
+            colr.extend_from_slice(&0u16.to_be_bytes());
+            colr.extend_from_slice(&34u32.to_be_bytes());
+            colr.extend_from_slice(&0u32.to_be_bytes());
+            colr.extend_from_slice(&0u32.to_be_bytes());
+            colr.extend_from_slice(&0u32.to_be_bytes());
+            colr.extend_from_slice(&0u32.to_be_bytes());
+            colr.extend_from_slice(&1u32.to_be_bytes());
+            colr.extend_from_slice(&1u16.to_be_bytes());
+            colr.extend_from_slice(&10u32.to_be_bytes());
+            colr.push(10); // PaintGlyph
+            colr.extend_from_slice(&[0x00, 0x00, 0x06]);
+            colr.extend_from_slice(&1u16.to_be_bytes());
+            colr.push(2); // PaintSolid
+            colr.extend_from_slice(&0u16.to_be_bytes());
+            colr.extend_from_slice(&0x4000i16.to_be_bytes());
+
+            tables.push((*b"COLR", colr));
+            tables.push((*b"CPAL", cpal));
+        }
+
+        tables.sort_by_key(|(tag, _)| *tag);
+        let num_tables = tables.len() as u16;
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&num_tables.to_be_bytes());
+        out.extend_from_slice(&128u16.to_be_bytes());
+        out.extend_from_slice(&3u16.to_be_bytes());
+        out.extend_from_slice(&((num_tables * 16).saturating_sub(128)).to_be_bytes());
+
+        let mut offset = 12 + tables.len() * 16;
+        let mut body = Vec::new();
+        for (tag, mut data) in tables {
+            let len = data.len() as u32;
+            pad4(&mut data);
+            let chk = checksum(&data);
+            out.extend_from_slice(&tag);
+            out.extend_from_slice(&chk.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&len.to_be_bytes());
+            offset += data.len();
+            body.extend_from_slice(&data);
+        }
+        out.extend_from_slice(&body);
+        out
+    }
+
+    #[test]
+    fn cosmic_text_renders_colrv1_emoji_and_resolves_css_generics() {
+        let sans_bytes = build_minimal_ttf("Synth Sans", "SynthSans", 'm' as u32, None);
+        let mono_bytes = build_minimal_ttf("Synth Mono", "SynthMono", 'm' as u32, None);
+        let emoji_bytes = build_minimal_ttf(
+            "Synth Colr Emoji",
+            "SynthColrV1Emoji",
+            0x1F600,
+            Some([0x20, 0x40, 0xF0, 0xFF]), // BGRA for #F04020
+        );
+
+        let mut db = fontdb::Database::new();
+        db.load_font_source(fontdb::Source::Binary(Arc::new(sans_bytes)));
+        db.load_font_source(fontdb::Source::Binary(Arc::new(mono_bytes)));
+        db.load_font_source(fontdb::Source::Binary(Arc::new(emoji_bytes)));
+        db.set_sans_serif_family("Synth Sans");
+        db.set_monospace_family("Synth Mono");
+
+        struct TestFallback;
+        impl Fallback for TestFallback {
+            fn common_fallback(&self) -> &[&'static str] {
+                &["Synth Colr Emoji"]
+            }
+            fn forbidden_fallback(&self) -> &[&'static str] {
+                &[]
+            }
+            fn script_fallback(&self, _: unicode_script::Script, _: &str) -> &[&'static str] {
+                &[]
+            }
+        }
+
+        let font_system =
+            FontSystem::new_with_locale_and_db_and_fallback("en-US".to_string(), db, TestFallback);
+        let ts = CosmicTextSystem::new_with_font_system(font_system, "Synth Sans");
+
+        // CSS generic families & `.SystemUIFont` resolve cleanly to the configured faces.
+        let sys_id = ts.font_id(&gpui::font(".SystemUIFont")).expect(".SystemUIFont");
+        let sans_id = ts.font_id(&gpui::font("sans-serif")).expect("sans-serif");
+        let mono_id = ts.font_id(&gpui::font("monospace")).expect("monospace");
+        assert_ne!(sys_id, mono_id);
+        assert_eq!(ts.glyph_for_char(sans_id, 'm'), ts.glyph_for_char(sys_id, 'm'));
+
+        // Pure COLR v1 emoji (not named NotoColorEmoji) is detected generically and rasterized via vello_cpu.
+        let text = "m 😀";
+        let layout = ts.layout_line(
+            text,
+            px(24.0),
+            &[FontRun { len: text.len(), font_id: sys_id }],
+        );
+        let (emoji_font_id, emoji_glyph) = layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(move |g| (run.font_id, g)))
+            .find(|(_, g)| g.is_emoji)
+            .expect("expected COLR v1 emoji glyph to be detected as is_emoji");
+
+        let params = RenderGlyphParams {
+            font_id: emoji_font_id,
+            glyph_id: emoji_glyph.id,
+            font_size: px(24.0),
+            subpixel_variant: Default::default(),
+            scale_factor: 2.0,
+            is_emoji: true,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let bounds = ts.glyph_raster_bounds(&params).expect("raster bounds");
+        assert!(
+            bounds.size.width.0 > 10 && bounds.size.height.0 > 10,
+            "expected non-empty COLR v1 raster bounds, got {bounds:?}"
+        );
+        let (size, bgra) = ts.rasterize_glyph(&params, bounds).expect("rasterize");
+        assert_eq!(bgra.len(), (size.width.0 * size.height.0 * 4) as usize);
+
+        let cx = (size.width.0 / 2) as usize;
+        let cy = (size.height.0 / 2) as usize;
+        let idx = (cy * size.width.0 as usize + cx) * 4;
+        let px = &bgra[idx..idx + 4];
+        assert!(
+            px[0].abs_diff(0x20) <= 2
+                && px[1].abs_diff(0x40) <= 2
+                && px[2].abs_diff(0xF0) <= 2
+                && px[3] == 0xFF,
+            "unexpected COLR v1 center BGRA pixel: {px:?}"
+        );
+    }
 }

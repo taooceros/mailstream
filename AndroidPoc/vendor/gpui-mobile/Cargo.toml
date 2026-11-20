@@ -111,6 +111,9 @@ android_logger = "0.15"
 # wgpu renderer (Vulkan backend on Android)
 # Android uses Cosmic Text and system fonts; font-kit pulls in desktop Fontconfig.
 gpui_wgpu = { package = "gpui-fast-wgpu", version = "^0.1.14" }
+cosmic-text = "0.19"
+unicode-script = "0.5"
+mailstream-android-fonts = { path = "../../android-fonts" }
 
 # rustc-hash is required by the PlatformKeyboardMapper trait signature
 rustc-hash = "2"
