@@ -14,6 +14,15 @@ URL=$(print -r -- "$OUTPUT" | grep -oE 'https://[a-z0-9.-]+\.workers\.dev' | hea
 for name in APP_TOKEN:push-token GRAPH_CLIENT_STATE:graph-client-state PUBSUB_TOKEN:pubsub-token; do
   secret "${name#*:}" | npx --yes wrangler@4 secret put "${name%%:*}" >/dev/null
 done
+if [[ -n "${FCM_SERVICE_ACCOUNT_FILE:-}" && -f "${FCM_SERVICE_ACCOUNT_FILE}" ]]; then
+  npx --yes wrangler@4 secret put FCM_SERVICE_ACCOUNT < "${FCM_SERVICE_ACCOUNT_FILE}" >/dev/null
+  echo "Uploaded FCM_SERVICE_ACCOUNT from ${FCM_SERVICE_ACCOUNT_FILE}."
+elif FCM_SA=$(secret fcm-service-account 2>/dev/null); then
+  print -r -- "$FCM_SA" | npx --yes wrangler@4 secret put FCM_SERVICE_ACCOUNT >/dev/null
+  echo "Uploaded FCM_SERVICE_ACCOUNT from Keychain."
+else
+  echo "note: FCM_SERVICE_ACCOUNT not set (Android background wake stays off until you pass FCM_SERVICE_ACCOUNT_FILE or add Keychain item fcm-service-account)."
+fi
 security add-generic-password -U -s $SERVICE -a push-url -w "$URL"
 
 TOPIC=$(secret gmail-topic)

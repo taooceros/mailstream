@@ -53,6 +53,8 @@ pub use mailstream_engine::answers::*;
 pub use mailstream_engine::chat_markup::{ChatBlock, ChatBlockKind, ChatSpan, ChatStyle};
 /// For Rust hosts (GPUI): the stable color slot of a key, as avatars pick theirs.
 pub use mailstream_engine::display::{AVATAR_SLOTS, Avatar, ChatRun, stable_slot};
+pub use mailstream_engine::notifications::NotificationItem;
+pub use mailstream_engine::push::FcmClientConfig;
 pub use mailstream_engine::support_directory;
 /// For Rust hosts (GPUI): a conversation's labels after `tag`'s `add_labels`/`remove_labels`.
 pub use mailstream_engine::tagging::edited_labels;
@@ -682,7 +684,7 @@ commands! {
 }
 
 
-/// For Rust hosts that link this crate directly (GPUI) and run an event loop of their own.
+/// For Rust hosts that link this crate directly (GPUI, AndroidPoc) and run an event loop of their own.
 impl Mailstream {
     /// Calls `listener` on an engine thread for every change from now on, while the process runs.
     /// For a host whose main thread is not the queue [`Mailstream::subscribe`] posts to (GPUI on
@@ -695,8 +697,84 @@ impl Mailstream {
         }
         ENGINE.subscribe(move |event| listener.on_event(Change { event: Event::named(event) }));
     }
-}
 
+    /// Calls `listener` on an engine thread for each newly arrived unread inbox message (MS-452 / MS-443).
+    pub fn on_new_mail(&self, listener: impl Fn(NewMail) + Send + Sync + 'static) {
+        ENGINE.on_new_mail(listener);
+    }
+
+    /// Calls `listener` on an engine thread for each newly arrived unread incoming Google Chat message (MS-443).
+    pub fn on_new_chat(&self, listener: impl Fn(NewChat) + Send + Sync + 'static) {
+        ENGINE.on_new_chat(listener);
+    }
+    /// Formats `mail` as an OS notification if allowed by `notifications.*` settings.
+    pub fn format_mail_notification(&self, mail: &NewMail) -> Option<NotificationItem> {
+        ENGINE.format_mail_notification(mail)
+    }
+
+    /// Formats `chat` as an OS notification if allowed by `notifications.*` settings.
+    pub fn format_chat_notification(&self, chat: &NewChat) -> Option<NotificationItem> {
+        ENGINE.format_chat_notification(chat)
+    }
+
+    /// Persistently claims `dedup_id` so the same message is never notified twice across restarts.
+    pub fn claim_notification(&self, dedup_id: &str) -> bool {
+        ENGINE.claim_notification(dedup_id)
+    }
+
+    /// Records this Android device's FCM token and syncs it to the push relay.
+    pub fn set_fcm_device(&self, device_id: String, fcm_token: String) {
+        ENGINE.set_fcm_device(device_id, fcm_token);
+    }
+
+    /// Removes this Android device's FCM token locally and on the push relay.
+    pub fn clear_fcm_device(&self, device_id: String) {
+        ENGINE.clear_fcm_device(device_id);
+    }
+
+    /// Current FCM client options (`MSFcm*` / Device Sync), if configured.
+    pub fn fcm_client_config(&self) -> Option<FcmClientConfig> {
+        ENGINE.fcm_client_config()
+    }
+
+    /// Registers a callback invoked when FCM client options become available or change.
+    pub fn on_fcm_config(&self, handler: impl Fn(FcmClientConfig) + Send + Sync + 'static) {
+        ENGINE.on_fcm_config(handler);
+    }
+
+    /// Notifies the engine of a network transition so push reconnects immediately.
+    pub fn notify_network_change(&self) {
+        ENGINE.notify_network_change();
+    }
+
+    /// Runs one bounded background push-wake sync pass synchronously (for Android FCM service).
+    pub fn background_push_wake_blocking(
+        &self,
+        source: String,
+        account: Option<String>,
+        subscription_id: Option<String>,
+        timeout: std::time::Duration,
+    ) -> Vec<NotificationItem> {
+        ENGINE.background_push_wake_blocking(source, account, subscription_id, timeout)
+    }
+
+    /// Runs a notification quick action (`mark_read` / `archive`) synchronously in background.
+    pub fn run_notification_action_blocking(&self, tag: &str, action_id: &str) -> Result<(), MailError> {
+        let Some(conv_id) = tag.strip_prefix("mail:") else {
+            return Ok(());
+        };
+        match action_id {
+            "mark_read" => {
+                ENGINE.run_command_blocking("mail.read", json!({ "ids": [conv_id], "unread": false }))?;
+            }
+            "archive" => {
+                ENGINE.run_command_blocking("mail.archive", json!({ "ids": [conv_id] }))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
 /// Runs the main thread's queue, where listeners are called, for a host without a run loop (a
 /// command-line tool). Call it on the main thread; it never returns.
 #[uniffi::export]

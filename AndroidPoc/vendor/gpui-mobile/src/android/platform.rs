@@ -165,8 +165,10 @@ struct AndroidPlatformState {
     on_init_window_callback: Option<Box<dyn FnOnce(Arc<AndroidWindow>) + Send>>,
     /// Called when the primary display's geometry or refresh rate changes.
     displays_changed_callback: Option<Box<dyn FnMut() + Send>>,
-
-    // ── miscellaneous ─────────────────────────────────────────────────────────
+    /// Called when the user activates an Android OS notification or quick action (MS-443).
+    system_notification_callback: Option<Box<dyn FnMut(gpui::SystemNotificationResponse) + Send>>,
+    /// Notification activations delivered before GPUI registered its callback (cold-start tap).
+    pending_notification_responses: Vec<gpui::SystemNotificationResponse>,
     /// `true` while the app is active (foreground).
     is_active: bool,
 
@@ -259,6 +261,8 @@ impl AndroidPlatform {
                 keyboard_layout_callback: None,
                 on_init_window_callback: None,
                 displays_changed_callback: None,
+                system_notification_callback: None,
+                pending_notification_responses: Vec::new(),
                 is_active: false,
                 headless,
                 preferred_backend: AndroidBackend::Vulkan,
@@ -415,6 +419,34 @@ impl AndroidPlatform {
         }
     }
 
+
+    /// Deliver a system notification tap or action from Android UI/JNI onto the GPUI main thread.
+    pub fn deliver_system_notification_response(
+        self: &Arc<Self>,
+        tag: String,
+        action_id: Option<String>,
+    ) {
+        let response = gpui::SystemNotificationResponse {
+            tag: tag.into(),
+            action_id: action_id.filter(|s| !s.is_empty()).map(Into::into),
+        };
+        let platform = Arc::clone(self);
+        self.foreground_executor().dispatch_on_main_thread(move || {
+            let mut cb = {
+                let mut state = platform.state.lock();
+                let Some(cb) = state.system_notification_callback.take() else {
+                    state.pending_notification_responses.push(response);
+                    return;
+                };
+                cb
+            };
+            cb(response);
+            let mut state = platform.state.lock();
+            if state.system_notification_callback.is_none() {
+                state.system_notification_callback = Some(cb);
+            }
+        });
+    }
     // ── window management ─────────────────────────────────────────────────────
 
     /// Open a new window backed by `native_window`.
@@ -1183,6 +1215,124 @@ impl Platform for AndroidPlatform {
             std::mem::transmute::<Box<dyn FnMut()>, Box<dyn FnMut() + Send>>(callback)
         });
     }
+
+    fn show_system_notification(&self, notification: gpui::SystemNotification) {
+        if let Err(err) = show_system_notification_jni(&notification) {
+            log::warn!("AndroidPlatform::show_system_notification failed: {err}");
+        }
+    }
+
+    fn dismiss_system_notification(&self, tag: &str) {
+        if let Err(err) = dismiss_system_notification_jni(tag) {
+            log::warn!("AndroidPlatform::dismiss_system_notification failed: {err}");
+        }
+    }
+
+    fn on_system_notification_response(
+        &self,
+        callback: Box<dyn FnMut(gpui::SystemNotificationResponse)>,
+    ) {
+        let mut pending = {
+            let mut state = self.state.lock();
+            state.system_notification_callback = Some(unsafe {
+                // SAFETY: Android system notification callbacks always run on the main thread.
+                std::mem::transmute::<
+                    Box<dyn FnMut(gpui::SystemNotificationResponse)>,
+                    Box<dyn FnMut(gpui::SystemNotificationResponse) + Send>,
+                >(callback)
+            });
+            std::mem::take(&mut state.pending_notification_responses)
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let mut cb = match self.state.lock().system_notification_callback.take() {
+            Some(cb) => cb,
+            None => return,
+        };
+        for response in pending.drain(..) {
+            cb(response);
+        }
+        let mut state = self.state.lock();
+        if state.system_notification_callback.is_none() {
+            state.system_notification_callback = Some(cb);
+        }
+    }
+}
+
+fn show_system_notification_jni(notification: &gpui::SystemNotification) -> Result<(), String> {
+    use crate::android::jni::{self as jni_helpers, JniExt};
+    use jni::objects::{JObject, JValue};
+
+    let channel = if notification.tag.starts_with("chat:") {
+        "chat"
+    } else if notification.tag.starts_with("mail:") {
+        "mail"
+    } else {
+        "default"
+    };
+    jni_helpers::with_env(|env| {
+        let activity = jni_helpers::activity(env)?;
+        let cls = jni_helpers::find_app_class(env, "dev.gpui.mobile.GpuiNotifications")?;
+        let str_cls = env.find_class(jni::jni_str!("java/lang/String")).e()?;
+
+        let j_tag = env.new_string(notification.tag.as_ref()).e()?;
+        let j_channel = env.new_string(channel).e()?;
+        let j_title = env.new_string(notification.title.as_ref()).e()?;
+        let j_body = env.new_string(notification.body.as_ref()).e()?;
+
+        let count = notification.actions.len() as i32;
+        let j_ids = env.new_object_array(count, &str_cls, JObject::null()).e()?;
+        let j_labels = env.new_object_array(count, &str_cls, JObject::null()).e()?;
+        for (idx, action) in notification.actions.iter().enumerate() {
+            let j_id = env.new_string(action.id.as_ref()).e()?;
+            let j_label = env.new_string(action.label.as_ref()).e()?;
+            j_ids.set_element(env, idx, &j_id).e()?;
+            j_labels.set_element(env, idx, &j_label).e()?;
+        }
+
+        env.call_static_method(
+            &cls,
+            jni::jni_str!("showWithActions"),
+            jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V"),
+            &[
+                JValue::Object(&activity),
+                JValue::Object(&j_tag),
+                JValue::Object(&j_channel),
+                JValue::Object(&j_title),
+                JValue::Object(&j_body),
+                JValue::Object(&j_ids),
+                JValue::Object(&j_labels),
+            ],
+        )
+        .map_err(|e| {
+            env.exception_clear();
+            e.to_string()
+        })?;
+        Ok(())
+    })
+}
+
+fn dismiss_system_notification_jni(tag: &str) -> Result<(), String> {
+    use crate::android::jni::{self as jni_helpers, JniExt};
+    use jni::objects::JValue;
+
+    jni_helpers::with_env(|env| {
+        let activity = jni_helpers::activity(env)?;
+        let cls = jni_helpers::find_app_class(env, "dev.gpui.mobile.GpuiNotifications")?;
+        let j_tag = env.new_string(tag).e()?;
+        env.call_static_method(
+            &cls,
+            jni::jni_str!("dismissByTag"),
+            jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)V"),
+            &[JValue::Object(&activity), JValue::Object(&j_tag)],
+        )
+        .map_err(|e| {
+            env.exception_clear();
+            e.to_string()
+        })?;
+        Ok(())
+    })
 }
 
 // ── Android keyboard mapper (stub) ───────────────────────────────────────────

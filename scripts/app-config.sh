@@ -33,6 +33,16 @@ trap 'rm -f "$fragment"' EXIT
       echo "warning: no \"$item\" item in Keychain service $SERVICE; $key left out" >&2
     fi
   done
+  for pair in MSFcmAppId=fcm-app-id MSFcmApiKey=fcm-api-key MSFcmProjectId=fcm-project-id \
+              MSFcmSenderId=fcm-sender-id; do
+    key="${pair%%=*}"
+    item="${pair#*=}"
+    if value=$(security find-generic-password -s "$SERVICE" -a "$item" -w 2>/dev/null); then
+      value=$(printf '%s' "$value" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+      printf '  <key>%s</key><string>%s</string>\n' "$key" "$value"
+      [ -n "$json" ] || /usr/libexec/PlistBuddy -c "Delete :$key" "$target" >/dev/null 2>&1 || true
+    fi
+  done
   echo '</dict></plist>'
 } > "$fragment"
 if [ -n "$json" ]; then

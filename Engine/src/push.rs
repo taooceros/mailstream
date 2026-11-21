@@ -37,6 +37,25 @@ const RENEW_WITHIN: f64 = 24.0 * 3600.0;
 /// How long the socket's handshake may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Public Firebase Android client options (from `google-services.json`, MS-443) so an Android
+/// client can initialize FCM either from baked resources or via Device Sync.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct FcmClientConfig {
+    pub app_id: String,
+    pub api_key: String,
+    pub project_id: String,
+    pub sender_id: String,
+}
+
+/// Persisted local mobile FCM registration (`fcm-device.json` in support directory).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FcmDevice {
+    device_id: String,
+    fcm_token: String,
+}
+
 /// The relay and what the registrations name, from the host app's build.
 #[derive(Clone, Debug, Default)]
 pub struct PushConfig {
@@ -48,9 +67,13 @@ pub struct PushConfig {
     pub graph_client_state: Option<String>,
     /// The Pub/Sub topic Gmail watches publish to.
     pub gmail_topic: Option<String>,
+    /// Optional Android Firebase client options (`MSFcm*`).
+    pub fcm_app_id: Option<String>,
+    pub fcm_api_key: Option<String>,
+    pub fcm_project_id: Option<String>,
+    pub fcm_sender_id: Option<String>,
     pub timing: PushTiming,
 }
-
 
 /// Portable push relay settings synced across paired devices (MS-444), omitting local timing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,14 +87,32 @@ pub struct PushSettings {
     pub graph_client_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmail_topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fcm_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fcm_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fcm_project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fcm_sender_id: Option<String>,
 }
 
 impl PushSettings {
     pub fn is_configured(&self) -> bool {
         PushConfig::configured(&self.url).is_some() && PushConfig::configured(&self.token).is_some()
     }
+
+    pub fn fcm_client(&self) -> Option<FcmClientConfig> {
+        Some(FcmClientConfig {
+            app_id: PushConfig::configured(&self.fcm_app_id)?.to_string(),
+            api_key: PushConfig::configured(&self.fcm_api_key)?.to_string(),
+            project_id: PushConfig::configured(&self.fcm_project_id)?.to_string(),
+            sender_id: PushConfig::configured(&self.fcm_sender_id)?.to_string(),
+        })
+    }
 }
 
+const FCM_DEVICE_FILE: &str = "fcm-device.json";
 const SYNCED_CONFIG_FILE: &str = "push-config.json";
 
 /// Reads push relay settings previously synced from a paired device (`peer-sync/push-config.json`).
@@ -140,6 +181,10 @@ impl PushConfig {
             token: Self::configured(&self.token).map(String::from),
             graph_client_state: Self::configured(&self.graph_client_state).map(String::from),
             gmail_topic: Self::configured(&self.gmail_topic).map(String::from),
+            fcm_app_id: Self::configured(&self.fcm_app_id).map(String::from),
+            fcm_api_key: Self::configured(&self.fcm_api_key).map(String::from),
+            fcm_project_id: Self::configured(&self.fcm_project_id).map(String::from),
+            fcm_sender_id: Self::configured(&self.fcm_sender_id).map(String::from),
         }
     }
 
@@ -150,10 +195,13 @@ impl PushConfig {
             token: Self::configured(&settings.token).map(String::from),
             graph_client_state: Self::configured(&settings.graph_client_state).map(String::from),
             gmail_topic: Self::configured(&settings.gmail_topic).map(String::from),
+            fcm_app_id: Self::configured(&settings.fcm_app_id).map(String::from),
+            fcm_api_key: Self::configured(&settings.fcm_api_key).map(String::from),
+            fcm_project_id: Self::configured(&settings.fcm_project_id).map(String::from),
+            fcm_sender_id: Self::configured(&settings.fcm_sender_id).map(String::from),
             timing: self.timing.clone(),
         }
     }
-    /// `path` on the relay.
     fn endpoint(&self, path: &str) -> Option<String> {
         Some(format!("{}/{path}", Self::configured(&self.url)?.trim_end_matches('/')))
     }
@@ -247,6 +295,10 @@ pub struct Push {
     state: Mutex<State>,
     /// Called after local registration changes so device sync can share them across devices.
     on_registrations: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Called whenever synced or host FCM client options become available or change (MS-443).
+    on_fcm_config: Mutex<Option<Arc<dyn Fn(FcmClientConfig) + Send + Sync>>>,
+    /// Local Android FCM device registration to keep synced with `{relay}/devices/{deviceId}`.
+    fcm_device: Mutex<Option<FcmDevice>>,
     /// Registration passes asked for; one runs at a time, and one asked for during a pass runs
     /// after it.
     requested: AtomicU64,
@@ -264,6 +316,7 @@ impl Push {
     ) -> Self {
         let file = directory.join("push.json");
         let registrations = read(&file);
+        let fcm_device = read_fcm_device(&directory);
         let timing = config.timing.clone();
         Self {
             config: Mutex::new(config),
@@ -279,6 +332,8 @@ impl Push {
             reconnect: Notify::new(),
             state: Mutex::new(State { registrations, ..State::default() }),
             on_registrations: Mutex::new(None),
+            on_fcm_config: Mutex::new(None),
+            fcm_device: Mutex::new(fcm_device),
             requested: AtomicU64::new(0),
             passes: tokio::sync::Mutex::new(0),
         }
@@ -293,10 +348,24 @@ impl Push {
         let settings = self.config().settings();
         settings.is_configured().then_some(settings)
     }
+    /// Current FCM client options (`MSFcm*` / synced from paired device), if all 4 fields are set.
+    pub fn fcm_client_config(&self) -> Option<FcmClientConfig> {
+        self.config().settings().fcm_client()
+    }
 
     /// Registers a listener invoked whenever local push registrations change (MS-444).
     pub fn on_registrations(&self, handler: impl Fn() + Send + Sync + 'static) {
         *self.on_registrations.lock().expect("push registrations listener") = Some(Arc::new(handler));
+    }
+
+    /// Registers a listener invoked when FCM client options become available or change (MS-443).
+    pub fn on_fcm_config(&self, handler: impl Fn(FcmClientConfig) + Send + Sync + 'static) {
+        let current = self.fcm_client_config();
+        let arc: Arc<dyn Fn(FcmClientConfig) + Send + Sync> = Arc::new(handler);
+        *self.on_fcm_config.lock().expect("push fcm config listener") = Some(arc.clone());
+        if let Some(cfg) = current {
+            arc(cfg);
+        }
     }
 
     fn notify_registrations(&self) {
@@ -305,10 +374,16 @@ impl Push {
         }
     }
 
+    fn notify_fcm_config(&self, cfg: FcmClientConfig) {
+        if let Some(handler) = self.on_fcm_config.lock().expect("push fcm config listener").clone() {
+            handler(cfg);
+        }
+    }
+
     /// Applies updated push relay settings at runtime (MS-444): hot-starts `Push` when it was
     /// previously unconfigured, or reconnects and re-registers when settings changed.
     pub fn reconfigure(self: &Arc<Self>, settings: PushSettings) {
-        let (changed_socket, configured) = {
+        let (changed_socket, configured, next_fcm) = {
             let mut guard = self.config.lock().expect("push config");
             let previous = guard.settings();
             let next = guard.with_settings(&settings);
@@ -318,9 +393,15 @@ impl Push {
             }
             let changed_socket = previous.url != normalized.url || previous.token != normalized.token;
             let configured = next.socket_configured();
+            let next_fcm = (previous.fcm_client() != normalized.fcm_client())
+                .then(|| normalized.fcm_client())
+                .flatten();
             *guard = next;
-            (changed_socket, configured)
+            (changed_socket, configured, next_fcm)
         };
+        if let Some(fcm) = next_fcm {
+            self.notify_fcm_config(fcm);
+        }
         if !configured {
             return;
         }
@@ -332,8 +413,140 @@ impl Push {
             }
             self.check();
         }
+        let push = self.clone();
+        tokio::spawn(async move { push.sync_fcm_device().await });
     }
 
+    /// Records this Android device's FCM registration token and registers it with the push relay
+    /// (`PUT /devices/<deviceId>`) now and on subsequent account/config changes (MS-443).
+    pub fn set_fcm_device(self: &Arc<Self>, device_id: String, fcm_token: String) {
+        let device_id = device_id.trim().to_string();
+        let fcm_token = fcm_token.trim().to_string();
+        if device_id.is_empty() || fcm_token.is_empty() {
+            return;
+        }
+        let device = FcmDevice { device_id, fcm_token };
+        {
+            let mut slot = self.fcm_device.lock().expect("fcm device lock");
+            if slot.as_ref() != Some(&device) {
+                write_fcm_device(&self.directory, &device);
+                *slot = Some(device);
+            }
+        }
+        let push = self.clone();
+        tokio::spawn(async move { push.sync_fcm_device().await });
+    }
+
+    /// Unregisters this device's FCM token from the push relay and deletes its local record.
+    pub fn clear_fcm_device(self: &Arc<Self>, device_id: String) {
+        let device_id = device_id.trim().to_string();
+        let _ = std::fs::remove_file(self.directory.join(FCM_DEVICE_FILE));
+        *self.fcm_device.lock().expect("fcm device lock") = None;
+        if device_id.is_empty() {
+            return;
+        }
+        let push = self.clone();
+        tokio::spawn(async move {
+            let config = push.config();
+            let (Some(url), Some(token)) = (
+                config.endpoint(&format!("devices/{}", percent_encoded(&device_id))),
+                PushConfig::configured(&config.token).map(String::from),
+            ) else {
+                return;
+            };
+            let _ = crate::api::HTTP
+                .delete(url)
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await;
+        });
+    }
+
+    /// Pushes the persisted Android FCM token and signed-in account list to `{relay}/devices/{id}`.
+    pub async fn sync_fcm_device(&self) {
+        let Some(device) = self.fcm_device.lock().expect("fcm device lock").clone() else {
+            return;
+        };
+        let config = self.config();
+        let (Some(url), Some(token)) = (
+            config.endpoint(&format!("devices/{}", percent_encoded(&device.device_id))),
+            PushConfig::configured(&config.token).map(String::from),
+        ) else {
+            return;
+        };
+        let accounts: Vec<String> = self.accounts.list().into_iter().map(|r| r.id.to_lowercase()).collect();
+        let payload = json!({
+            "fcmToken": device.fcm_token,
+            "accounts": accounts,
+            "platform": "android",
+        });
+        let body = serde_json::to_vec(&payload).expect("fcm device payload");
+        if let Err(err) = crate::api::HTTP
+            .put(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            eprintln!("FCM device registration failed: {err}");
+        }
+    }
+
+    /// Resolves which local account(s) a silent FCM wake (`source`, `account`, `subscriptionId`)
+    /// should refresh.
+    pub fn resolve_wake_accounts(
+        &self,
+        source: &str,
+        account: Option<&str>,
+        subscription_id: Option<&str>,
+    ) -> Vec<String> {
+        let signed_in = self.accounts.list();
+        let has = |id: &str| signed_in.iter().any(|r| r.id.eq_ignore_ascii_case(id));
+        match source {
+            "gmail" => {
+                if let Some(email) = account.map(str::trim).filter(|s| !s.is_empty()) {
+                    let lower = email.to_lowercase();
+                    if has(&lower) {
+                        return vec![lower];
+                    }
+                }
+                signed_in
+                    .into_iter()
+                    .filter(|r| r.provider == Provider::Google)
+                    .map(|r| r.id)
+                    .collect()
+            }
+            "graph" => {
+                if let Some(sub_id) = subscription_id.map(str::trim).filter(|s| !s.is_empty())
+                    && let Some(acct) = self.graph_account(sub_id)
+                    && has(&acct)
+                {
+                    return vec![acct];
+                }
+                if let Some(email) = account.map(str::trim).filter(|s| !s.is_empty()) {
+                    let lower = email.to_lowercase();
+                    if has(&lower) {
+                        return vec![lower];
+                    }
+                }
+                signed_in
+                    .into_iter()
+                    .filter(|r| r.provider == Provider::Microsoft)
+                    .map(|r| r.id)
+                    .collect()
+            }
+            _ => {
+                if let Some(email) = account.map(str::trim).filter(|s| !s.is_empty()) {
+                    let lower = email.to_lowercase();
+                    if has(&lower) {
+                        return vec![lower];
+                    }
+                }
+                signed_in.into_iter().map(|r| r.id).collect()
+            }
+        }
+    }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("push lock")
     }
@@ -727,6 +940,7 @@ impl Push {
                 }
             }
         }
+        self.sync_fcm_device().await;
     }
 
     /// Watches every change of the mailbox; renewing is the same call.
@@ -852,6 +1066,25 @@ struct GraphSubscription {
 /// push.json's registrations; none when it is missing or does not decode.
 fn read(file: &std::path::Path) -> Registrations {
     std::fs::read(file).ok().and_then(|data| serde_json::from_slice(&data).ok()).unwrap_or_default()
+}
+
+fn read_fcm_device(directory: &Path) -> Option<FcmDevice> {
+    std::fs::read(directory.join(FCM_DEVICE_FILE))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+}
+
+fn write_fcm_device(directory: &Path, device: &FcmDevice) {
+    let path = directory.join(FCM_DEVICE_FILE);
+    if let Ok(data) = serde_json::to_vec_pretty(device)
+        && crate::files::replace(directory, &path, &data).is_ok()
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 /// The wait before reconnection attempt `failures` + 1: `backoff` × 2^failures (at most 2^6),

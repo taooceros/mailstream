@@ -1203,6 +1203,11 @@ impl ChatPane {
         self.open(Key { account, space }, window, cx);
     }
 
+
+    /// True when the reader is currently showing `account`'s `space`.
+    pub fn open_space_matches(&self, account: &str, space: &str) -> bool {
+        matches!(&self.view, View::Space(open) if open.account.as_ref() == account && open.space.as_ref() == space)
+    }
     /// How the window lays the pane out, as it lays out mail (MS-328): the pane `width` wide, the
     /// list `list_width` wide beside the open page in a wide window (`two_pane`), else the page
     /// over the list.

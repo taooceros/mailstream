@@ -116,7 +116,7 @@ pub(crate) fn config(mut config: Config) -> Config {
 }
 
 /// [`start`] ran: the engine's providers are the stand-in.
-pub(crate) fn running() -> bool {
+pub fn running() -> bool {
     PROVIDER.get().is_some()
 }
 

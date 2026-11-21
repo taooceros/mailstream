@@ -222,6 +222,8 @@ pub struct Mail {
     undo: undo::Undo,
     /// Live stream of newly arrived unread inbox messages for `mail.watch` (MS-452).
     new_mail: tokio::sync::broadcast::Sender<answers::NewMail>,
+    /// Signaled once cached accounts/mailboxes/listings have been restored from `mail.db`.
+    cache_loaded: tokio::sync::watch::Sender<bool>,
 }
 
 impl Mail {
@@ -246,6 +248,7 @@ impl Mail {
         let tagging =
             Tagging::new(cache.clone(), contents.clone(), settings.clone(), events.clone(), tool_environment, apple_tagger);
         let (new_mail, _) = tokio::sync::broadcast::channel(256);
+        let (cache_loaded, _) = tokio::sync::watch::channel(false);
         Self {
             cache,
             contents,
@@ -261,9 +264,9 @@ impl Mail {
             auto_read: autoread::AutoRead::new(),
             undo: undo::Undo::default(),
             new_mail,
+            cache_loaded,
         }
     }
-
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("mail lock")
     }
@@ -284,6 +287,55 @@ impl Mail {
         self.new_mail.subscribe()
     }
 
+    /// Waits until cached accounts/mailboxes from `mail.db` have been loaded into memory.
+    pub async fn wait_cache_loaded(&self) {
+        let mut rx = self.cache_loaded.subscribe();
+        let _ = rx.wait_for(|loaded| *loaded).await;
+    }
+
+    /// Seeds new-mail inbox baseline from cached listings restored from `mail.db` (MS-443) so a
+    /// cold-started Android FCM wake detects mail newer than the pre-kill snapshot without
+    /// changing normal foreground startup baseline behavior.
+    pub async fn seed_inbox_from_cache(self: &Arc<Self>) {
+        self.wait_cache_loaded().await;
+        let inbox_keys: Vec<MailboxKey> = Self::unified_mailboxes(&self.state(), MailboxRole::Inbox);
+        if !inbox_keys.is_empty() {
+            self.load_cached_listings(&inbox_keys).await;
+        }
+        let mut state = self.state();
+        for key in inbox_keys {
+            if state.inbox_seeded.contains(&key) {
+                continue;
+            }
+            let Some(cached) = state.listings.get(&key) else { continue };
+            if cached.envelopes.is_empty() {
+                continue;
+            }
+            let ids: Vec<String> = cached.envelopes.iter().map(|e| e.id.clone()).collect();
+            let floor = cached
+                .next
+                .is_some()
+                .then(|| cached.envelopes.iter().filter_map(|e| e.date).reduce(f64::min))
+                .flatten();
+            state.seen_inbox_ids.entry(key.account.clone()).or_default().extend(ids);
+            if let Some(oldest) = floor {
+                state.inbox_floor.insert(key.clone(), oldest);
+            }
+            state.inbox_seeded.insert(key);
+        }
+    }
+
+    /// Fetches inbox first pages for `accounts` now and waits for completion (MS-443 background
+    /// FCM wake pass).
+    pub async fn refresh_accounts_now(self: &Arc<Self>, accounts: &[String]) {
+        for account in accounts {
+            if !self.refresh_account_now(account).await {
+                // Account not loaded from cache yet: connect it first.
+                let none = HashSet::new();
+                self.clone().connect_account(account.clone(), &none).await;
+            }
+        }
+    }
     /// Streaming subscription for `mail.watch`, optionally filtered to one account.
     pub(crate) fn watch(&self, args: &Arguments) -> Result<tokio::sync::mpsc::UnboundedReceiver<Value>, EngineError> {
         let account = self.account_filter(args)?;
@@ -370,11 +422,13 @@ impl Mail {
             state.connected = restored.is_empty();
         }
         if restored.is_empty() {
+            let _ = self.cache_loaded.send(true);
             return;
         }
         self.events.emit_soon("accounts");
         let names: Vec<String> = restored.iter().map(|account| account.name.clone()).collect();
         self.load_cached_mailboxes(&names).await;
+        let _ = self.cache_loaded.send(true);
         let held = Self::default_keys(&self.state());
         self.clone().refresh_keys(held.clone());
         self.connect(names, held.into_iter().collect()).await;

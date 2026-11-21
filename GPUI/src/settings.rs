@@ -184,6 +184,7 @@ struct Note {
 /// without a title.
 const SECTIONS: &[(&str, &[&str])] = &[
     ("Sync", &["sync.", "chat."]),
+    ("Notifications", &["notifications."]),
     ("AI tagging", &["aiTagging."]),
     ("Auto-read", &["autoRead."]),
     ("Remote content", &["remoteContent."]),
@@ -224,6 +225,9 @@ pub(crate) fn title(key: &str) -> &str {
         "sync.pollSeconds" => "Mail polling",
         "sync.pushPollSeconds" => "Polling while push is connected",
         "chat.pollSeconds" => "Google Chat polling",
+        "notifications.enabled" => "System notifications",
+        "notifications.mail" => "Mail notifications",
+        "notifications.chat" => "Google Chat notifications",
         "gpui.showFrameRate" => "Show frame rate",
         "gpui.listWidth" => "List width (‰ of the window)",
         "gpui.calendarWidth" => "Calendar width (‰ of the window)",
@@ -232,15 +236,17 @@ pub(crate) fn title(key: &str) -> &str {
 }
 
 /// Names for the words a choice setting takes.
-fn choice_title(word: &str) -> &str {
-    match word {
-        "apple" => "Apple Intelligence",
-        "all" => "All devices",
-        "selected" => "Selected devices",
-        other => other,
+fn choice_title<'a>(key: &str, word: &'a str) -> &'a str {
+    match (key, word) {
+        (_, "apple") => "Apple Intelligence",
+        ("notifications.mail", "important") => "Important",
+        ("notifications.mail", "all") => "All mail",
+        ("notifications.mail", "off") => "Off",
+        (_, "all") => "All devices",
+        (_, "selected") => "Selected devices",
+        (_, other) => other,
     }
 }
-
 fn in_section(key: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| key.starts_with(prefix))
 }
@@ -1743,7 +1749,7 @@ impl Settings {
                         let (key, word) = (key.clone(), word.clone());
                         button(
                             ElementId::Name(format!("{key}={word}").into()),
-                            choice_title(&word).to_owned(),
+                            choice_title(&key, &word).to_owned(),
                             if selected { ButtonKind::Primary } else { ButtonKind::Secondary },
                             ControlSize::small(mobile),
                             true,
@@ -2048,7 +2054,7 @@ impl Settings {
                 let word = word.clone();
                 button(
                     ElementId::Name(format!("{TAGGING_DEVICES_MODE}={word}").into()),
-                    choice_title(&word).to_owned(),
+                    choice_title(TAGGING_DEVICES_MODE, &word).to_owned(),
                     if chosen { ButtonKind::Primary } else { ButtonKind::Secondary },
                     ControlSize::small(mobile),
                     true,

@@ -153,6 +153,41 @@ mod android_entry {
         }
     }
 
+    /// Safely extracts a Java String from a raw JNI call frame (works in both Activity and
+    /// cold-started headless `FirebaseMessagingService` / `BroadcastReceiver` processes).
+    unsafe fn jstring_to_rust(env: *mut ::jni::sys::JNIEnv, s: ::jni::sys::jstring) -> String {
+        if env.is_null() || s.is_null() {
+            return String::new();
+        }
+        let Some(fns) = (unsafe { (*env).as_ref() }) else {
+            return String::new();
+        };
+        let chars = unsafe { (fns.v1_1.GetStringUTFChars)(env, s, std::ptr::null_mut()) };
+        if chars.is_null() {
+            return String::new();
+        }
+        let out = unsafe { std::ffi::CStr::from_ptr(chars) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { (fns.v1_1.ReleaseStringUTFChars)(env, s, chars) };
+        out
+    }
+
+    /// Allocates a new Java String in the caller's JNI frame.
+    unsafe fn rust_to_jstring(env: *mut ::jni::sys::JNIEnv, text: &str) -> ::jni::sys::jstring {
+        if env.is_null() {
+            return std::ptr::null_mut();
+        }
+        let Some(fns) = (unsafe { (*env).as_ref() }) else {
+            return std::ptr::null_mut();
+        };
+        let sanitized = text.replace('\0', "");
+        let Ok(cstr) = std::ffi::CString::new(sanitized) else {
+            return std::ptr::null_mut();
+        };
+        unsafe { (fns.v1_1.NewStringUTF)(env, cstr.as_ptr()) }
+    }
+
     fn configure_android_engine(support_dir: PathBuf, cache_dir: PathBuf) {
         let mut config = Config::for_this_app().in_directory(support_dir);
         config.cache_directory = cache_dir;
@@ -165,6 +200,137 @@ mod android_entry {
         let _ = mailstream::configure_engine(config);
     }
 
+    fn init_android_logger_once() {
+        let filter = android_logger::FilterBuilder::new()
+            .filter_level(log::LevelFilter::Warn)
+            .filter_module("mailstream_android_poc", log::LevelFilter::Info)
+            .filter_module("mailstream_gpui", log::LevelFilter::Info)
+            .filter_module("mailstream_android_fonts", log::LevelFilter::Info)
+            .filter_module("mailstream", log::LevelFilter::Info)
+            .filter_module("mailstream_engine", log::LevelFilter::Info)
+            .filter_module("gpui_mobile", log::LevelFilter::Info)
+            .filter_module("gpui_wgpu", log::LevelFilter::Info)
+            .build();
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_max_level(log::LevelFilter::Info)
+                .with_filter(filter)
+                .with_tag("mailstream"),
+        );
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeNotificationResponse(
+        env: *mut ::jni::sys::JNIEnv,
+        _class: ::jni::sys::jclass,
+        tag: ::jni::sys::jstring,
+        action_id: ::jni::sys::jstring,
+    ) {
+        let tag = unsafe { jstring_to_rust(env, tag) };
+        let action_id = unsafe { jstring_to_rust(env, action_id) };
+        if tag.is_empty() {
+            return;
+        }
+        if let Some(platform) = jni::shared_platform() {
+            platform.0.deliver_system_notification_response(
+                tag,
+                (!action_id.is_empty()).then_some(action_id),
+            );
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_MailstreamFcm_nativeOnFcmToken(
+        env: *mut ::jni::sys::JNIEnv,
+        _class: ::jni::sys::jclass,
+        support_dir: ::jni::sys::jstring,
+        cache_dir: ::jni::sys::jstring,
+        device_id: ::jni::sys::jstring,
+        token: ::jni::sys::jstring,
+    ) {
+        init_android_logger_once();
+        let support = unsafe { jstring_to_rust(env, support_dir) };
+        let cache = unsafe { jstring_to_rust(env, cache_dir) };
+        let device_id = unsafe { jstring_to_rust(env, device_id) };
+        let token = unsafe { jstring_to_rust(env, token) };
+        if support.is_empty() || device_id.is_empty() || token.is_empty() {
+            return;
+        }
+        let support_path = PathBuf::from(support);
+        let cache_path = if cache.is_empty() { support_path.join("cache") } else { PathBuf::from(cache) };
+        configure_android_engine(support_path, cache_path);
+        let engine = mailstream::Mailstream::new();
+        log::info!("mailstream-android: registering FCM token for device={device_id}");
+        engine.set_fcm_device(device_id, token);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_MailstreamFcm_nativeNetworkChanged(
+        _env: *mut ::jni::sys::JNIEnv,
+        _class: ::jni::sys::jclass,
+    ) {
+        let engine = mailstream::Mailstream::new();
+        engine.notify_network_change();
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_MailstreamMessagingService_nativeOnPushWake(
+        env: *mut ::jni::sys::JNIEnv,
+        _class: ::jni::sys::jclass,
+        support_dir: ::jni::sys::jstring,
+        cache_dir: ::jni::sys::jstring,
+        source: ::jni::sys::jstring,
+        account: ::jni::sys::jstring,
+        subscription_id: ::jni::sys::jstring,
+    ) -> ::jni::sys::jstring {
+        init_android_logger_once();
+        let support = unsafe { jstring_to_rust(env, support_dir) };
+        let cache = unsafe { jstring_to_rust(env, cache_dir) };
+        let source = unsafe { jstring_to_rust(env, source) };
+        let account = unsafe { jstring_to_rust(env, account) };
+        let sub_id = unsafe { jstring_to_rust(env, subscription_id) };
+        if support.is_empty() {
+            return unsafe { rust_to_jstring(env, "[]") };
+        }
+        let support_path = PathBuf::from(support);
+        let cache_path = if cache.is_empty() { support_path.join("cache") } else { PathBuf::from(cache) };
+        configure_android_engine(support_path, cache_path);
+        let engine = mailstream::Mailstream::new();
+        let items = engine.background_push_wake_blocking(
+            if source.is_empty() { "mail".into() } else { source },
+            (!account.is_empty()).then_some(account),
+            (!sub_id.is_empty()).then_some(sub_id),
+            std::time::Duration::from_secs(15),
+        );
+        let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
+        unsafe { rust_to_jstring(env, &json) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiNotificationActionReceiver_nativeNotificationAction(
+        env: *mut ::jni::sys::JNIEnv,
+        _class: ::jni::sys::jclass,
+        support_dir: ::jni::sys::jstring,
+        cache_dir: ::jni::sys::jstring,
+        tag: ::jni::sys::jstring,
+        action_id: ::jni::sys::jstring,
+    ) {
+        init_android_logger_once();
+        let support = unsafe { jstring_to_rust(env, support_dir) };
+        let cache = unsafe { jstring_to_rust(env, cache_dir) };
+        let tag = unsafe { jstring_to_rust(env, tag) };
+        let action_id = unsafe { jstring_to_rust(env, action_id) };
+        if support.is_empty() || tag.is_empty() || action_id.is_empty() {
+            return;
+        }
+        let support_path = PathBuf::from(support);
+        let cache_path = if cache.is_empty() { support_path.join("cache") } else { PathBuf::from(cache) };
+        configure_android_engine(support_path, cache_path);
+        let engine = mailstream::Mailstream::new();
+        if let Err(err) = engine.run_notification_action_blocking(&tag, &action_id) {
+            log::warn!("mailstream-android: notification action {action_id} failed for {tag}: {err}");
+        }
+    }
     fn android_long_press_haptic() {
         let _ = gpui_mobile::packages::vibration::haptic_feedback(
             gpui_mobile::packages::vibration::HapticFeedback::Heavy,
@@ -178,6 +344,16 @@ mod android_entry {
         mailstream_gpui::design::compact::set_font_scale_provider(android_font_scale);
         mailstream_gpui::design::compact::set_long_press_haptic_provider(android_long_press_haptic);
         mailstream_gpui::init(cx);
+        mailstream::Mailstream::new().on_fcm_config(|fcm| {
+            if let Err(err) = jni::init_fcm_options_via_jni(
+                &fcm.app_id,
+                &fcm.api_key,
+                &fcm.project_id,
+                &fcm.sender_id,
+            ) {
+                log::warn!("mailstream-android: init_fcm_options_via_jni failed: {err}");
+            }
+        });
         let (window, app) = mailstream_gpui::open_window(mailstream_gpui::mobile_window_options(), cx);
         let async_cx_ime = cx.to_async();
         let weak_app_ime = app.downgrade();
@@ -227,22 +403,7 @@ mod android_entry {
     /// Entry point when hosted via `android-activity` (`NativeActivity` / `GpuiActivity`).
     #[unsafe(no_mangle)]
     fn android_main(app: android_activity::AndroidApp) {
-        let filter = android_logger::FilterBuilder::new()
-            .filter_level(log::LevelFilter::Warn)
-            .filter_module("mailstream_android_poc", log::LevelFilter::Info)
-            .filter_module("mailstream_gpui", log::LevelFilter::Info)
-            .filter_module("mailstream_android_fonts", log::LevelFilter::Info)
-            .filter_module("mailstream", log::LevelFilter::Info)
-            .filter_module("mailstream_engine", log::LevelFilter::Info)
-            .filter_module("gpui_mobile", log::LevelFilter::Info)
-            .filter_module("gpui_wgpu", log::LevelFilter::Info)
-            .build();
-        android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Info)
-                .with_filter(filter)
-                .with_tag("mailstream"),
-        );
+        init_android_logger_once();
         jni::install_panic_hook();
         log::info!("mailstream-android: android_main entered");
 

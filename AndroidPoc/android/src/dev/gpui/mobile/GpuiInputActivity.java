@@ -1,7 +1,11 @@
 package dev.gpui.mobile;
 
+import android.Manifest;
 import android.app.NativeActivity;
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.text.InputType;
 import android.content.res.Configuration;
@@ -38,7 +42,9 @@ public class GpuiInputActivity extends NativeActivity {
     private static final int IME_DELETE_SURROUNDING = 2;
     private static final int IME_DELETE_CODE_POINTS = 3;
     private static final int IME_ESCAPE = 4;
-
+    private static final int REQ_POST_NOTIFICATIONS = 1001;
+    private static final String PREFS_PERMS = "mailstream_perm_prefs";
+    private static final String KEY_ASKED_NOTIF = "asked_post_notifications";
     private volatile long imeSession = 0;
     private int inputKind = 0;
     private ImeProxyView imeProxy;
@@ -62,6 +68,7 @@ public class GpuiInputActivity extends NativeActivity {
     private static native void nativeBackProgressed(float progress, int edge);
     private static native void nativeBackCancelled();
     private static native void nativeTrimMemory(int level);
+    private static native void nativeNotificationResponse(String tag, String actionId);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -121,8 +128,50 @@ public class GpuiInputActivity extends NativeActivity {
         }
         // Keep back callback unregistered at startup on the root inbox so Android 14+
         // plays the native Back-to-Home preview until Rust reports an in-app back target.
+        GpuiNotifications.ensureChannels(this);
+        maybeRequestNotificationPermission();
+        MailstreamFcm.start(this);
+        deliverNotificationIntent(getIntent());
     }
 
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        deliverNotificationIntent(intent);
+    }
+
+    private void maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        SharedPreferences prefs = getSharedPreferences(PREFS_PERMS, Context.MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_ASKED_NOTIF, false)) {
+            return;
+        }
+        prefs.edit().putBoolean(KEY_ASKED_NOTIF, true).apply();
+        requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, REQ_POST_NOTIFICATIONS);
+    }
+
+    private void deliverNotificationIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        String tag = intent.getStringExtra(GpuiNotifications.EXTRA_NOTIFICATION_TAG);
+        if (tag == null || tag.isEmpty()) {
+            return;
+        }
+        String actionId = intent.getStringExtra(GpuiNotifications.EXTRA_NOTIFICATION_ACTION);
+        intent.removeExtra(GpuiNotifications.EXTRA_NOTIFICATION_TAG);
+        intent.removeExtra(GpuiNotifications.EXTRA_NOTIFICATION_ACTION);
+        try {
+            nativeNotificationResponse(tag, actionId != null ? actionId : "");
+        } catch (UnsatisfiedLinkError ignored) {
+        }
+    }
     private void installImeAnimationCallback(final View decor) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return;

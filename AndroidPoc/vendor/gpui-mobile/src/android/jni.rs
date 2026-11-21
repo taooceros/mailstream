@@ -1917,6 +1917,41 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiMediaSession_nativeMediaSeek(
     crate::packages::media_session::notify_seek(position_ms as u64);
 }
 
+/// Invokes `dev.gpui.mobile.MailstreamFcm.initializeWithOptions(...)` over JNI so runtime
+/// Firebase client options synced via Device Sync initialize FCM on Android (MS-443).
+pub fn init_fcm_options_via_jni(
+    app_id: &str,
+    api_key: &str,
+    project_id: &str,
+    sender_id: &str,
+) -> Result<(), String> {
+    with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.MailstreamFcm")?;
+        let j_app_id = env.new_string(app_id).e()?;
+        let j_api_key = env.new_string(api_key).e()?;
+        let j_project_id = env.new_string(project_id).e()?;
+        let j_sender_id = env.new_string(sender_id).e()?;
+        env.call_static_method(
+            &cls,
+            jni::jni_str!("initializeWithOptions"),
+            jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+            &[
+                JValue::Object(&act),
+                JValue::Object(&j_app_id),
+                JValue::Object(&j_api_key),
+                JValue::Object(&j_project_id),
+                JValue::Object(&j_sender_id),
+            ],
+        )
+        .map_err(|e| {
+            env.exception_clear();
+            e.to_string()
+        })?;
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -150,33 +150,83 @@ SO="$CARGO_TARGET_DIR/aarch64-linux-android/$TARGET_PROFILE/libmailstream_androi
 
 OUT_DIR="$CARGO_TARGET_DIR/apk-$PROFILE"
 rm -rf "$OUT_DIR"
-mkdir -p "$OUT_DIR/classes" "$OUT_DIR/stage/lib/arm64-v8a"
+mkdir -p "$OUT_DIR/classes" "$OUT_DIR/gen" "$OUT_DIR/res" "$OUT_DIR/stage/lib/arm64-v8a"
 
-echo "==> Compiling Java host (GpuiInputActivity + GpuiClipboard)"
-javac --release 11 -classpath "$ANDROID_JAR" -d "$OUT_DIR/classes" \
-  "$POC/android/src/dev/gpui/mobile/GpuiInputActivity.java" \
-  "$POC/android/src/dev/gpui/mobile/GpuiClipboard.java"
+DEPS_CACHE="${MAILSTREAM_ANDROID_DEPS_DIR:-$HOME/.cache/mailstream-android-deps/fcm-24.1.1}"
+GOOGLE_SERVICES="${ANDROID_GOOGLE_SERVICES_JSON:-$HOME/.config/mailstream/google-services.json}"
+GS_ARGS=()
+if [[ -f "$GOOGLE_SERVICES" ]]; then
+  GS_ARGS=(--google-services "$GOOGLE_SERVICES")
+fi
 
-echo "==> Dexing classes with d8"
+echo "==> Preparing Firebase Cloud Messaging dependencies (cached in $DEPS_CACHE)"
+python3 "$POC/fetch-fcm-deps.py" \
+  --cache-dir "$DEPS_CACHE" \
+  --out-dir "$OUT_DIR" \
+  --base-manifest "$POC/android/AndroidManifest.xml" \
+  --app-id dev.mailstream.gpui.poc \
+  "${GS_ARGS[@]}"
+
+echo "==> Compiling Android and Firebase resources with aapt2"
+"$BUILD_TOOLS/aapt2" compile --dir "$POC/android/res" -o "$OUT_DIR/res/app-res.zip"
+AAR_RES_CACHE="$DEPS_CACHE/compiled-res"
+mkdir -p "$AAR_RES_CACHE"
+RES_ZIPS=("$OUT_DIR/res/app-res.zip")
+while IFS= read -r res_dir; do
+  [[ -n "$res_dir" ]] || continue
+  if [[ "$res_dir" == "$OUT_DIR/"* ]]; then
+    zip_out="$OUT_DIR/res/gs-res.zip"
+    "$BUILD_TOOLS/aapt2" compile --dir "$res_dir" -o "$zip_out"
+  else
+    key="$(basename "$res_dir")"
+    zip_out="$AAR_RES_CACHE/$key.zip"
+    if [[ ! -f "$zip_out" ]]; then
+      "$BUILD_TOOLS/aapt2" compile --dir "$res_dir" -o "$zip_out"
+    fi
+  fi
+  RES_ZIPS+=("$zip_out")
+done < <(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["res_dirs"]))' "$OUT_DIR/fcm-deps.json")
+
+EXTRA_PKGS="$(python3 -c 'import json, sys; print(":".join(json.load(open(sys.argv[1]))["extra_packages"]))' "$OUT_DIR/fcm-deps.json")"
+
+echo "==> Linking merged AndroidManifest.xml and resources with aapt2"
+LINK_ARGS=(
+  -I "$ANDROID_JAR"
+  --manifest "$OUT_DIR/AndroidManifest.xml"
+  --min-sdk-version "$API_LEVEL"
+  --target-sdk-version 35
+  --auto-add-overlay
+  --java "$OUT_DIR/gen"
+  -o "$OUT_DIR/unaligned.apk"
+)
+if [[ -n "$EXTRA_PKGS" ]]; then
+  LINK_ARGS+=(--extra-packages "$EXTRA_PKGS")
+fi
+"$BUILD_TOOLS/aapt2" link "${LINK_ARGS[@]}" "${RES_ZIPS[@]}"
+
+FCM_JARS=()
+while IFS= read -r jar; do
+  [[ -n "$jar" ]] && FCM_JARS+=("$jar")
+done < <(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["jars"]))' "$OUT_DIR/fcm-deps.json")
+FCM_CP="$(IFS=:; echo "${FCM_JARS[*]}")"
+
+echo "==> Compiling Java host and generated R.java"
+JAVA_SRCS=()
+while IFS= read -r jf; do
+  [[ -n "$jf" ]] && JAVA_SRCS+=("$jf")
+done < <(find "$POC/android/src" "$OUT_DIR/gen" -name '*.java' | sort)
+javac --release 11 -classpath "$ANDROID_JAR:$FCM_CP" -d "$OUT_DIR/classes" "${JAVA_SRCS[@]}"
+
+echo "==> Dexing app and Firebase Messaging classes with d8"
 D8_FLAGS=(--min-api "$API_LEVEL" --lib "$ANDROID_JAR" --output "$OUT_DIR/stage")
 if [[ "$PROFILE" == "release" ]]; then
   D8_FLAGS+=(--release)
 fi
-"$BUILD_TOOLS/d8" "${D8_FLAGS[@]}" \
-  $(find "$OUT_DIR/classes" -name '*.class')
-
-echo "==> Compiling Android resources with aapt2"
-mkdir -p "$OUT_DIR/res"
-"$BUILD_TOOLS/aapt2" compile --dir "$POC/android/res" -o "$OUT_DIR/res/resources.zip"
-
-echo "==> Linking AndroidManifest.xml and resources with aapt2"
-"$BUILD_TOOLS/aapt2" link \
-  -I "$ANDROID_JAR" \
-  --manifest "$POC/android/AndroidManifest.xml" \
-  --min-sdk-version "$API_LEVEL" \
-  --target-sdk-version 35 \
-  -o "$OUT_DIR/unaligned.apk" \
-  "$OUT_DIR/res/resources.zip"
+CLASS_FILES=()
+while IFS= read -r cf; do
+  [[ -n "$cf" ]] && CLASS_FILES+=("$cf")
+done < <(find "$OUT_DIR/classes" -name '*.class' | sort)
+"$BUILD_TOOLS/d8" "${D8_FLAGS[@]}" "${CLASS_FILES[@]}" "${FCM_JARS[@]}"
 
 cp "$SO" "$OUT_DIR/stage/lib/arm64-v8a/libmailstream_android_poc.so"
 

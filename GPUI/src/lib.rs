@@ -35,6 +35,7 @@ pub mod icons;
 mod input;
 mod markup_highlight;
 mod message_log;
+mod notifications;
 mod model;
 mod settings;
 mod settings_list;
@@ -198,6 +199,7 @@ pub fn open_window(options: WindowOptions, cx: &mut App) -> (WindowHandle<gpui::
         },
         cx,
     );
+    notifications::start(window, app.downgrade(), cx);
     (window, app)
 }
 

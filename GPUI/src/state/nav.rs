@@ -772,6 +772,74 @@ impl MailApp {
         }
         cx.notify();
     }
+    /// True when Chat is active and showing `account`'s `space`.
+    pub fn is_viewing_chat_space(&self, account: &str, space: &str, cx: &App) -> bool {
+        self.chat_view.is_some() && self.chat.read(cx).open_space_matches(account, space)
+    }
+
+    /// Opens a conversation tapped from an OS notification (MS-443), fetching it if not yet in the
+    /// current list (e.g. on cold launch).
+    pub fn open_notification_mail(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_settings(window, cx);
+        self.close_drawer(cx);
+        self.leave_panes(cx);
+        if self.list().is_some_and(|l| l.conversations.iter().any(|c| c.id == id)) {
+            self.open_row(&id, false, window, cx);
+            return;
+        }
+        self.select(Source::Unified(MailboxRole::Inbox), window, cx);
+        let target_id = id.clone();
+        self.background(
+            cx,
+            async move {
+                let mut q = mailstream::ListQuery {
+                    mailboxes: vec!["inbox".into()],
+                    limit: 50,
+                    cached: true,
+                    ..Default::default()
+                };
+                if let Ok(listed) = engine().list(q.clone()).await
+                    && let Some(found) = listed.conversations.into_iter().find(|c| c.id == target_id)
+                {
+                    return Some(Conversation::from(found));
+                }
+                q.cached = false;
+                engine()
+                    .list(q)
+                    .await
+                    .ok()
+                    .and_then(|listed| listed.conversations.into_iter().find(|c| c.id == target_id))
+                    .map(Conversation::from)
+            },
+            move |this, found, cx| {
+                if let Some(conversation) = found {
+                    this.highlight = Some(conversation.id.clone());
+                    this.reader_scroll = ScrollHandle::new();
+                    this.reader_pin = ReaderPin::Opening;
+                    this.reader_top = ReaderTop::Top;
+                    this.hovered_message = None;
+                    this.load_thread(&conversation, false, cx);
+                    let unread = conversation.unread;
+                    if matches!(this.layers.last(), Some(Layer::Reader(_))) {
+                        this.layers.pop();
+                    }
+                    this.push_layer(Layer::Reader(Box::new(conversation.clone())), false);
+                    this.pin_opening(&conversation.id);
+                    if unread {
+                        this.set_unread(std::slice::from_ref(&conversation), false, cx);
+                    }
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// Opens a Google Chat space tapped from an OS notification (MS-443).
+    pub fn open_notification_chat(&mut self, account: String, space: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_settings(window, cx);
+        self.select_chat(None, window, cx);
+        self.chat.update(cx, |chat, cx| chat.open_space(account.into(), space.into(), window, cx));
+    }
 
     /// Esc: ends a selection (MS-305), else the top layer goes, else the search.
     pub fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
@@ -783,6 +851,7 @@ impl MailApp {
         }
         if self.close_settings(window, cx) {
             return;
+
         }
         if self.chat_view.is_some()
             && self.chat.update(cx, |chat, cx| chat.close_message_sheet(cx) || chat.close_video_lightbox(window, cx))

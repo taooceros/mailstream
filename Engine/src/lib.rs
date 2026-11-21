@@ -51,6 +51,7 @@ pub mod mail;
 mod mime;
 mod mime_parse;
 pub mod model;
+pub mod notifications;
 mod oauth;
 mod omp;
 mod polling;
@@ -300,6 +301,7 @@ struct Core {
     calendar: Arc<calendar::CalendarStore>,
     avatars: Arc<avatars::Avatars>,
     device_sync: Option<Arc<device_sync::DeviceSync>>,
+    notified: Arc<notifications::NotifiedLog>,
     support_directory: PathBuf,
     /// Push relay settings provided by the host bundle / config.json, if any (MS-444).
     host_push: Option<push::PushSettings>,
@@ -433,6 +435,7 @@ impl Engine {
                 sync.settings_changed();
             }
         });
+        let notified = Arc::new(notifications::NotifiedLog::new(directory));
         let core = Arc::new(Core {
             settings,
             accounts,
@@ -446,6 +449,7 @@ impl Engine {
             calendar: calendar.clone(),
             avatars,
             device_sync,
+            notified,
             support_directory: directory.clone(),
             host_push,
         });
@@ -516,6 +520,181 @@ impl Engine {
         self.core.mail.subscribe_new_mail()
     }
 
+    /// Subscribes to newly arrived unread incoming Google Chat messages (MS-443).
+    pub fn subscribe_new_chat(&self) -> tokio::sync::broadcast::Receiver<answers::NewChat> {
+        self.core.chat.subscribe_new_chat()
+    }
+
+    /// Calls `listener` on the engine's runtime for each newly arrived unread inbox message.
+    pub fn on_new_mail(&self, listener: impl Fn(answers::NewMail) + Send + Sync + 'static) {
+        let mut rx = self.core.mail.subscribe_new_mail();
+        self.runtime.spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(item) => listener(item),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// Calls `listener` on the engine's runtime for each newly arrived unread incoming Chat message.
+    pub fn on_new_chat(&self, listener: impl Fn(answers::NewChat) + Send + Sync + 'static) {
+        let mut rx = self.core.chat.subscribe_new_chat();
+        self.runtime.spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(item) => listener(item),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    /// Formats `mail` as an OS notification if allowed by `notifications.*` settings.
+    pub fn format_mail_notification(&self, mail: &answers::NewMail) -> Option<notifications::NotificationItem> {
+        notifications::format_mail(&self.core.settings, mail)
+    }
+
+    /// Formats `chat` as an OS notification if allowed by `notifications.*` settings.
+    pub fn format_chat_notification(&self, chat: &answers::NewChat) -> Option<notifications::NotificationItem> {
+        notifications::format_chat(&self.core.settings, chat)
+    }
+
+    /// Persistently claims `dedup_id` so the same message is never notified twice across restarts.
+    pub fn claim_notification(&self, dedup_id: &str) -> bool {
+        self.core.notified.claim(dedup_id)
+    }
+
+    /// Records this mobile device's FCM registration token and uploads it to the push relay.
+    pub fn set_fcm_device(&self, device_id: String, fcm_token: String) {
+        let push = self.core.push.clone();
+        let _entered = self.runtime.enter();
+        push.set_fcm_device(device_id, fcm_token);
+    }
+
+    /// Removes this mobile device's FCM registration token locally and on the push relay.
+    pub fn clear_fcm_device(&self, device_id: String) {
+        let push = self.core.push.clone();
+        let _entered = self.runtime.enter();
+        push.clear_fcm_device(device_id);
+    }
+
+    /// Current FCM client options (`MSFcm*` / Device Sync), if configured.
+    pub fn fcm_client_config(&self) -> Option<push::FcmClientConfig> {
+        self.core.push.fcm_client_config()
+    }
+
+    /// Registers a listener invoked whenever FCM client options become available or change.
+    pub fn on_fcm_config(&self, handler: impl Fn(push::FcmClientConfig) + Send + Sync + 'static) {
+        self.core.push.on_fcm_config(handler);
+    }
+
+    /// Announces a platform network transition (e.g. Android `ConnectivityManager`) so push
+    /// reconnects immediately instead of waiting out backoff.
+    pub fn notify_network_change(&self) {
+        signal::ProcessSignal::NETWORK_CHANGE.post();
+    }
+
+    /// Flushes queued `mail.db` writes before a background service exits.
+    pub fn flush_mail(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mail = self.core.mail.clone();
+        let task = self.runtime.spawn(async move { mail.flush().await });
+        async move {
+            let _ = task.await;
+        }
+    }
+
+    /// Runs one bounded background push-wake sync pass (MS-443 Android FCM silent wake):
+    /// seeds from `mail.db` cache if cold-started, refreshes target accounts, collects & filters
+    /// newly arrived notifications, deduplicates via `notified.json`, and flushes `mail.db`.
+    pub fn background_push_wake(
+        &self,
+        source: String,
+        account: Option<String>,
+        subscription_id: Option<String>,
+        timeout: std::time::Duration,
+    ) -> impl Future<Output = Vec<notifications::NotificationItem>> + Send + 'static {
+        let core = self.core.clone();
+        let task = self.runtime.spawn(async move {
+            let run = async move {
+                let mut items = Vec::new();
+                if source == "chat" {
+                    core.chat.wait_cache_loaded().await;
+                    core.chat.seed_from_cache();
+                    let mut chat_rx = core.chat.subscribe_new_chat();
+                    core.chat.refresh_now(account.as_deref()).await;
+                    while let Ok(msg) = chat_rx.try_recv() {
+                        if let Some(item) = notifications::format_chat(&core.settings, &msg)
+                            && core.notified.claim(&item.dedup_id)
+                        {
+                            items.push(item);
+                        }
+                    }
+                    core.mail.flush().await;
+                    return items;
+                }
+
+                core.mail.seed_inbox_from_cache().await;
+                let mut mail_rx = core.mail.subscribe_new_mail();
+                let accounts = core.push.resolve_wake_accounts(
+                    &source,
+                    account.as_deref(),
+                    subscription_id.as_deref(),
+                );
+                core.mail.refresh_accounts_now(&accounts).await;
+                // Give `publish_new_mail` snippet enrichment a brief settle window (up to 400ms).
+                let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(400);
+                loop {
+                    let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(remaining, mail_rx.recv()).await {
+                        Ok(Ok(mail)) => {
+                            if let Some(item) = notifications::format_mail(&core.settings, &mail)
+                                && core.notified.claim(&item.dedup_id)
+                            {
+                                items.push(item);
+                            }
+                        }
+                        Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                        Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+                    }
+                }
+                core.mail.flush().await;
+                items
+            };
+            tokio::time::timeout(timeout, run).await.unwrap_or_default()
+        });
+        async move { task.await.unwrap_or_default() }
+    }
+
+    /// Synchronous wrapper around [`Engine::background_push_wake`] for native background callbacks
+    /// (such as Android `FirebaseMessagingService.onMessageReceived`).
+    pub fn background_push_wake_blocking(
+        &self,
+        source: String,
+        account: Option<String>,
+        subscription_id: Option<String>,
+        timeout: std::time::Duration,
+    ) -> Vec<notifications::NotificationItem> {
+        let fut = self.background_push_wake(source, account, subscription_id, timeout);
+        self.runtime.block_on(fut)
+    }
+
+    /// Synchronous command execution + DB flush for background notification quick actions.
+    pub fn run_command_blocking(&self, command: &str, args: Value) -> Result<Value, EngineError> {
+        let core = self.core.clone();
+        let command = command.to_owned();
+        self.runtime.block_on(async move {
+            let res = core.handle(&command, args).await;
+            core.mail.flush().await;
+            res
+        })
+    }
     /// Whether remote images and fonts of conversation `id` (from a listing) load on their own,
     /// and the senders that keep them from it; see [`mail::Mail::remote_content`]. The
     /// `mail.remote` command answers the same.

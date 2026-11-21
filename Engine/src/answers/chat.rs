@@ -174,3 +174,20 @@ pub struct ChatSpaceRef {
     pub account: String,
     pub space: String,
 }
+
+/// One newly arrived unread incoming Google Chat message (MS-443).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(rename_all = "camelCase")]
+pub struct NewChat {
+    pub account: String,
+    /// `spaces/…`.
+    pub space: String,
+    pub space_name: String,
+    /// `spaces/…/messages/…`.
+    pub message_id: String,
+    pub sender: String,
+    pub text: String,
+    /// ISO 8601.
+    pub date: Option<String>,
+    pub is_direct: bool,
+}

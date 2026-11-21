@@ -100,6 +100,7 @@ fn prepare(server: &FakeServer, relay: &FakeRelay, accounts: &[(&str, &str)]) ->
             renewal: Duration::from_secs(3600),
             wake_check: Duration::from_secs(3600),
         },
+        ..PushConfig::default()
     };
     let records: Vec<Value> = accounts.iter().map(|(id, provider)| mail_account(id, provider)).collect();
     sign_in_all(&config, &records);
@@ -704,4 +705,162 @@ fn paused_sign_out_keeps_shared_watch_and_synced_removal_stops_once() {
     drop(engine_a);
     cleanup(&cfg_b);
     cleanup(&cfg_a);
+}
+
+#[test]
+fn fcm_device_registration_uploads_and_clears_on_relay() {
+    let recorded = Arc::new(Mutex::new(Vec::<(String, String, Option<String>, String)>::new()));
+    let rec = recorded.clone();
+    let relay_http = FakeServer::start(move |req| {
+        let auth = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone());
+        rec.lock().unwrap().push((req.method.clone(), req.path.clone(), auth, req.text()));
+        Reply::status(204, json!({}))
+    });
+    let mail_server = synced_push_server();
+    let mut cfg = server_config(&mail_server);
+    sign_in_all(&cfg, &[mail_account("me@gmail.com", "google")]);
+    cfg.push = PushConfig {
+        url: Some(relay_http.base.clone()),
+        token: Some("secret-tok".into()),
+        graph_client_state: None,
+        gmail_topic: None,
+        fcm_app_id: Some("1:123:android:abc".into()),
+        fcm_api_key: Some("AIzaTest".into()),
+        fcm_project_id: Some("mailstream-proj".into()),
+        fcm_sender_id: Some("123".into()),
+        timing: PushTiming::default(),
+    };
+    let engine = Engine::start(cfg.clone());
+    let seen_fcm = Arc::new(Mutex::new(None));
+    let seen_clone = seen_fcm.clone();
+    engine.on_fcm_config(move |fcm| {
+        *seen_clone.lock().unwrap() = Some(fcm);
+    });
+    assert_eq!(seen_fcm.lock().unwrap().as_ref().map(|c| c.project_id.as_str()), Some("mailstream-proj"));
+
+    engine.set_fcm_device("android-dev-1".into(), "fcm-token-xyz".into());
+    wait_until("PUT /devices/android-dev-1 received", || {
+        recorded.lock().unwrap().iter().any(|(m, p, _, _)| m == "PUT" && p == "/devices/android-dev-1")
+    });
+    {
+        let reqs = recorded.lock().unwrap();
+        let (_, _, auth, body) = reqs.iter().find(|(m, p, _, _)| m == "PUT" && p == "/devices/android-dev-1").unwrap();
+        assert_eq!(auth.as_deref(), Some("Bearer secret-tok"));
+        let parsed: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["fcmToken"], json!("fcm-token-xyz"));
+        assert_eq!(parsed["platform"], json!("android"));
+        assert_eq!(parsed["accounts"], json!(["me@gmail.com"]));
+    }
+
+    engine.clear_fcm_device("android-dev-1".into());
+    wait_until("DELETE /devices/android-dev-1 received", || {
+        recorded.lock().unwrap().iter().any(|(m, p, _, _)| m == "DELETE" && p == "/devices/android-dev-1")
+    });
+    drop(engine);
+    cleanup(&cfg);
+}
+
+#[test]
+fn cold_start_background_push_wake_detects_new_mail_and_deduplicates() {
+    use crate::testkit::call;
+
+    fn graph_msg(id: &str, conv: &str, name: &str, email: &str, subject: &str, received: &str) -> Value {
+        json!({
+            "id": id,
+            "conversationId": conv,
+            "subject": subject,
+            "receivedDateTime": received,
+            "isRead": false,
+            "isDraft": false,
+            "hasAttachments": false,
+            "flag": { "flagStatus": "notFlagged" },
+            "from": { "emailAddress": { "name": name, "address": email } },
+            "toRecipients": [{ "emailAddress": { "name": "Me", "address": "me@outlook.com" } }],
+            "bodyPreview": format!("Preview of {subject}"),
+            "internetMessageId": format!("<{id}@outlook>"),
+        })
+    }
+
+    let inbox = Arc::new(Mutex::new(vec![graph_msg(
+        "m-old",
+        "c-old",
+        "Bob",
+        "bob@x.com",
+        "Existing mail",
+        "2026-11-20T10:00:00Z",
+    )]));
+    let inbox_srv = inbox.clone();
+    let tokens = Arc::new(AtomicUsize::new(0));
+    let server = FakeServer::start(move |request| {
+        if request.path == "/token" {
+            let n = tokens.fetch_add(1, Ordering::SeqCst) + 1;
+            return Reply::json(json!({ "access_token": format!("t-{n}"), "expires_in": 3600 }));
+        }
+        let Some(resource) = request.path.strip_prefix("/v1.0/") else {
+            return Reply::status(404, json!({}));
+        };
+        match resource {
+            "me" => Reply::json(json!({ "displayName": "Me", "mail": "me@outlook.com" })),
+            "me/mailFolders" => Reply::json(json!({ "value": [
+                { "id": "F-inbox", "displayName": "Inbox", "childFolderCount": 0, "totalItemCount": 1, "unreadItemCount": 1 },
+            ]})),
+            "me/mailFolders/inbox" => Reply::json(json!({ "id": "F-inbox" })),
+            "me/mailFolders/F-inbox/messages" => Reply::json(json!({ "value": *inbox_srv.lock().unwrap() })),
+            other if other.starts_with("me/messages/") => Reply::json(json!({
+                "body": { "contentType": "text", "content": "See you at 7pm!" },
+                "ccRecipients": [], "attachments": [],
+            })),
+            _ => Reply::status(404, json!({})),
+        }
+    });
+
+    let cfg = server_config(&server);
+    sign_in_all(&cfg, &[mail_account("me@outlook.com", "microsoft")]);
+    // Process 1: normal launch populates mail.db with existing baseline mail, then exits (simulating Android kill).
+    {
+        let engine1 = Engine::start(cfg.clone());
+        wait_until("baseline cached", || {
+            call(&engine1, "mail.list", json!({ "cached": true }))
+                .ok()
+                .and_then(|v| v["conversations"].as_array().map(|a| a.len() == 1))
+                .unwrap_or(false)
+        });
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(engine1.flush_mail());
+        drop(engine1);
+    }
+
+    // New email arrives while app is dead.
+    inbox.lock().unwrap().insert(
+        0,
+        graph_msg("m-new", "c-new", "Alice", "alice@x.com", "Lunch?", "2026-11-20T11:00:00Z"),
+    );
+
+    // Process 2: cold-started by FCM wake; detects m-new against mail.db cache and ignores m-old.
+    let engine2 = Engine::start(cfg.clone());
+    let first_wake = engine2.background_push_wake_blocking(
+        "graph".into(),
+        Some("me@outlook.com".into()),
+        None,
+        Duration::from_secs(10),
+    );
+    assert_eq!(first_wake.len(), 1, "expected exactly 1 new notification, got {first_wake:?}");
+    assert_eq!(first_wake[0].title, "Alice");
+    assert!(first_wake[0].body.contains("Lunch?"));
+    assert_eq!(first_wake[0].channel, "mail");
+
+    // Second wake for the same state returns nothing (deduplicated via seen + notified.json).
+    let second_wake = engine2.background_push_wake_blocking(
+        "graph".into(),
+        Some("me@outlook.com".into()),
+        None,
+        Duration::from_secs(5),
+    );
+    assert!(second_wake.is_empty(), "duplicate wake must not re-notify: {second_wake:?}");
+    drop(engine2);
+    cleanup(&cfg);
 }

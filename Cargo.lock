@@ -6372,11 +6372,13 @@ dependencies = [
  "android_logger",
  "gpui-kit",
  "gpui-mobile",
+ "jni 0.22.4",
  "log",
  "mailstream",
  "mailstream-engine",
  "mailstream-gpui",
  "ndk",
+ "serde_json",
 ]
 
 [[package]]

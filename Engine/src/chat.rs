@@ -104,10 +104,13 @@ struct State {
     loading_more: bool,
     fetches: HashMap<ChatSpaceKey, Fetch>,
     earlier: HashSet<ChatSpaceKey>,
+    /// Accounts whose startup baseline has been captured for new-chat notifications (MS-443).
+    seeded_accounts: HashSet<String>,
+    /// Latest seen message id per space for new-chat notification dedup.
+    seen_latest: HashMap<ChatSpaceKey, String>,
     /// The latest failure, until a poll succeeds.
     problem: Option<String>,
 }
-
 impl State {
     fn has_account(&self, name: &str) -> bool {
         self.accounts.iter().any(|account| account.name == name)
@@ -146,8 +149,11 @@ pub struct Chat {
     open_changed: tokio::sync::Notify,
     /// Takes the pictures Google Chat publishes for the people the rows and threads show.
     avatars: Arc<Avatars>,
+    /// Live stream of newly arrived unread incoming Google Chat messages (MS-443).
+    new_chat: tokio::sync::broadcast::Sender<answers::NewChat>,
+    /// Signaled once cached spaces have been restored from `mail.db`.
+    cache_loaded: tokio::sync::watch::Sender<bool>,
 }
-
 fn is_chat(record: &AccountRecord) -> bool {
     record.has(Service::Chat)
 }
@@ -181,6 +187,8 @@ impl Chat {
         events: Arc<Events>,
         avatars: Arc<Avatars>,
     ) -> Self {
+        let (new_chat, _) = tokio::sync::broadcast::channel(128);
+        let (cache_loaded, _) = tokio::sync::watch::channel(false);
         Self {
             remote: ChatRemote::new(root),
             cache: mail.cache(),
@@ -193,6 +201,71 @@ impl Chat {
             interval_changed: tokio::sync::Notify::new(),
             open_changed: tokio::sync::Notify::new(),
             avatars,
+            new_chat,
+            cache_loaded,
+        }
+    }
+
+    /// Subscribes to newly arrived unread incoming Google Chat messages (MS-443).
+    pub fn subscribe_new_chat(&self) -> tokio::sync::broadcast::Receiver<answers::NewChat> {
+        self.new_chat.subscribe()
+    }
+
+    /// Waits until cached Chat spaces from `mail.db` have been loaded into memory.
+    pub async fn wait_cache_loaded(&self) {
+        let mut rx = self.cache_loaded.subscribe();
+        let _ = rx.wait_for(|loaded| *loaded).await;
+    }
+
+    /// Seeds new-chat notification baseline from cached listings already restored from `mail.db`,
+    /// so a cold-started background wake pass detects messages newer than the pre-kill cache.
+    pub fn seed_from_cache(&self) {
+        let mut state = self.state();
+        let accounts: Vec<String> = state.listings.keys().cloned().collect();
+        for account in accounts {
+            if state.seeded_accounts.contains(&account) {
+                continue;
+            }
+            if let Some(listing) = state.listings.get(&account) {
+                let pairs: Vec<(ChatSpaceKey, String)> = listing
+                    .list
+                    .spaces
+                    .iter()
+                    .filter_map(|space| {
+                        space
+                            .latest
+                            .as_ref()
+                            .map(|latest| (ChatSpaceKey::new(&account, &space.name), latest.name.clone()))
+                    })
+                    .collect();
+                for (key, id) in pairs {
+                    state.seen_latest.insert(key, id);
+                }
+                state.seeded_accounts.insert(account);
+            }
+        }
+    }
+
+    /// Awaits one space-list poll for `account` (or all Chat accounts when `None`).
+    pub async fn refresh_now(self: &Arc<Self>, account: Option<&str>) {
+        self.sync_accounts().await;
+        let jobs: Vec<(String, usize, Arc<Api>)> = {
+            let state = self.state();
+            state
+                .accounts
+                .iter()
+                .filter(|acct| account.is_none_or(|filter| filter.eq_ignore_ascii_case(&acct.name)))
+                .filter_map(|acct| {
+                    let api = self.mail.api(&acct.name)?;
+                    let limit = state.listings.get(&acct.name).map_or(SPACES_PAGE, |listing| listing.limit);
+                    Some((acct.name.clone(), limit, api))
+                })
+                .collect()
+        };
+        for (name, limit, api) in jobs {
+            if let Ok(list) = self.remote.spaces(&api, &name, limit).await {
+                self.apply(list, &name, limit);
+            }
         }
     }
 
@@ -213,6 +286,7 @@ impl Chat {
     /// change.
     pub async fn start(self: Arc<Self>) {
         self.restore_from_cache().await;
+        let _ = self.cache_loaded.send(true);
         self.sync_accounts().await;
         self.poll(false);
         let chat = self.clone();
@@ -438,6 +512,7 @@ impl Chat {
     /// nothing.
     fn apply(self: &Arc<Self>, fresh: ChatSpaceList, account: &str, limit: usize) {
         let mut fetch = None;
+        let mut arrivals: Vec<answers::NewChat> = Vec::new();
         {
             let mut state = self.state();
             // A poll that outlived its account's sign-out.
@@ -448,12 +523,13 @@ impl Chat {
             if state.listings.get(account).is_some_and(|listing| listing.limit != limit) {
                 return;
             }
-            let previous: HashMap<&str, Option<Date>> = state
+            let previous: HashMap<String, Option<Date>> = state
                 .listings
                 .get(account)
-                .map(|listing| listing.list.spaces.iter().map(|space| (space.name.as_str(), space.activity())).collect())
+                .map(|listing| listing.list.spaces.iter().map(|space| (space.name.clone(), space.activity())).collect())
                 .unwrap_or_default();
             let mut list = fresh;
+            let seeded = state.seeded_accounts.contains(account);
             for space in &mut list.spaces {
                 let key = ChatSpaceKey::new(account, &space.name);
                 if let Some(mark) = state.read_marks.get(&key)
@@ -462,14 +538,41 @@ impl Chat {
                     space.unread = 0;
                 }
                 if state.open.as_ref() == Some(&key) && previous.get(space.name.as_str()).copied().flatten() != space.activity() {
-                    fetch = Some(key);
+                    fetch = Some(key.clone());
                 }
+                if let Some(latest) = &space.latest {
+                    let prev_id = state.seen_latest.insert(key.clone(), latest.name.clone());
+                    if seeded
+                        && space.unread > 0
+                        && !latest.mine
+                        && prev_id.as_deref() != Some(latest.name.as_str())
+                    {
+                        arrivals.push(answers::NewChat {
+                            account: account.to_string(),
+                            space: space.name.clone(),
+                            space_name: space.title.clone(),
+                            message_id: latest.name.clone(),
+                            sender: latest.sender.label(),
+                            text: crate::chat_markup::plain(&latest.text),
+                            date: Some(iso8601(latest.created)),
+                            is_direct: matches!(space.kind, ChatSpaceKind::Dm | ChatSpaceKind::Bot),
+                        });
+                    }
+                }
+            }
+            if !seeded {
+                state.seeded_accounts.insert(account.to_string());
             }
             let unchanged = state.listings.get(account).is_some_and(|listing| listing.list == list);
             if !unchanged {
                 self.cache.save_chat_spaces(&list, account);
                 state.listings.insert(account.to_string(), Listing { list, limit });
                 self.list_changed(&mut state);
+            }
+        }
+        if !arrivals.is_empty() && self.new_chat.receiver_count() > 0 {
+            for item in arrivals {
+                let _ = self.new_chat.send(item);
             }
         }
         if let Some(key) = fetch {

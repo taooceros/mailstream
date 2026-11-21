@@ -40,13 +40,18 @@ pub fn built_in_clients() -> BuiltInClients {
 }
 
 /// The push relay the host names (`MSPushURL`, `MSPushToken`, `MSGraphClientState`,
-/// `MSGmailTopic`); without the first two there is no push.
+/// `MSGmailTopic`, and optional Android FCM client fields `MSFcmAppId`, `MSFcmApiKey`,
+/// `MSFcmProjectId`, `MSFcmSenderId`); without the first two there is no push.
 pub fn push_config() -> PushConfig {
     PushConfig {
         url: value("MSPushURL"),
         token: value("MSPushToken"),
         graph_client_state: value("MSGraphClientState"),
         gmail_topic: value("MSGmailTopic"),
+        fcm_app_id: value("MSFcmAppId"),
+        fcm_api_key: value("MSFcmApiKey"),
+        fcm_project_id: value("MSFcmProjectId"),
+        fcm_sender_id: value("MSFcmSenderId"),
         timing: Default::default(),
     }
 }

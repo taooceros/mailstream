@@ -42,6 +42,9 @@ pub enum Setting {
     GpuiCalendarWidth,
     AutoReadEnabled,
     AutoReadDays,
+    NotificationsEnabled,
+    NotificationsMail,
+    NotificationsChat,
 }
 
 #[derive(Clone, Copy)]
@@ -61,7 +64,7 @@ enum Kind {
 pub type Values = BTreeMap<Setting, Value>;
 
 impl Setting {
-    pub const ALL: [Setting; 22] = [
+    pub const ALL: [Setting; 25] = [
         Self::AiTaggingEnabled,
         Self::AiTaggingDevicesMode,
         Self::AiTaggingDevices,
@@ -84,6 +87,9 @@ impl Setting {
         Self::GpuiCalendarWidth,
         Self::AutoReadEnabled,
         Self::AutoReadDays,
+        Self::NotificationsEnabled,
+        Self::NotificationsMail,
+        Self::NotificationsChat,
     ];
 
     pub fn key(self) -> &'static str {
@@ -110,6 +116,9 @@ impl Setting {
             Self::GpuiCalendarWidth => "gpui.calendarWidth",
             Self::AutoReadEnabled => "autoRead.enabled",
             Self::AutoReadDays => "autoRead.days",
+            Self::NotificationsEnabled => "notifications.enabled",
+            Self::NotificationsMail => "notifications.mail",
+            Self::NotificationsChat => "notifications.chat",
         }
     }
 
@@ -207,6 +216,21 @@ impl Setting {
                 Kind::Int(1, 90),
                 json!(3),
                 "Days an unread notification or newsletter waits before auto-read marks it read. Synced across paired devices when Device sync is on.",
+            ),
+            Self::NotificationsEnabled => (
+                Kind::Bool,
+                json!(true),
+                "Show OS notifications on this device for newly arrived mail and Google Chat messages.",
+            ),
+            Self::NotificationsMail => (
+                Kind::Choice(&["important", "all", "off"]),
+                json!("important"),
+                "Which incoming inbox mail raises OS notifications: important (People, Waiting on you and untagged mail; skips Newsletters and Notifications), all, or off.",
+            ),
+            Self::NotificationsChat => (
+                Kind::Bool,
+                json!(true),
+                "Show OS notifications on this device for newly arrived Google Chat messages.",
             ),
         }
     }
@@ -823,7 +847,7 @@ mod tests {
         let dir = temp();
         let settings = Settings::new(&dir);
         let list = run(&settings, "config.list", json!({})).unwrap();
-        assert_eq!(list["settings"].as_array().unwrap().len(), 22);
+        assert_eq!(list["settings"].as_array().unwrap().len(), 25);
         assert_eq!(
             list["settings"][1],
             json!({
