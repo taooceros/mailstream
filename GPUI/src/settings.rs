@@ -2010,7 +2010,7 @@ impl Settings {
         }
         let mode = match self.entry(TAGGING_DEVICES_MODE).map(|entry| &entry.value) {
             Some(SettingValue::Text { text }) => text.as_str(),
-            _ => "all",
+            _ => "selected",
         };
         if mode != "selected" {
             return true;
@@ -2039,7 +2039,7 @@ impl Settings {
         let compact = f32::from(window.viewport_size().width) < layout::COMPACT_WIDTH;
         let mode = match &entry.value {
             SettingValue::Text { text } => text.as_str(),
-            _ => "all",
+            _ => "selected",
         };
         let selected: Vec<String> = match self.entry(TAGGING_DEVICES).map(|entry| &entry.value) {
             Some(SettingValue::Strings { values }) => values.clone(),

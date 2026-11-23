@@ -48,8 +48,8 @@ nonisolated enum Setting: String, CaseIterable, Sendable {
             (.bool, true,
              "Sort the inbox into People, Notifications, Newsletters and Invitations with AI, and flag mail waiting on your reply or action.")
         case .aiTaggingDevicesMode:
-            (.choice(["all", "selected"]), "all",
-             "Which paired devices run AI tagging: all lets every device tag; selected runs AI tagging only on the devices in aiTagging.devices (other devices still show and sync tags from the server). Synced across paired devices when Device sync is on.")
+            (.choice(["all", "selected"]), "selected",
+             "Which paired devices run AI tagging: all lets every device tag; selected runs AI tagging only on the devices in aiTagging.devices (other devices still show and sync tags from the server). The default is selected with no device, so no device runs AI tagging until you pick one or choose all. Synced across paired devices when Device sync is on.")
         case .aiTaggingDevices:
             (.strings, [],
              "Paired device IDs allowed to run AI tagging when aiTagging.devicesMode is selected. Empty means no device runs AI tagging automatically while tags still display and sync. Synced across paired devices when Device sync is on.")

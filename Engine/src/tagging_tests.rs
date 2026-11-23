@@ -80,6 +80,7 @@ fn tags_the_inbox_with_omp_and_shares_corrections() {
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     for (key, value) in [
         ("aiTagging.ompPath", omp.display().to_string()),
+        ("aiTagging.devicesMode", "all".into()),
         ("aiTagging.batchSize", "20".into()),
         ("aiTagging.passLimit", "45".into()),
     ] {

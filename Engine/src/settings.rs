@@ -132,8 +132,8 @@ impl Setting {
             ),
             Self::AiTaggingDevicesMode => (
                 Kind::Choice(&["all", "selected"]),
-                json!("all"),
-                "Which paired devices run AI tagging: all lets every device tag; selected runs AI tagging only on the devices in aiTagging.devices (other devices still show and sync tags from the server). Synced across paired devices when Device sync is on.",
+                json!("selected"),
+                "Which paired devices run AI tagging: all lets every device tag; selected runs AI tagging only on the devices in aiTagging.devices (other devices still show and sync tags from the server). The default is selected with no device, so no device runs AI tagging until you pick one or choose all. Synced across paired devices when Device sync is on.",
             ),
             Self::AiTaggingDevices => (
                 Kind::Strings,
@@ -851,7 +851,7 @@ mod tests {
         assert_eq!(
             list["settings"][1],
             json!({
-                "key": "aiTagging.devicesMode", "value": "all", "default": "all", "changed": false,
+                "key": "aiTagging.devicesMode", "value": "selected", "default": "selected", "changed": false,
                 "summary": Setting::AiTaggingDevicesMode.descriptor().2, "type": "string", "choices": ["all", "selected"],
             })
         );

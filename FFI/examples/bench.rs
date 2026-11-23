@@ -407,6 +407,7 @@ fn seed_home(home: &Path) {
     // once without starting a process, and neither engine looks for the person's omp.
     let settings = json!({
         "aiTagging.enabled": true,
+        "aiTagging.devicesMode": "all",
         "aiTagging.ompPath": home.join("no-omp").display().to_string(),
         "remoteContent.trustedSenders": senders,
         "sync.pollSeconds": 120,

@@ -211,6 +211,7 @@ fn syncs_tags_with_gmail_labels_both_ways() {
     let omp = fake_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
     wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
         listed["conversations"].as_array().unwrap().len() == 5
     }));
@@ -322,6 +323,7 @@ fn two_devices_share_tags_through_gmail() {
         std::fs::create_dir_all(&dir).unwrap();
         call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
         call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp(&dir).display().to_string() })).unwrap();
+        call(&engine, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
         wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
             listed["conversations"].as_array().unwrap().len() == 5
         }));
@@ -438,6 +440,7 @@ fn syncs_tags_with_outlook_categories() {
     let omp = fake_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
     let listed = || call(&engine, "mail.list", json!({ "limit": 10, "cached": true })).map(|listed| listed["conversations"].clone());
     wait_until("the inbox", || listed().is_ok_and(|conversations| conversations.as_array().unwrap().len() == 2));
 
@@ -507,6 +510,7 @@ fn stands_in_with_gmail_categories_until_the_model_answers() {
     let offline = offline_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": offline.display().to_string() })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
     wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
         listed["conversations"].as_array().unwrap().len() == 6
     }));
@@ -577,6 +581,7 @@ fn stands_in_with_outlook_focused_inbox() {
     let offline = offline_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": offline.display().to_string() })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
     let listed = || call(&engine, "mail.list", json!({ "limit": 10, "cached": true }));
     wait_until("the inbox", || listed().is_ok_and(|listed| listed["conversations"].as_array().unwrap().len() == 2));
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "true" })).unwrap();
@@ -610,6 +615,7 @@ fn keeps_manual_category_and_topics_when_a_reply_arrives() {
     let omp = fake_omp(&dir);
     call(&engine, "config.set", json!({ "key": "aiTagging.enabled", "value": "false" })).unwrap();
     call(&engine, "config.set", json!({ "key": "aiTagging.ompPath", "value": omp.display().to_string() })).unwrap();
+    call(&engine, "config.set", json!({ "key": "aiTagging.devicesMode", "value": "all" })).unwrap();
     wait_until("the inbox", || call(&engine, "mail.list", json!({ "limit": 100, "cached": true })).is_ok_and(|listed| {
         listed["conversations"].as_array().unwrap().len() == 5
     }));
