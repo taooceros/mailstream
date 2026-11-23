@@ -474,6 +474,49 @@ fn mail() -> Vec<(Mail, Option<Value>)> {
     );
     all.push((outlook_quoted, tag("people", &["Engineering"], false)));
 
+    let mut outlook_mac_first = Mail::sent(OUTLOOK, "outlook-mac-1", "Re: Release notes draft");
+    outlook_mac_first.thread = "outlook-mac-thread";
+    outlook_mac_first.minutes_ago = 45.;
+    outlook_mac_first.to = vec![ALEX];
+    outlook_mac_first.text = Some("I updated the filter toggle so it stays off by default. Let me know how the draft reads.".into());
+    outlook_mac_first.html = Some("<p>I updated the filter toggle so it stays off by default. Let me know how the draft reads.</p>".into());
+    all.push((outlook_mac_first, None));
+
+    let mut outlook_mac_reply = Mail::new(OUTLOOK, "outlook-mac-2", ALEX, "Re: Release notes draft");
+    outlook_mac_reply.thread = "outlook-mac-thread";
+    outlook_mac_reply.reply_to = Some("outlook-mac-1");
+    outlook_mac_reply.minutes_ago = 12.;
+    outlook_mac_reply.text = Some(
+        "Looks great — I'll review the nightly build this afternoon.\n\nCheers,\nAlex\n\n\
+         From: me@example.com\n<me@example.com>\n\
+         Date: Monday, November 23, 2026 at 3:12 AM\n\
+         To: Alex Rivera <alex@northwind.example>\n\
+         Subject: Re: Release notes draft\n\n\
+         I updated the filter toggle so it stays off by default. Let me know how the draft reads."
+            .into(),
+    );
+    outlook_mac_reply.html = Some(
+        concat!(
+            r#"<div dir="ltr" style="font-family:Aptos,Arial,Helvetica,sans-serif;font-size:12pt;color:rgb(0,0,0)">Looks great — I'll review the nightly build this afternoon.</div>"#,
+            r#"<div dir="ltr" style="font-family:Aptos,Arial,Helvetica,sans-serif;font-size:12pt;color:rgb(0,0,0)"><br></div>"#,
+            r#"<div dir="ltr" style="font-family:Aptos,Arial,Helvetica,sans-serif;font-size:12pt;color:rgb(0,0,0)">Cheers,</div>"#,
+            r#"<div dir="ltr" style="font-family:Aptos,Arial,Helvetica,sans-serif;font-size:12pt;color:rgb(0,0,0)">Alex</div>"#,
+            r#"<div dir="ltr" style="font-family:Aptos,Arial,Helvetica,sans-serif;font-size:12pt;color:rgb(0,0,0)"><br></div>"#,
+            r#"<div id="mail-editor-reference-message-container">"#,
+            r#"<div style="padding: 3pt 0in 0in; border-width: 1pt medium medium; border-style: solid none none; border-color: rgb(181, 196, 223) currentcolor currentcolor;">"#,
+            r#"<div style="text-align: left; font-family: Aptos; font-size: 12pt; color: black;">"#,
+            r#"<b>From: </b>me@example.com &lt;me@example.com&gt;<br>"#,
+            r#"<b>Date: </b>Monday, November 23, 2026 at 3:12 AM<br>"#,
+            r#"<b>To: </b>Alex Rivera &lt;alex@northwind.example&gt;<br>"#,
+            r#"<b>Subject: </b>Re: Release notes draft<br><br></div></div>"#,
+            r#"<div id="mail-editor-reference-message-body">"#,
+            r#"<p class="ms-outlook-mobile-reference-message skipProofing">I updated the filter toggle so it stays off by default. Let me know how the draft reads.</p>"#,
+            r#"</div></div>"#,
+        )
+        .into(),
+    );
+    all.push((outlook_mac_reply, tag("people", &["Engineering"], false)));
+
     let mut photos = Mail::new(GMAIL, "hike", ALEX, "Photos from the hike");
     photos.minutes_ago = 5. * 24. * 60.;
     photos.text = Some("Here are the best ones from Saturday. The view from the ridge!".into());

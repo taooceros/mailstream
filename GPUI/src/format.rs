@@ -113,12 +113,17 @@ fn folds_at(lines: &[String], index: usize) -> bool {
     }
     let lower = line.to_ascii_lowercase();
     if ["from:", "发件人:", "发件人："].iter().any(|p| lower.starts_with(p)) {
-        let next = lines[index + 1..].iter().map(|s| s.trim_start()).find(|s| !s.is_empty());
-        if let Some(next) = next {
-            let next_lower = next.to_ascii_lowercase();
-            if ["sent:", "date:", "发送时间:", "发送时间：", "日期:", "日期："].iter().any(|p| next_lower.starts_with(p)) {
-                return true;
-            }
+        let found = lines[index + 1..]
+            .iter()
+            .map(|s| s.trim_start())
+            .filter(|s| !s.is_empty())
+            .take(3)
+            .any(|next| {
+                let next_lower = next.to_ascii_lowercase();
+                ["sent:", "date:", "发送时间:", "发送时间：", "日期:", "日期："].iter().any(|p| next_lower.starts_with(p))
+            });
+        if found {
+            return true;
         }
     }
     false
@@ -214,6 +219,10 @@ mod tests {
         assert_eq!(
             fold("Sounds good.\n\nFrom: Alex <alex@example.org>\nSent: Mon, Nov 16, 2026\nSubject: Sync\nOld text"),
             ("Sounds good.".into(), Some("From: Alex <alex@example.org>\nSent: Mon, Nov 16, 2026\nSubject: Sync\nOld text".into()))
+        );
+        assert_eq!(
+            fold("Cheers\nSam\n\nFrom: alex@example.org\n<alex@example.org>\nDate: Monday, Nov 23, 2026 at 3:12 AM\nSubject: Re: Sync\nOld text"),
+            ("Cheers\nSam".into(), Some("From: alex@example.org\n<alex@example.org>\nDate: Monday, Nov 23, 2026 at 3:12 AM\nSubject: Re: Sync\nOld text".into()))
         );
         // A lone "From:" line in normal prose without a following Sent:/Date: stays unfolded.
         assert_eq!(fold("Note:\nFrom: the team\nSee details below.").1, None);

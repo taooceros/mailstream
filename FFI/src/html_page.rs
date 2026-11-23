@@ -1373,9 +1373,15 @@ fn is_outlook_header_div(doc: &BaseDocument, id: NodeId) -> bool {
     mail_html::is_outlook_header_text(&block_text(doc, id, 3000))
 }
 
+fn is_quote_container_id(doc: &BaseDocument, id: NodeId) -> bool {
+    doc.get_node(id)
+        .and_then(|node| node.attr(local_name!("id")))
+        .is_some_and(|raw| mail_html::QUOTE_CONTAINER_IDS.contains(&mail_html::strip_gmail_id_prefix(raw)))
+}
+
 fn is_tail_marker(doc: &BaseDocument, id: NodeId) -> bool {
     let Some(node) = doc.get_node(id) else { return false };
-    if node.attr(local_name!("id")).is_some_and(|id| mail_html::TAIL_QUOTE_IDS.contains(&id)) {
+    if node.attr(local_name!("id")).is_some_and(|raw| mail_html::TAIL_QUOTE_IDS.contains(&mail_html::strip_gmail_id_prefix(raw))) {
         return true;
     }
     is_outlook_header_div(doc, id)
@@ -1448,7 +1454,7 @@ fn cut_quotes(doc: &mut BaseDocument, part: HtmlPart) -> bool {
                 }
                 return;
             }
-            if starts.contains(&child_id) {
+            if starts.contains(&child_id) || (child.is_element() && is_quote_container_id(doc, child_id)) {
                 quotes.push(child_id);
                 if child.is_element() {
                     prev_element = Some(child_id);
@@ -2436,12 +2442,57 @@ mod tests {
         assert!(main.quoted && main.text() == "On it.", "{}", main.text());
         assert!(part(append_on_send, HtmlPart::Quoted).text().contains("Trailing history"));
 
+        // Outlook Mac / Mobile / new Outlook (`#mail-editor-reference-message-container`), both
+        // bare and with Gmail's `m_<digits>` id prefix, and when the container id is absent so
+        // only the CSS longhand top-border header (`border-width: 1pt medium medium; border-style:
+        // solid none none`) marks the boundary.
+        let outlook_mac_mobile = concat!(
+            r#"<div dir="ltr">Cheers</div><div dir="ltr">Sam</div>"#,
+            r#"<div id="mail-editor-reference-message-container">"#,
+            r#"<div style="padding: 3pt 0in 0in; border-width: 1pt medium medium; border-style: solid none none; border-color: rgb(181, 196, 223) currentcolor currentcolor;">"#,
+            r#"<div style="text-align: left; font-size: 12pt; color: black;">"#,
+            r#"<b>From: </b>alex@example.org &lt;alex@example.org&gt;<br>"#,
+            r#"<b>Date: </b>Monday, November 23, 2026 at 3:12 AM<br>"#,
+            r#"<b>To: </b>Sam &lt;sam@example.org&gt;<br>"#,
+            r#"<b>Subject: </b>Re: Release notes<br><br></div></div>"#,
+            r#"<div id="mail-editor-reference-message-body"><p>Earlier message body.</p></div>"#,
+            r#"</div>"#,
+        );
+        let main = part(outlook_mac_mobile, HtmlPart::Main);
+        assert!(main.quoted && main.text() == "CheersSam", "{}", main.text());
+        let qtext = part(outlook_mac_mobile, HtmlPart::Quoted).text();
+        assert!(qtext.contains("From:") && qtext.contains("Earlier message body."), "{qtext}");
+
+        let outlook_mac_gmail_prefixed = outlook_mac_mobile
+            .replace(r#"id="mail-editor-reference-message-container""#, r#"id="m_6900309819208902883mail-editor-reference-message-container""#);
+        let main = part(&outlook_mac_gmail_prefixed, HtmlPart::Main);
+        assert!(main.quoted && main.text() == "CheersSam", "{}", main.text());
+        assert!(part(&outlook_mac_gmail_prefixed, HtmlPart::Quoted).text().contains("Earlier message body."));
+
+        // Without the container id, the CSS longhand top-border header still cuts the tail.
+        let outlook_mac_no_id = outlook_mac_mobile.replace(r#" id="mail-editor-reference-message-container""#, "");
+        let main = part(&outlook_mac_no_id, HtmlPart::Main);
+        assert!(main.quoted && main.text() == "CheersSam", "{}", main.text());
+        assert!(part(&outlook_mac_no_id, HtmlPart::Quoted).text().contains("Earlier message body."));
+
+        // Gmail-prefixed OWA `#divRplyFwdMsg` with preceding `<hr>` and trailing siblings.
+        let owa_gmail_prefixed = concat!(
+            r#"<div><p>Sounds great.</p></div>"#,
+            r#"<hr style="display:inline-block;width:98%">"#,
+            r#"<div id="m_-7080766174707785600divRplyFwdMsg" dir="ltr"><b>From:</b> Dan<br><b>Sent:</b> Tue</div>"#,
+            r#"<div><p>Prefixed OWA history</p></div>"#,
+        );
+        let main = part(owa_gmail_prefixed, HtmlPart::Main);
+        assert!(main.quoted && main.text() == "Sounds great.", "{}", main.text());
+        assert!(part(owa_gmail_prefixed, HtmlPart::Quoted).text().contains("Prefixed OWA history"));
+
         // Spark (div[name="messageReplySection"]), Spike/Hop (.hop_extra), ProtonMail and Outlook for Mac.
         for quote in [
             r#"<div name="messageReplySection"><div>On Mon, Alex wrote:</div><blockquote>Old Spark</blockquote></div>"#,
             r#"<div class="hop_extra">On Mon, Alex wrote:<blockquote class="hop_quote">Old Spike</blockquote></div>"#,
             r#"<div class="protonmail_quote">Old Proton</div>"#,
             r#"<div id="OLK_SRC_BODY_SECTION">Old Outlook Mac</div>"#,
+            r#"<div id="m_-123456OLK_SRC_BODY_SECTION">Old Outlook Mac via Gmail</div>"#,
         ] {
             let main = part(&format!("<div>Reply</div>{quote}"), HtmlPart::Main);
             assert!(main.quoted && main.text() == "Reply", "{quote}: {}", main.text());

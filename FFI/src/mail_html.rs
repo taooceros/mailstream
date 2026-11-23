@@ -20,26 +20,70 @@ use colours::Rgba;
 /// Apple Mail's cited blockquote and the quotes the engine makes of plain text's `>` lines
 /// (`text::plain_to_html`).
 pub const QUOTES: &str = ".gmail_quote, .gmail_quote_container, .moz-cite-prefix, .yahoo_quoted, #divRplyFwdMsg, \
-    #appendonsend, #OLK_SRC_BODY_SECTION, div[name=\"messageReplySection\"], .hop_extra, blockquote.hop_quote, \
-    .protonmail_quote, blockquote[type=\"cite\" i], blockquote.ms-quote";
+    #appendonsend, #OLK_SRC_BODY_SECTION, #mail-editor-reference-message-container, div[name=\"messageReplySection\"], \
+    .hop_extra, blockquote.hop_quote, .protonmail_quote, blockquote[type=\"cite\" i], blockquote.ms-quote";
 
 /// Element ids whose element and all following siblings in the same parent are quoted history
-/// (Outlook Web / OWA reply and forward boundaries).
+/// (Outlook Web / OWA reply and forward boundaries), checked after stripping Gmail's `m_<digits>`
+/// id prefix.
 pub(crate) const TAIL_QUOTE_IDS: &[&str] = &["divRplyFwdMsg", "appendonsend"];
 
-/// Whether an inline `style` attribute sets a visible top border (as desktop Outlook's reply
-/// header divider does, e.g. `border:none;border-top:solid #E1E1E1 1.0pt`).
+/// Element ids whose element itself is a quoted-history container (Outlook Mac / Mobile / new
+/// Outlook), checked after stripping Gmail's `m_<digits>` id prefix.
+pub(crate) const QUOTE_CONTAINER_IDS: &[&str] = &["mail-editor-reference-message-container", "OLK_SRC_BODY_SECTION"];
+
+/// Strips Gmail's `m_<signed-digits>` id prefix when present (e.g.
+/// `m_-7080766174707785600divRplyFwdMsg` -> `divRplyFwdMsg`,
+/// `m_6900309819208902883mail-editor-reference-message-container` ->
+/// `mail-editor-reference-message-container`).
+pub(crate) fn strip_gmail_id_prefix(id: &str) -> &str {
+    let Some(rest) = id.strip_prefix("m_") else { return id };
+    let digits = rest.strip_prefix('-').unwrap_or(rest);
+    let count = digits.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if count == 0 { id } else { &digits[count..] }
+}
+
+fn is_zero_width(token: &str) -> bool {
+    matches!(token, "0" | "0px" | "0pt" | "0em" | "0rem" | "0in" | "0cm" | "0mm")
+}
+
+fn is_hidden_border_style(token: &str) -> bool {
+    token.is_empty() || matches!(token, "none" | "hidden")
+}
+
+/// Whether an inline `style` attribute sets a visible top border (as desktop Outlook's
+/// `border:none;border-top:solid #E1E1E1 1.0pt` or Outlook Mac/Mobile's
+/// `border-width:1pt medium medium;border-style:solid none none` reply header divider does).
 pub(crate) fn has_visible_border_top(style: &str) -> bool {
+    let mut visible_top = false;
+    let mut top_width_zero = false;
     for decl in style.split(';') {
         let Some((name, value)) = decl.split_once(':') else { continue };
-        if name.trim().eq_ignore_ascii_case("border-top") {
-            let value = value.trim().to_ascii_lowercase();
-            if !value.is_empty() && !matches!(value.as_str(), "none" | "0" | "0px" | "0pt") {
-                return true;
+        let name = name.trim();
+        let value = value.trim().to_ascii_lowercase();
+        if name.eq_ignore_ascii_case("border") {
+            if is_hidden_border_style(&value) || is_zero_width(&value) {
+                visible_top = false;
+                top_width_zero = false;
             }
+        } else if name.eq_ignore_ascii_case("border-top") {
+            if value.is_empty()
+                || value.split_whitespace().any(|tok| is_hidden_border_style(tok) || is_zero_width(tok))
+            {
+                visible_top = false;
+            } else {
+                visible_top = true;
+                top_width_zero = false;
+            }
+        } else if name.eq_ignore_ascii_case("border-top-style") || name.eq_ignore_ascii_case("border-style") {
+            let top = value.split_whitespace().next().unwrap_or("");
+            visible_top = !is_hidden_border_style(top);
+        } else if name.eq_ignore_ascii_case("border-top-width") || name.eq_ignore_ascii_case("border-width") {
+            let top = value.split_whitespace().next().unwrap_or("");
+            top_width_zero = is_zero_width(top);
         }
     }
-    false
+    visible_top && !top_width_zero
 }
 
 /// Whether `text` (with `<br>` and block tags turned into line breaks) is a desktop-Outlook-style
@@ -220,15 +264,30 @@ pub fn mail_web_script(view: MailWebView) -> String {
   const style = doc.createElement('style');
   style.textContent = {css};
   (doc.head || root).appendChild(style);
+  const normalizeId = (id) => (id || '').replace(/^m_-?\\d+/, '');
+  const isZeroWidth = (t) => /^(0|0px|0pt|0em|0rem|0in|0cm|0mm)$/.test(t);
+  const isHiddenStyle = (t) => !t || t === 'none' || t === 'hidden';
   const hasBorderTop = (el) => {{
     const st = el.getAttribute('style') || '';
+    let visibleTop = false, topWidthZero = false;
     for (const d of st.split(';')) {{
       const i = d.indexOf(':');
-      if (i < 0 || d.slice(0, i).trim().toLowerCase() !== 'border-top') continue;
+      if (i < 0) continue;
+      const name = d.slice(0, i).trim().toLowerCase();
       const v = d.slice(i + 1).trim().toLowerCase();
-      if (v && v !== 'none' && v !== '0' && v !== '0px' && v !== '0pt') return true;
+      if (name === 'border') {{
+        if (isHiddenStyle(v) || isZeroWidth(v)) {{ visibleTop = false; topWidthZero = false; }}
+      }} else if (name === 'border-top') {{
+        const toks = v.split(/\\s+/).filter(Boolean);
+        if (!toks.length || toks.some((t) => isHiddenStyle(t) || isZeroWidth(t))) visibleTop = false;
+        else {{ visibleTop = true; topWidthZero = false; }}
+      }} else if (name === 'border-top-style' || name === 'border-style') {{
+        visibleTop = !isHiddenStyle(v.split(/\\s+/)[0] || '');
+      }} else if (name === 'border-top-width' || name === 'border-width') {{
+        topWidthZero = isZeroWidth(v.split(/\\s+/)[0] || '');
+      }}
     }}
-    return false;
+    return visibleTop && !topWidthZero;
   }};
   const blockText = (el) => {{
     let out = '';
@@ -253,7 +312,14 @@ pub fn mail_web_script(view: MailWebView) -> String {
     const lines = blockText(el).split('\\n').map((s) => s.trim()).filter(Boolean);
     return lines.length >= 2 && fromRe.test(lines[0]) && lines.slice(1).some((l) => otherRe.test(l));
   }};
-  const isTailMarker = (el) => el.id === 'divRplyFwdMsg' || el.id === 'appendonsend' || isOutlookHeader(el);
+  const isTailMarker = (el) => {{
+    const nid = normalizeId(el.id);
+    return nid === 'divRplyFwdMsg' || nid === 'appendonsend' || isOutlookHeader(el);
+  }};
+  const isQuoteContainerId = (el) => {{
+    const nid = normalizeId(el.id);
+    return nid === 'mail-editor-reference-message-container' || nid === 'OLK_SRC_BODY_SECTION';
+  }};
   const isTailCutoff = (el) => {{
     let cur = el;
     while (cur && cur.nodeType === 1) {{
@@ -285,7 +351,7 @@ pub fn mail_web_script(view: MailWebView) -> String {
         }}
         return;
       }}
-      if (child.matches({quotes})) quotes.push(child);
+      if (child.matches({quotes}) || isQuoteContainerId(child)) quotes.push(child);
       else collect(child);
     }}
   }};
@@ -664,6 +730,7 @@ mod tests {
             let script = mail_web_script(view);
             assert!(script.contains("blockquote.ms-quote") && script.contains("#divRplyFwdMsg"));
             assert!(script.contains("messageReplySection") && script.contains(".hop_extra"));
+            assert!(script.contains("mail-editor-reference-message-container") && script.contains("normalizeId"));
             assert!(script.contains("isTailCutoff") && script.contains("isOutlookHeader"));
             assert!(script.contains("-apple-system, \\\"Segoe UI\\\""));
         }
@@ -675,9 +742,21 @@ mod tests {
     fn outlook_header_div_helpers_match_headers_without_false_positives() {
         assert!(has_visible_border_top("border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in"));
         assert!(has_visible_border_top("BORDER-TOP: 1px solid #B5C4DF"));
+        assert!(has_visible_border_top("padding: 3pt 0in 0in; border-width: 1pt medium medium; border-style: solid none none; border-color: rgb(181, 196, 223) currentcolor currentcolor;"));
+        assert!(has_visible_border_top("border-top-style: solid; border-top-width: 1px"));
         assert!(!has_visible_border_top("border:none;border-top:none"));
         assert!(!has_visible_border_top("border-top: 0pt; padding: 3pt"));
+        assert!(!has_visible_border_top("border-top: 0px solid #ccc"));
+        assert!(!has_visible_border_top("border-style: none none solid none; border-width: 1pt"));
+        assert!(!has_visible_border_top("border-style: solid none none; border-width: 0px 0px 0px"));
+        assert!(!has_visible_border_top("border-top: 1px solid #ccc; border: none"));
         assert!(!has_visible_border_top("border-left: 1px solid #ccc"));
+
+        assert_eq!(strip_gmail_id_prefix("mail-editor-reference-message-container"), "mail-editor-reference-message-container");
+        assert_eq!(strip_gmail_id_prefix("m_6900309819208902883mail-editor-reference-message-container"), "mail-editor-reference-message-container");
+        assert_eq!(strip_gmail_id_prefix("m_-7080766174707785600divRplyFwdMsg"), "divRplyFwdMsg");
+        assert_eq!(strip_gmail_id_prefix("m_abc"), "m_abc");
+        assert_eq!(strip_gmail_id_prefix("m_-"), "m_-");
 
         assert!(is_outlook_header_text("From: Alex <alex@example.org>\nSent: Monday, Nov 16, 2026 9:00 AM\nTo: Sam\nSubject: Sync"));
         assert!(is_outlook_header_text("发件人：林明 <ming@example.org>\n发送时间：2026年11月16日\n主题：周会"));
