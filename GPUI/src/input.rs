@@ -214,3 +214,76 @@ pub fn insert_link<M: MultiLineMode>(
         input.set_selected_range(url_start..url_start + 3, cx);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        AppContext as _, Context, Entity, EntityInputHandler as _, Focusable as _, IntoElement,
+        ParentElement as _, Render, Styled, TestAppContext, Window, div,
+    };
+    use gpui::component::input::{InputEvent, InputState};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct InputHost(Entity<InputState>);
+
+    impl Render for InputHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(super::field(&self.0))
+        }
+    }
+
+    #[gpui::test]
+    fn android_ime_finish_composing_keeps_text_and_commits_cjk(cx: &mut TestAppContext) {
+        cx.update(gpui::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            InputHost(input)
+        });
+        let input = view.read_with(cx, |host, _| host.0.clone());
+        view.update_in(cx, |host, window, cx| {
+            window.focus(&host.0.focus_handle(cx), cx);
+        });
+        cx.run_until_parked();
+
+        // Simulate Android Gboard English composing -> finishComposingText() -> space commit.
+        // Previously `finishComposingText()` sent `IME_COMMIT ""` which replaced `ime_marked_range`
+        // with `""`, deleting the entire composed word.
+        input.update_in(cx, |state, window, cx| {
+            state.replace_and_mark_text_in_range(None, "hello", Some(5..5), window, cx);
+            assert_eq!(state.value().as_ref(), "hello");
+            assert_eq!(state.marked_text_range(window, cx), Some(0..5));
+            state.unmark_text(window, cx);
+            assert_eq!(state.marked_text_range(window, cx), None);
+            assert_eq!(state.value().as_ref(), "hello");
+            state.replace_text_in_range(None, " ", window, cx);
+            assert_eq!(state.value().as_ref(), "hello ");
+        });
+
+        // Simulate Android Chinese Pinyin composing ("nihao") -> candidate commit ("你好😀").
+        input.update_in(cx, |state, window, cx| {
+            state.replace_and_mark_text_in_range(None, "nihao", Some(5..5), window, cx);
+            assert_eq!(state.value().as_ref(), "hello nihao");
+            assert!(state.marked_text_range(window, cx).is_some());
+            state.replace_text_in_range(None, "你好😀", window, cx);
+            state.unmark_text(window, cx);
+            assert_eq!(state.marked_text_range(window, cx), None);
+            assert_eq!(state.value().as_ref(), "hello 你好😀");
+        });
+
+        // Enter keystroke emits PressEnter on single-line InputState.
+        let pressed = Rc::new(RefCell::new(false));
+        let pressed_flag = Rc::clone(&pressed);
+        cx.update(|_, cx| {
+            cx.subscribe(&input, move |_, event: &InputEvent, _| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    *pressed_flag.borrow_mut() = true;
+                }
+            })
+            .detach();
+        });
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(*pressed.borrow(), "enter keystroke should emit PressEnter on single-line InputState");
+    }
+}

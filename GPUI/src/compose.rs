@@ -1005,8 +1005,13 @@ impl Compose {
                 )
                 .with_priority(1)
             });
+        let focus_target = input.focus_handle(cx);
         self.header_row(Some(field.label()), self.invalid.contains(&field), compact, p)
             .key_context(RECIPIENTS)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                focus_target.focus(window, cx);
+                window.request_virtual_keyboard();
+            })
             .child(div().flex_1().min_w_0().child(input::field(input)))
             .children(suggestions)
     }
@@ -1105,6 +1110,13 @@ impl Render for Compose {
                             .h(px(if compact { 50. } else { metrics::SUBJECT_HEIGHT }))
                             .text_size(px(ts.pane_title))
                             .font_weight(FontWeight::SEMIBOLD)
+                            .on_mouse_down(MouseButton::Left, {
+                                let subject_focus = self.subject.focus_handle(cx);
+                                move |_, window, cx| {
+                                    subject_focus.focus(window, cx);
+                                    window.request_virtual_keyboard();
+                                }
+                            })
                             .child(div().flex_1().min_w_0().child(input::field(&self.subject))),
                     )
                     .when_some(attached, |d, attached| {

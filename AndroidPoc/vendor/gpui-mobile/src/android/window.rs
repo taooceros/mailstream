@@ -1287,6 +1287,8 @@ pub struct AndroidPlatformWindow {
     window: Arc<AndroidWindow>,
     display: Option<Rc<dyn PlatformDisplay>>,
     input_handler: Rc<RefCell<Option<PlatformInputHandler>>>,
+    active_input_focus: Rc<RefCell<Option<gpui::FocusId>>>,
+    text_input_config: Rc<RefCell<gpui::TextInputConfiguration>>,
     ime_input_callback:
         Arc<Mutex<Box<dyn FnMut(gpui::PlatformInput) -> DispatchEventResult + Send>>>,
     title: String,
@@ -1299,6 +1301,8 @@ impl AndroidPlatformWindow {
             window,
             display,
             input_handler: Rc::new(RefCell::new(None)),
+            active_input_focus: Rc::new(RefCell::new(None)),
+            text_input_config: Rc::new(RefCell::new(gpui::TextInputConfiguration::default())),
             ime_input_callback: Arc::new(Mutex::new(Box::new(|_| DispatchEventResult::default()))),
             title: String::new(),
         }
@@ -1308,8 +1312,15 @@ impl AndroidPlatformWindow {
     pub fn inner(&self) -> &Arc<AndroidWindow> {
         &self.window
     }
-}
 
+    fn current_android_input_config(&self) -> super::jni::AndroidInputConfig {
+        let cfg = self.text_input_config.borrow();
+        super::jni::AndroidInputConfig::from_keyboard_and_config(
+            crate::KeyboardType::Default,
+            &cfg,
+        )
+    }
+}
 impl HasWindowHandle for AndroidPlatformWindow {
     fn window_handle(
         &self,
@@ -1414,23 +1425,82 @@ impl PlatformWindow for AndroidPlatformWindow {
     }
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+        let new_focus = input_handler.focus_id();
+        let prev_focus = *self.active_input_focus.borrow();
         *self.input_handler.borrow_mut() = Some(input_handler);
+        if prev_focus.is_some() && new_focus.is_some() && prev_focus != new_focus {
+            // Switching directly between two focused text fields does not toggle
+            // `focused_text_input.is_some()`, so `text_input_state_changed(FocusGained)`
+            // will not fire; restart the Android IME session for the new field here.
+            *self.active_input_focus.borrow_mut() = new_focus;
+            let cfg = self.current_android_input_config();
+            super::jni::show_keyboard_android_with_config(
+                crate::KeyboardType::Default,
+                cfg,
+                true,
+            );
+        }
     }
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.input_handler.borrow_mut().take()
     }
 
-    fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
-        match change {
-            gpui::TextInputStateChange::FocusGained => {
-                super::jni::show_keyboard_android(crate::KeyboardType::Default);
+    fn set_text_input_configuration(&mut self, configuration: gpui::TextInputConfiguration) {
+        let changed = {
+            let mut slot = self.text_input_config.borrow_mut();
+            if *slot == configuration {
+                false
+            } else {
+                *slot = configuration;
+                true
             }
-            gpui::TextInputStateChange::FocusLost => super::jni::hide_keyboard_android(),
-            _ => {}
+        };
+        if changed && self.active_input_focus.borrow().is_some() {
+            let cfg = self.current_android_input_config();
+            super::jni::show_keyboard_android_with_config(
+                crate::KeyboardType::Default,
+                cfg,
+                true,
+            );
         }
     }
 
+    fn show_soft_keyboard(&self) {
+        let cfg = self.current_android_input_config();
+        super::jni::show_keyboard_android_with_config(crate::KeyboardType::Default, cfg, false);
+    }
+
+    fn hide_soft_keyboard(&self) {
+        super::jni::hide_keyboard_android();
+    }
+
+    fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
+        match change {
+            gpui::TextInputStateChange::FocusGained => {
+                let focus = self
+                    .input_handler
+                    .borrow()
+                    .as_ref()
+                    .and_then(|h| h.focus_id());
+                *self.active_input_focus.borrow_mut() = focus;
+                let cfg = self.current_android_input_config();
+                super::jni::show_keyboard_android_with_config(
+                    crate::KeyboardType::Default,
+                    cfg,
+                    true,
+                );
+            }
+            gpui::TextInputStateChange::FocusLost => {
+                *self.active_input_focus.borrow_mut() = None;
+                super::jni::hide_keyboard_android();
+            }
+            gpui::TextInputStateChange::SelectionChanged
+            | gpui::TextInputStateChange::ContentChanged => {
+                super::text_input::mark_input_sync_needed();
+            }
+        }
+    }
     fn prompt(
         &self,
         _level: PromptLevel,
@@ -1495,9 +1565,8 @@ impl PlatformWindow for AndroidPlatformWindow {
         let callback: Box<dyn FnMut(RequestFrameOptions)> = Box::new(move |options| {
             super::text_input::drain(&input_handler, &mut **input_callback.lock());
             callback(options);
+            super::text_input::sync_input_state_if_needed(&input_handler);
         });
-        // PlatformWindow gives us Box<dyn FnMut(...)> (not Send).
-        // AndroidWindow::on_request_frame requires Send.  On Android the
         // request-frame callback is always invoked on the main thread, so
         // this transmute is safe in practice.
         let send_callback: Box<dyn FnMut(RequestFrameOptions) + Send> =
@@ -1525,20 +1594,31 @@ impl PlatformWindow for AndroidPlatformWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(gpui::PlatformInput) -> DispatchEventResult>) {
         let input_handler = Rc::clone(&self.input_handler);
+        let input_handler_for_keys = Rc::clone(&self.input_handler);
         let mut callback = callback;
         let callback: Box<dyn FnMut(gpui::PlatformInput) -> DispatchEventResult> = Box::new(
             move |event| {
-                if matches!(&event, gpui::PlatformInput::Touch(touch) if touch.phase == gpui::TouchPhase::Started)
-                {
+                let is_touch_started = matches!(
+                    &event,
+                    gpui::PlatformInput::Touch(touch) if touch.phase == gpui::TouchPhase::Started
+                );
+                let is_touch_ended = matches!(
+                    &event,
+                    gpui::PlatformInput::Touch(touch) if touch.phase == gpui::TouchPhase::Ended
+                );
+                if is_touch_started {
                     // Apply any last IME update to the old input before a tap can
                     // change focus. A new native session rejects late IME callbacks.
                     super::text_input::drain(&input_handler, &mut callback);
                     super::text_input::finish_composition(&input_handler);
                 }
-                callback(event)
+                let result = callback(event);
+                if is_touch_ended {
+                    super::text_input::sync_input_state_if_needed(&input_handler);
+                }
+                result
             },
         );
-        // Bridge AndroidWindow touch/key callbacks → gpui::PlatformInput.
         //
         // PlatformWindow gives us Box<dyn FnMut(...)> (not Send).
         // AndroidWindow callbacks require Send.  On Android the input
@@ -1624,7 +1704,16 @@ impl PlatformWindow for AndroidPlatformWindow {
 
         // ── Key events → PlatformInput ───────────────────────────────────
         {
+            struct SendInputHandlerSlot(Rc<RefCell<Option<PlatformInputHandler>>>);
+            // SAFETY: AndroidWindow key callbacks always run on the native main thread.
+            unsafe impl Send for SendInputHandlerSlot {}
+            impl SendInputHandlerSlot {
+                fn slot(&self) -> &Rc<RefCell<Option<PlatformInputHandler>>> {
+                    &self.0
+                }
+            }
             let cb = Arc::clone(&input_cb);
+            let key_input_handler = SendInputHandlerSlot(input_handler_for_keys);
             self.window.on_key_event(move |key_event| {
                 use crate::android::keyboard::{
                     android_key_to_keystroke, AKEY_EVENT_ACTION_DOWN, AKEY_EVENT_ACTION_UP,
@@ -1660,11 +1749,23 @@ impl PlatformWindow for AndroidPlatformWindow {
                     None => return, // Modifier-only or unmapped key
                 };
 
+                let key_char_for_input = if key_event.action == AKEY_EVENT_ACTION_DOWN
+                    && keystroke.modifiers.is_subset_of(&Modifiers::shift())
+                {
+                    keystroke
+                        .key_char
+                        .as_deref()
+                        .filter(|s| !s.is_empty() && !s.chars().all(char::is_control))
+                        .map(str::to_owned)
+                } else {
+                    None
+                };
+
                 let event = if key_event.action == AKEY_EVENT_ACTION_DOWN {
                     gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
                         keystroke,
                         is_held: false,
-                        prefer_character_input: key_event.unicode_char != 0,
+                        prefer_character_input: key_char_for_input.is_some(),
                     })
                 } else if key_event.action == AKEY_EVENT_ACTION_UP {
                     gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
@@ -1672,8 +1773,29 @@ impl PlatformWindow for AndroidPlatformWindow {
                     return; // ACTION_MULTIPLE or unknown
                 };
 
-                let mut guard = cb.lock();
-                let _ = guard(event);
+                let result = {
+                    let mut guard = cb.lock();
+                    guard(event)
+                };
+
+                // Match desktop Wayland/X11/macOS: unhandled printable key events
+                // (hardware keyboards, `adb shell input text`, IME key fallback)
+                // commit into the active `PlatformInputHandler`.
+                if result.propagate {
+                    if let Some(text) = key_char_for_input {
+                        let slot = key_input_handler.slot();
+                        let taken = slot.borrow_mut().take();
+                        if let Some(mut handler) = taken {
+                            handler.replace_text_in_range(None, &text);
+                            let mut current = slot.borrow_mut();
+                            if current.is_none() {
+                                *current = Some(handler);
+                            }
+                            super::text_input::mark_input_sync_needed();
+                        }
+                    }
+                }
+                super::text_input::sync_input_state_if_needed(key_input_handler.slot());
             });
         }
     }

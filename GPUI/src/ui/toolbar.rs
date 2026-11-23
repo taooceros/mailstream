@@ -144,7 +144,11 @@ impl MailApp {
                     .gap(px(space::S8))
                     .text_size(px(ts.body))
                     .line_height(px((ts.body * 1.35).round()))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.search.focus_handle(cx).focus(window, cx);
+                        window.request_virtual_keyboard();
+                    }))
                     .on_action(cx.listener(Self::cancel_search))
                     .child(icon(Icon::Search, 17., p.muted))
                     .child(div().flex_1().min_w_0().child(input::field(&self.search))),

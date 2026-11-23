@@ -1603,6 +1603,56 @@ pub fn set_system_chrome(style: &crate::SystemChromeStyle) {
 
 // ── software keyboard (IME) control ───────────────────────────────────────────
 
+/// Encoded Android IME input attributes forwarded from GPUI's `TextInputConfiguration`
+/// and `KeyboardType` to `GpuiInputActivity.gpuiShowKeyboard`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct AndroidInputConfig {
+    pub kind: i32,
+    pub ime_action: i32,
+    pub input_flags: i32,
+}
+
+impl AndroidInputConfig {
+    pub(super) fn from_keyboard_and_config(
+        keyboard_type: crate::KeyboardType,
+        config: &gpui::TextInputConfiguration,
+    ) -> Self {
+        let kind = match keyboard_type {
+            crate::KeyboardType::Default => 0,
+            crate::KeyboardType::EmailAddress => 1,
+            crate::KeyboardType::Phone => 2,
+            crate::KeyboardType::NumberPad => 3,
+            crate::KeyboardType::URL => 4,
+            crate::KeyboardType::Decimal => 5,
+        };
+        let ime_action = match config.input_action {
+            gpui::TextInputAction::Unspecified => 0,
+            gpui::TextInputAction::Enter => 1,
+            gpui::TextInputAction::Done => 2,
+            gpui::TextInputAction::Go => 3,
+            gpui::TextInputAction::Next => 4,
+            gpui::TextInputAction::Previous => 5,
+            gpui::TextInputAction::Search => 6,
+            gpui::TextInputAction::Send => 7,
+        };
+        let cap_bits = match config.autocapitalize {
+            gpui::Autocapitalize::None => 0,
+            gpui::Autocapitalize::Words => 1,
+            gpui::Autocapitalize::Sentences => 2,
+            gpui::Autocapitalize::Characters => 3,
+        };
+        let mut input_flags = cap_bits << 2;
+        if config.autocorrect {
+            input_flags |= 1;
+        }
+        Self {
+            kind,
+            ime_action,
+            input_flags,
+        }
+    }
+}
+
 /// The keyboard type currently requested, or `None` when hidden.
 ///
 /// The Java-side `InputProxy` belongs to the Activity, so an Activity recreation takes
@@ -1623,28 +1673,53 @@ pub(crate) fn restore_keyboard() {
     }
 }
 
-/// Show the UI-thread EditText proxy supplied by GpuiInputActivity.
+/// Show the UI-thread IME proxy supplied by `GpuiInputActivity`.
 ///
-/// Unlike NativeActivity's key-event-only connection, its InputConnection
-/// supports composing text, commits and Unicode surrounding-text deletion.
+/// Unlike `NativeActivity`'s key-event-only connection, its `InputConnection`
+/// supports composing text, commits, surrounding-text queries, and Unicode deletion.
 pub fn show_keyboard_android(keyboard_type: crate::KeyboardType) {
-    *SHOWN_KEYBOARD.lock().expect("poisoned") = Some(keyboard_type);
-    let kind = match keyboard_type {
-        crate::KeyboardType::Default => 0,
-        crate::KeyboardType::EmailAddress => 1,
-        crate::KeyboardType::Phone => 2,
-        crate::KeyboardType::NumberPad => 3,
-        crate::KeyboardType::URL => 4,
-        crate::KeyboardType::Decimal => 5,
+    let config = AndroidInputConfig::from_keyboard_and_config(
+        keyboard_type,
+        &gpui::TextInputConfiguration::default(),
+    );
+    show_keyboard_android_with_config(keyboard_type, config, true);
+}
+
+/// Show (or ensure visible) the Android software keyboard with explicit `TextInputConfiguration`
+/// attributes. When `restart` is `false` and a session is already active, keeps the live IME
+/// session intact so re-tapping an already-focused field re-raises the keyboard without dropping
+/// in-flight events.
+pub(super) fn show_keyboard_android_with_config(
+    keyboard_type: crate::KeyboardType,
+    config: AndroidInputConfig,
+    restart: bool,
+) {
+    let was_shown = SHOWN_KEYBOARD
+        .lock()
+        .expect("poisoned")
+        .replace(keyboard_type)
+        .is_some();
+    let existing = super::text_input::current_session();
+    let should_restart = restart || !was_shown || existing == 0;
+    let session = if should_restart {
+        super::text_input::new_session()
+    } else {
+        existing
     };
-    let session = super::text_input::new_session();
+    super::text_input::mark_input_sync_needed();
     if let Err(error) = with_env(|env| {
         let activity = activity(env)?;
         env.call_method(
             &activity,
             jni::jni_str!("gpuiShowKeyboard"),
-            jni::jni_sig!("(IJ)V"),
-            &[JValue::Int(kind), JValue::Long(session as i64)],
+            jni::jni_sig!("(IIIJZ)V"),
+            &[
+                JValue::Int(config.kind),
+                JValue::Int(config.ime_action),
+                JValue::Int(config.input_flags),
+                JValue::Long(session as i64),
+                JValue::Bool(should_restart),
+            ],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -1657,11 +1732,40 @@ pub fn show_keyboard_android(keyboard_type: crate::KeyboardType) {
     }
 }
 
+/// Pushes the focused field's windowed text, selection, and composing range to
+/// `GpuiInputActivity`'s mirror `Editable` so IMEs receive accurate surrounding text.
+pub(super) fn update_input_state_android(
+    session: u64,
+    snapshot: &super::text_input::InputSnapshot,
+) {
+    let _ = with_env(|env| {
+        let activity = activity(env)?;
+        let jtext = env.new_string(&snapshot.text).map_err(|e| e.to_string())?;
+        let result = env.call_method(
+            &activity,
+            jni::jni_str!("gpuiUpdateInputState"),
+            jni::jni_sig!("(JLjava/lang/String;IIII)V"),
+            &[
+                JValue::Long(session as i64),
+                JValue::Object(&jtext),
+                JValue::Int(snapshot.sel_start),
+                JValue::Int(snapshot.sel_end),
+                JValue::Int(snapshot.composing_start),
+                JValue::Int(snapshot.composing_end),
+            ],
+        );
+        env.exception_clear();
+        result.map_err(|e| e.to_string())?;
+        Ok(())
+    });
+}
+
 /// Hide the software keyboard on Android.
 ///
 /// Invalidates queued IME callbacks and clears the native composition buffer.
 pub fn hide_keyboard_android() {
     *SHOWN_KEYBOARD.lock().expect("poisoned") = None;
+    super::text_input::clear_input_sync_needed();
     let session = super::text_input::new_session();
     let _ = with_env(|env| {
         let activity = activity(env)?;
@@ -1682,6 +1786,7 @@ pub fn hide_keyboard_android() {
 
 pub(super) fn reset_keyboard_composition() {
     let session = super::text_input::new_session();
+    super::text_input::mark_input_sync_needed();
     let _ = with_env(|env| {
         let activity = activity(env)?;
         let result = env.call_method(
@@ -1696,13 +1801,40 @@ pub(super) fn reset_keyboard_composition() {
     });
 }
 
+/// Losslessly extracts a Java `String` from a raw JNI call frame via UTF-16
+/// (`GetStringChars` / `GetStringLength`), preserving supplementary-plane emoji
+/// without Modified-UTF-8 corruption or touching `JavaVM::singleton`.
+unsafe fn jstring_to_rust_utf16(
+    env: *mut jni::sys::JNIEnv,
+    s: jni::sys::jstring,
+) -> String {
+    if env.is_null() || s.is_null() {
+        return String::new();
+    }
+    let Some(fns) = (unsafe { (*env).as_ref() }) else {
+        return String::new();
+    };
+    let len = unsafe { (fns.v1_1.GetStringLength)(env, s) };
+    if len <= 0 {
+        return String::new();
+    }
+    let chars = unsafe { (fns.v1_1.GetStringChars)(env, s, std::ptr::null_mut()) };
+    if chars.is_null() {
+        return String::new();
+    }
+    let slice = unsafe { std::slice::from_raw_parts(chars, len as usize) };
+    let out = String::from_utf16_lossy(slice);
+    unsafe { (fns.v1_1.ReleaseStringChars)(env, s, chars) };
+    out
+}
+
 /// Receive Java InputConnection updates without touching GPUI on the UI thread.
 ///
 /// # Safety
 /// Called by JNI with a valid Java string and JNI call frame.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeIme(
-    _env: *mut c_void,
+    env: *mut c_void,
     _class: *mut c_void,
     session: i64,
     kind: i32,
@@ -1710,16 +1842,15 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeIme(
     start: i32,
     end: i32,
 ) {
-    let _ = with_env(|env| {
-        let text = unsafe { JObject::from_raw(env, text as jni::sys::jobject) };
-        super::text_input::enqueue(super::text_input::ImeEvent {
-            session: session as u64,
-            kind,
-            text: get_string(env, &text),
-            start: start.max(0) as usize,
-            end: end.max(0) as usize,
-        });
-        Ok(())
+    let text = unsafe {
+        jstring_to_rust_utf16(env as *mut jni::sys::JNIEnv, text as jni::sys::jstring)
+    };
+    super::text_input::enqueue(super::text_input::ImeEvent {
+        session: session as u64,
+        kind,
+        text,
+        start: start.max(0) as usize,
+        end: end.max(0) as usize,
     });
 }
 

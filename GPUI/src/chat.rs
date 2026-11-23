@@ -3619,7 +3619,10 @@ impl ChatPane {
                     .text_size(px(text::READING))
                     .line_height(relative(1.55))
                     .cursor_text()
-                    .on_click(move |_, window, cx| window.focus(&field.focus_handle(cx), cx))
+                    .on_click(move |_, window, cx| {
+                        window.focus(&field.focus_handle(cx), cx);
+                        window.request_virtual_keyboard();
+                    })
                     .on_action(cx.listener(move |this, _: &Escape, window, cx| this.composer_escape(surface, window, cx)))
                     .on_action(cx.listener(|_, action: &Enter, _, cx| {
                         if action.shift {

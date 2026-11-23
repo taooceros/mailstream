@@ -7,11 +7,15 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.Selection;
+import android.text.SpannableStringBuilder;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.os.Build;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -28,25 +32,35 @@ import android.window.BackEvent;
 import android.window.OnBackAnimationCallback;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
-import android.widget.EditText;
 import android.widget.FrameLayout;
 import java.util.List;
-
 /**
  * Minimal NativeActivity host bridging Android IME (including CJK composing text) to gpui-mobile's
  * {@code Java_dev_gpui_mobile_GpuiInputActivity_nativeIme} JNI entry point.
  */
 public class GpuiInputActivity extends NativeActivity {
+    private static final String TAG = "mailstream";
     private static final int IME_COMPOSING = 0;
     private static final int IME_COMMIT = 1;
     private static final int IME_DELETE_SURROUNDING = 2;
     private static final int IME_DELETE_CODE_POINTS = 3;
     private static final int IME_ESCAPE = 4;
+    private static final int IME_FINISH_COMPOSING = 5;
+    private static final int IME_KEY_ENTER = 6;
+    private static final int IME_KEY_BACKSPACE = 7;
+    private static final int IME_KEY_FORWARD_DELETE = 8;
+    private static final int IME_KEY_TAB = 9;
+    private static final int IME_KEY_NAV = 10;
+    private static final int IME_SET_SELECTION = 11;
+    private static final int IME_SET_COMPOSING_REGION = 12;
     private static final int REQ_POST_NOTIFICATIONS = 1001;
     private static final String PREFS_PERMS = "mailstream_perm_prefs";
     private static final String KEY_ASKED_NOTIF = "asked_post_notifications";
     private volatile long imeSession = 0;
     private int inputKind = 0;
+    private int inputImeAction = 0;
+    private int inputFlags = 0;
+    private boolean keyboardRequested = false;
     private ImeProxyView imeProxy;
     private volatile boolean backEnabled = false;
     private Object backCallback = null;
@@ -54,7 +68,6 @@ public class GpuiInputActivity extends NativeActivity {
     private boolean imeAnimating = false;
     private int lastNavBarBottomPx = 0;
     private int imeTargetBottomPx = 0;
-
     static {
         System.loadLibrary("mailstream_android_poc");
     }
@@ -74,9 +87,12 @@ public class GpuiInputActivity extends NativeActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         imeProxy = new ImeProxyView(this);
-        imeProxy.setAlpha(0f);
+        imeProxy.setVisibility(View.VISIBLE);
         imeProxy.setFocusable(true);
         imeProxy.setFocusableInTouchMode(true);
+        imeProxy.setClickable(false);
+        imeProxy.setLongClickable(false);
+        imeProxy.setWillNotDraw(true);
         ViewGroup content = findViewById(android.R.id.content);
         if (content != null) {
             content.addView(imeProxy, new FrameLayout.LayoutParams(1, 1));
@@ -412,19 +428,70 @@ public class GpuiInputActivity extends NativeActivity {
         }
     }
 
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && keyboardRequested && imeProxy != null) {
+            imeProxy.post(() -> {
+                if (keyboardRequested) {
+                    showImeNow(false);
+                }
+            });
+        }
+    }
+
     public void gpuiShowKeyboard(final int kind, final long session) {
+        gpuiShowKeyboard(kind, 0, 0, session, true);
+    }
+
+    public void gpuiShowKeyboard(
+            final int kind,
+            final int imeAction,
+            final int flags,
+            final long session,
+            final boolean restart) {
         runOnUiThread(() -> {
+            boolean configChanged = (inputKind != kind)
+                    || (inputImeAction != imeAction)
+                    || (inputFlags != flags);
             imeSession = session;
             inputKind = kind;
+            inputImeAction = imeAction;
+            inputFlags = flags;
+            keyboardRequested = true;
             if (imeProxy == null) {
                 return;
             }
-            imeProxy.setInputType(androidInputType(kind));
-            imeProxy.requestFocus();
+            if (restart) {
+                imeProxy.clearMirror();
+            }
+            showImeNow(restart || configChanged);
+        });
+    }
+
+    public void gpuiUpdateInputState(
+            final long session,
+            final String text,
+            final int selStart,
+            final int selEnd,
+            final int composingStart,
+            final int composingEnd) {
+        runOnUiThread(() -> {
+            if (imeProxy == null || session != imeSession) {
+                return;
+            }
+            String safeText = text != null ? text : "";
+            if (!imeProxy.syncMirror(safeText, selStart, selEnd, composingStart, composingEnd)) {
+                return;
+            }
             InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (imm != null) {
-                imm.restartInput(imeProxy);
-                imm.showSoftInput(imeProxy, InputMethodManager.SHOW_IMPLICIT);
+            if (imm != null && imm.isActive(imeProxy)) {
+                Editable ed = imeProxy.getMirrorEditable();
+                int sStart = Selection.getSelectionStart(ed);
+                int sEnd = Selection.getSelectionEnd(ed);
+                int cStart = BaseInputConnection.getComposingSpanStart(ed);
+                int cEnd = BaseInputConnection.getComposingSpanEnd(ed);
+                imm.updateSelection(imeProxy, sStart, sEnd, cStart, cEnd);
             }
         });
     }
@@ -432,12 +499,20 @@ public class GpuiInputActivity extends NativeActivity {
     public void gpuiHideKeyboard(final long session) {
         runOnUiThread(() -> {
             imeSession = session;
+            keyboardRequested = false;
             if (imeProxy == null) {
                 return;
             }
+            imeProxy.clearComposing();
             InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
             if (imm != null) {
                 imm.hideSoftInputFromWindow(imeProxy.getWindowToken(), 0);
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowInsetsController controller = imeProxy.getWindowInsetsController();
+                if (controller != null) {
+                    controller.hide(WindowInsets.Type.ime());
+                }
             }
             imeProxy.clearFocus();
         });
@@ -449,33 +524,210 @@ public class GpuiInputActivity extends NativeActivity {
             if (imeProxy == null) {
                 return;
             }
+            imeProxy.clearComposing();
             InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-            if (imm != null) {
+            if (imm != null && imm.isActive(imeProxy)) {
                 imm.restartInput(imeProxy);
             }
         });
     }
 
-    private static int androidInputType(int kind) {
+    private void showImeNow(final boolean restart) {
+        if (imeProxy == null) {
+            return;
+        }
+        if (!imeProxy.hasFocus()) {
+            imeProxy.requestFocus();
+        }
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        boolean shown = false;
+        if (imm != null) {
+            if (restart && imm.isActive(imeProxy)) {
+                imm.restartInput(imeProxy);
+            }
+            shown = imm.showSoftInput(imeProxy, 0);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowInsetsController controller = imeProxy.getWindowInsetsController();
+            if (controller != null) {
+                controller.show(WindowInsets.Type.ime());
+            }
+        }
+        // On Android 11-15, `requestFocus()` binds `ImeFocusController` asynchronously
+        // on the next traversal; if `showSoftInput` returned false before focus settled,
+        // retry once posted on the view's message queue (and again after a short delay).
+        if (!shown) {
+            imeProxy.post(() -> {
+                if (!keyboardRequested || imeProxy == null) {
+                    return;
+                }
+                if (!imeProxy.hasFocus()) {
+                    imeProxy.requestFocus();
+                }
+                InputMethodManager retryImm =
+                        (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                boolean retryShown = false;
+                if (retryImm != null) {
+                    if (restart && retryImm.isActive(imeProxy)) {
+                        retryImm.restartInput(imeProxy);
+                    }
+                    retryShown = retryImm.showSoftInput(imeProxy, 0);
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    WindowInsetsController controller = imeProxy.getWindowInsetsController();
+                    if (controller != null) {
+                        controller.show(WindowInsets.Type.ime());
+                    }
+                }
+                if (!retryShown) {
+                    imeProxy.postDelayed(() -> {
+                        if (!keyboardRequested || imeProxy == null) {
+                            return;
+                        }
+                        if (!imeProxy.hasFocus()) {
+                            imeProxy.requestFocus();
+                        }
+                        InputMethodManager lateImm =
+                                (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                        if (lateImm != null) {
+                            lateImm.showSoftInput(imeProxy, 0);
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            WindowInsetsController controller = imeProxy.getWindowInsetsController();
+                            if (controller != null) {
+                                controller.show(WindowInsets.Type.ime());
+                            }
+                        }
+                    }, 60L);
+                }
+            });
+        }
+    }
+
+    private static int androidInputType(int kind, int flags) {
+        int base;
         switch (kind) {
             case 1:
-                return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
+                base = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
+                break;
             case 2:
                 return InputType.TYPE_CLASS_PHONE;
             case 3:
                 return InputType.TYPE_CLASS_NUMBER;
             case 4:
-                return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+                base = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI;
+                break;
             case 5:
                 return InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL;
             default:
-                return InputType.TYPE_CLASS_TEXT;
+                base = InputType.TYPE_CLASS_TEXT;
+                break;
+        }
+        if ((flags & 1) != 0) {
+            base |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
+        }
+        int cap = (flags >> 2) & 3;
+        if (cap == 1) {
+            base |= InputType.TYPE_TEXT_FLAG_CAP_WORDS;
+        } else if (cap == 2) {
+            base |= InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
+        } else if (cap == 3) {
+            base |= InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
+        }
+        return base;
+    }
+
+    private static int androidImeOptions(int action) {
+        int actionFlag;
+        switch (action) {
+            case 1:
+                actionFlag = EditorInfo.IME_ACTION_NONE;
+                break;
+            case 2:
+                actionFlag = EditorInfo.IME_ACTION_DONE;
+                break;
+            case 3:
+                actionFlag = EditorInfo.IME_ACTION_GO;
+                break;
+            case 4:
+                actionFlag = EditorInfo.IME_ACTION_NEXT;
+                break;
+            case 5:
+                actionFlag = EditorInfo.IME_ACTION_PREVIOUS;
+                break;
+            case 6:
+                actionFlag = EditorInfo.IME_ACTION_SEARCH;
+                break;
+            case 7:
+                actionFlag = EditorInfo.IME_ACTION_SEND;
+                break;
+            default:
+                actionFlag = EditorInfo.IME_ACTION_UNSPECIFIED;
+                break;
+        }
+        return actionFlag
+                | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                | EditorInfo.IME_FLAG_NO_FULLSCREEN;
+    }
+
+    private void sendNativeIme(int kind, String text, int start, int end) {
+        try {
+            nativeIme(imeSession, kind, text, start, end);
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "nativeIme link error", e);
         }
     }
 
-    private final class ImeProxyView extends EditText {
+    private final class ImeProxyView extends View {
+        private final SpannableStringBuilder editable = new SpannableStringBuilder();
+
         ImeProxyView(Context context) {
             super(context);
+            Selection.setSelection(editable, 0, 0);
+        }
+
+        Editable getMirrorEditable() {
+            return editable;
+        }
+
+        void clearMirror() {
+            editable.clear();
+            BaseInputConnection.removeComposingSpans(editable);
+            Selection.setSelection(editable, 0, 0);
+        }
+
+        void clearComposing() {
+            BaseInputConnection.removeComposingSpans(editable);
+        }
+
+        boolean syncMirror(String text, int selStart, int selEnd, int composingStart, int composingEnd) {
+            int len = text.length();
+            int clampedSelStart = Math.max(0, Math.min(selStart, len));
+            int clampedSelEnd = Math.max(clampedSelStart, Math.min(selEnd, len));
+            int clampedCompStart = composingStart >= 0 ? Math.max(0, Math.min(composingStart, len)) : -1;
+            int clampedCompEnd = composingEnd > clampedCompStart
+                    ? Math.max(clampedCompStart, Math.min(composingEnd, len))
+                    : -1;
+            if (clampedCompEnd <= clampedCompStart) {
+                clampedCompStart = -1;
+                clampedCompEnd = -1;
+            }
+
+            boolean sameText = editable.toString().equals(text);
+            boolean sameSel = Selection.getSelectionStart(editable) == clampedSelStart
+                    && Selection.getSelectionEnd(editable) == clampedSelEnd;
+            boolean sameComp = BaseInputConnection.getComposingSpanStart(editable) == clampedCompStart
+                    && BaseInputConnection.getComposingSpanEnd(editable) == clampedCompEnd;
+            if (sameText && sameSel && (sameComp || clampedCompStart >= 0)) {
+                return false;
+            }
+
+            if (!sameText) {
+                editable.replace(0, editable.length(), text);
+            }
+            BaseInputConnection.removeComposingSpans(editable);
+            Selection.setSelection(editable, clampedSelStart, clampedSelEnd);
+            return true;
         }
 
         @Override
@@ -485,56 +737,208 @@ public class GpuiInputActivity extends NativeActivity {
 
         @Override
         public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-            outAttrs.inputType = androidInputType(inputKind);
-            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI;
-            return new BaseInputConnection(this, false) {
+            outAttrs.inputType = androidInputType(inputKind, inputFlags);
+            outAttrs.imeOptions = androidImeOptions(inputImeAction);
+            int selStart = Math.max(0, Selection.getSelectionStart(editable));
+            int selEnd = Math.max(selStart, Selection.getSelectionEnd(editable));
+            outAttrs.initialSelStart = selStart;
+            outAttrs.initialSelEnd = selEnd;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                outAttrs.setInitialSurroundingText(editable);
+            }
+            return new BaseInputConnection(this, true) {
+                @Override
+                public Editable getEditable() {
+                    return editable;
+                }
+
                 @Override
                 public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                    super.setComposingText(text, newCursorPosition);
                     String s = text != null ? text.toString() : "";
-                    nativeIme(imeSession, IME_COMPOSING, s, s.length(), s.length());
+                    int cursor = newCursorPosition <= 0 ? 0 : s.length();
+                    sendNativeIme(IME_COMPOSING, s, cursor, cursor);
+                    return true;
+                }
+
+                @Override
+                public boolean setComposingRegion(int start, int end) {
+                    super.setComposingRegion(start, end);
+                    int s = Math.max(0, Math.min(start, end));
+                    int e = Math.max(s, Math.max(start, end));
+                    sendNativeIme(IME_SET_COMPOSING_REGION, "", s, e);
                     return true;
                 }
 
                 @Override
                 public boolean commitText(CharSequence text, int newCursorPosition) {
+                    super.commitText(text, newCursorPosition);
                     String s = text != null ? text.toString() : "";
-                    nativeIme(imeSession, IME_COMMIT, s, 0, 0);
+                    sendNativeIme(IME_COMMIT, s, 0, 0);
                     return true;
                 }
 
                 @Override
                 public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-                    nativeIme(imeSession, IME_DELETE_SURROUNDING, "", beforeLength, afterLength);
+                    super.deleteSurroundingText(beforeLength, afterLength);
+                    sendNativeIme(
+                            IME_DELETE_SURROUNDING,
+                            "",
+                            Math.max(0, beforeLength),
+                            Math.max(0, afterLength));
                     return true;
                 }
 
                 @Override
                 public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
-                    nativeIme(imeSession, IME_DELETE_CODE_POINTS, "", beforeLength, afterLength);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
+                    }
+                    sendNativeIme(
+                            IME_DELETE_CODE_POINTS,
+                            "",
+                            Math.max(0, beforeLength),
+                            Math.max(0, afterLength));
                     return true;
                 }
 
                 @Override
                 public boolean finishComposingText() {
-                    nativeIme(imeSession, IME_COMMIT, "", 0, 0);
+                    super.finishComposingText();
+                    // Keep committed composing text intact — only clear the marked span.
+                    sendNativeIme(IME_FINISH_COMPOSING, "", 0, 0);
                     return true;
                 }
 
                 @Override
+                public boolean setSelection(int start, int end) {
+                    super.setSelection(start, end);
+                    int s = Math.max(0, start);
+                    int e = Math.max(0, end);
+                    sendNativeIme(IME_SET_SELECTION, "", s, e);
+                    return true;
+                }
+
+                @Override
+                public boolean performEditorAction(int actionCode) {
+                    super.finishComposingText();
+                    if (actionCode == EditorInfo.IME_ACTION_NEXT) {
+                        sendNativeIme(IME_KEY_TAB, "", 0, 0);
+                        return true;
+                    }
+                    if (actionCode == EditorInfo.IME_ACTION_PREVIOUS) {
+                        sendNativeIme(IME_KEY_TAB, "", 1, 0);
+                        return true;
+                    }
+                    sendNativeIme(IME_KEY_ENTER, "", 0, 0);
+                    return true;
+                }
+
+                private boolean isHandledKeyCode(int code) {
+                    switch (code) {
+                        case KeyEvent.KEYCODE_DEL:
+                        case KeyEvent.KEYCODE_FORWARD_DEL:
+                        case KeyEvent.KEYCODE_ENTER:
+                        case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                        case KeyEvent.KEYCODE_ESCAPE:
+                        case KeyEvent.KEYCODE_TAB:
+                        case KeyEvent.KEYCODE_DPAD_LEFT:
+                        case KeyEvent.KEYCODE_DPAD_RIGHT:
+                        case KeyEvent.KEYCODE_DPAD_UP:
+                        case KeyEvent.KEYCODE_DPAD_DOWN:
+                        case KeyEvent.KEYCODE_MOVE_HOME:
+                        case KeyEvent.KEYCODE_MOVE_END:
+                            return true;
+                        default:
+                            return false;
+                    }
+                }
+
+                @Override
                 public boolean sendKeyEvent(KeyEvent event) {
-                    if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
-                        int code = event.getKeyCode();
-                        if (code == KeyEvent.KEYCODE_DEL) {
-                            nativeIme(imeSession, IME_DELETE_SURROUNDING, "", 1, 0);
+                    if (event == null) {
+                        return false;
+                    }
+                    int action = event.getAction();
+                    int code = event.getKeyCode();
+                    if (action == KeyEvent.ACTION_MULTIPLE) {
+                        String chars = event.getCharacters();
+                        if (chars != null && !chars.isEmpty()) {
+                            super.commitText(chars, 1);
+                            sendNativeIme(IME_COMMIT, chars, 0, 0);
                             return true;
                         }
-                        if (code == KeyEvent.KEYCODE_ENTER) {
-                            nativeIme(imeSession, IME_COMMIT, "\n", 0, 0);
+                    }
+                    if (action == KeyEvent.ACTION_DOWN) {
+                        if (code == KeyEvent.KEYCODE_DEL) {
+                            int s = Selection.getSelectionStart(editable);
+                            int e = Selection.getSelectionEnd(editable);
+                            if (s >= 0 && e >= 0) {
+                                int a = Math.min(s, e);
+                                int b = Math.max(s, e);
+                                if (a != b) {
+                                    editable.delete(a, b);
+                                } else if (a > 0) {
+                                    int prev = Character.isLowSurrogate(editable.charAt(a - 1)) && a > 1
+                                            ? a - 2
+                                            : a - 1;
+                                    editable.delete(prev, a);
+                                }
+                            }
+                            BaseInputConnection.removeComposingSpans(editable);
+                            sendNativeIme(IME_KEY_BACKSPACE, "", 0, 0);
+                            return true;
+                        }
+                        if (code == KeyEvent.KEYCODE_FORWARD_DEL) {
+                            sendNativeIme(IME_KEY_FORWARD_DELETE, "", 0, 0);
+                            return true;
+                        }
+                        if (code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                            super.finishComposingText();
+                            sendNativeIme(IME_KEY_ENTER, "", 0, 0);
                             return true;
                         }
                         if (code == KeyEvent.KEYCODE_ESCAPE) {
-                            nativeIme(imeSession, IME_ESCAPE, "", 0, 0);
+                            super.finishComposingText();
+                            sendNativeIme(IME_ESCAPE, "", 0, 0);
                             return true;
+                        }
+                        if (code == KeyEvent.KEYCODE_TAB) {
+                            super.finishComposingText();
+                            sendNativeIme(IME_KEY_TAB, "", event.isShiftPressed() ? 1 : 0, 0);
+                            return true;
+                        }
+                        int nav = -1;
+                        if (code == KeyEvent.KEYCODE_DPAD_LEFT) nav = 0;
+                        else if (code == KeyEvent.KEYCODE_DPAD_RIGHT) nav = 1;
+                        else if (code == KeyEvent.KEYCODE_DPAD_UP) nav = 2;
+                        else if (code == KeyEvent.KEYCODE_DPAD_DOWN) nav = 3;
+                        else if (code == KeyEvent.KEYCODE_MOVE_HOME) nav = 4;
+                        else if (code == KeyEvent.KEYCODE_MOVE_END) nav = 5;
+                        if (nav >= 0) {
+                            super.finishComposingText();
+                            sendNativeIme(IME_KEY_NAV, "", nav, 0);
+                            return true;
+                        }
+                        if (!event.isCtrlPressed() && !event.isMetaPressed() && !event.isAltPressed()) {
+                            int unicode = event.getUnicodeChar();
+                            if (unicode > 0 && !Character.isISOControl(unicode)) {
+                                String s = new String(Character.toChars(unicode));
+                                super.commitText(s, 1);
+                                sendNativeIme(IME_COMMIT, s, 0, 0);
+                                return true;
+                            }
+                        }
+                    }
+                    if (action == KeyEvent.ACTION_UP) {
+                        if (isHandledKeyCode(code)) {
+                            return true;
+                        }
+                        if (!event.isCtrlPressed() && !event.isMetaPressed() && !event.isAltPressed()) {
+                            int unicode = event.getUnicodeChar();
+                            if (unicode > 0 && !Character.isISOControl(unicode)) {
+                                return true;
+                            }
                         }
                     }
                     return super.sendKeyEvent(event);
