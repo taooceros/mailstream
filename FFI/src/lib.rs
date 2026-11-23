@@ -747,6 +747,16 @@ impl Mailstream {
         ENGINE.notify_network_change();
     }
 
+    /// Notifies the engine of a mobile foreground/background lifecycle transition (MS-454).
+    pub fn set_foreground(&self, foreground: bool) {
+        ENGINE.set_foreground(foreground);
+    }
+
+    /// Whether the engine is currently running in foreground mode (MS-454).
+    pub fn is_foreground(&self) -> bool {
+        ENGINE.is_foreground()
+    }
+
     /// Runs one bounded background push-wake sync pass synchronously (for Android FCM service).
     pub fn background_push_wake_blocking(
         &self,

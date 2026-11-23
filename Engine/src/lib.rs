@@ -177,6 +177,9 @@ pub struct Config {
     pub control_socket: bool,
     /// Cross-device settings sync network; `None` in `shots` mode and unit tests that don't sync.
     pub device_sync: Option<peer_sync::Network>,
+    /// Whether the host starts in the foreground; mobile background wakes set this to `false`
+    /// so polling, Push WebSocket and iroh stay idle until the UI opens (MS-454).
+    pub initial_foreground: bool,
 }
 
 impl Config {
@@ -206,6 +209,7 @@ impl Config {
             avatar_web: avatars::web::Internet::shared(),
             control_socket: true,
             device_sync: Some(peer_sync::Network::Public),
+            initial_foreground: true,
         };
         #[cfg(feature = "shots")]
         let config = shots::config(config);
@@ -305,6 +309,8 @@ struct Core {
     support_directory: PathBuf,
     /// Push relay settings provided by the host bundle / config.json, if any (MS-444).
     host_push: Option<push::PushSettings>,
+    /// Host foreground state (`true` on desktop/CLI/daemon; toggled on mobile, MS-454).
+    foreground: tokio::sync::watch::Sender<bool>,
 }
 
 /// One engine; the FFI host keeps one per process.
@@ -369,14 +375,22 @@ impl Engine {
         {
             push_config = push_config.with_settings(&synced);
         }
+        let (foreground, foreground_rx) = tokio::sync::watch::channel(config.initial_foreground);
         let push = Arc::new(push::Push::new(
             push_config,
             directory.clone(),
             &config.endpoints,
             accounts.clone(),
             mail.clone(),
+            foreground_rx.clone(),
         ));
-        let polling = Arc::new(polling::Polling::new(mail.clone(), push.clone(), settings.clone(), events.clone()));
+        let polling = Arc::new(polling::Polling::new(
+            mail.clone(),
+            push.clone(),
+            settings.clone(),
+            events.clone(),
+            foreground_rx.clone(),
+        ));
         let avatars = {
             let (accounts, mail) = (accounts.clone(), mail.clone());
             Arc::new(avatars::Avatars::new(
@@ -393,6 +407,7 @@ impl Engine {
             settings.clone(),
             events.clone(),
             avatars.clone(),
+            foreground_rx.clone(),
         ));
         let calendar = Arc::new(calendar::CalendarStore::new(
             mail.clone(),
@@ -400,6 +415,7 @@ impl Engine {
             config.endpoints.graph.clone(),
             accounts.clone(),
             events.clone(),
+            foreground_rx.clone(),
         ));
         let device_sync = config.device_sync.clone().filter(|_| {
             #[cfg(feature = "shots")]
@@ -411,12 +427,14 @@ impl Engine {
                 true
             }
         }).map(|network| {
-            device_sync::DeviceSync::start(
+            device_sync::DeviceSync::start_with_foreground(
                 directory.clone(),
                 network,
                 settings.clone(),
                 events.clone(),
                 Some(mail.peer_mail()),
+                foreground_rx.clone(),
+                device_sync::BACKGROUND_SUSPEND_DELAY,
             )
         });
         let bridge_sync = device_sync.as_ref().map(Arc::downgrade);
@@ -452,6 +470,7 @@ impl Engine {
             notified,
             support_directory: directory.clone(),
             host_push,
+            foreground,
         });
         if let Some(sync) = &core.device_sync {
             let host: std::sync::Weak<dyn account_sync::AccountHost> = Arc::downgrade(&core) as _;
@@ -592,10 +611,54 @@ impl Engine {
         self.core.push.on_fcm_config(handler);
     }
 
-    /// Announces a platform network transition (e.g. Android `ConnectivityManager`) so push
-    /// reconnects immediately instead of waiting out backoff.
+    /// Whether the engine is currently in foreground mode (`true` by default).
+    pub fn is_foreground(&self) -> bool {
+        *self.core.foreground.borrow()
+    }
+
+    /// Notifies the engine of a mobile foreground/background lifecycle transition (MS-454).
+    ///
+    /// Moving to the background pauses foreground mail/chat/calendar polling, closes the live
+    /// Push WebSocket, suspends `device_sync` after a short grace period, and flushes + WAL
+    /// checkpoints `mail.db`. Returning to the foreground immediately catches up mail/chat and
+    /// reconnects Push and iroh `device_sync`.
+    pub fn set_foreground(&self, foreground: bool) {
+        let changed = self.core.foreground.send_if_modified(|current| {
+            let diff = *current != foreground;
+            *current = foreground;
+            diff
+        });
+        if changed && !foreground {
+            let mail = self.core.mail.clone();
+            self.runtime.spawn(async move {
+                mail.checkpoint().await;
+            });
+        }
+    }
+
+    /// Announces a platform network transition (e.g. Android `ConnectivityManager` Wi-Fi <-> 5G
+    /// switch or recovery from Doze) so Push, iroh, mail and chat reconnect immediately while in
+    /// the foreground. Ignored while backgrounded to avoid background spin (MS-454).
     pub fn notify_network_change(&self) {
-        signal::ProcessSignal::NETWORK_CHANGE.post();
+        if !self.is_foreground() {
+            return;
+        }
+        let _entered = self.runtime.enter();
+        self.core.push.network_changed();
+        self.core.polling.network_changed();
+        self.core.chat.network_changed();
+        if let Some(sync) = &self.core.device_sync {
+            sync.network_changed();
+        }
+    }
+
+    /// Flushes queued writes and runs a passive WAL checkpoint on `mail.db` (MS-454).
+    pub fn checkpoint_mail(&self) -> impl Future<Output = ()> + Send + 'static {
+        let mail = self.core.mail.clone();
+        let task = self.runtime.spawn(async move { mail.checkpoint().await });
+        async move {
+            let _ = task.await;
+        }
     }
 
     /// Flushes queued `mail.db` writes before a background service exits.
@@ -720,6 +783,19 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn direct_peers(&self) -> usize {
         self.core.mail.peer_mail().direct_connected_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_device_sync_suspend_delay(&self, delay: std::time::Duration) {
+        if let Some(sync) = &self.core.device_sync {
+            sync.set_background_suspend_delay(delay);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_device_sync_endpoint_open(&self) -> bool {
+        let Some(sync) = self.core.device_sync.clone() else { return false };
+        self.runtime.block_on(sync.is_endpoint_open())
     }
 }
 

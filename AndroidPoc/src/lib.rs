@@ -22,6 +22,8 @@ mod android_entry {
     static IME_ANIMATING: AtomicBool = AtomicBool::new(false);
     static FONT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
     static DISPLAY_DENSITY: AtomicU32 = AtomicU32::new(0);
+    static FOREGROUND: AtomicBool = AtomicBool::new(false);
+    static ENGINE_CONFIGURED: AtomicBool = AtomicBool::new(false);
 
     /// Receives 120 Hz IME inset updates from `WindowInsetsAnimation.Callback` via lock-free
     /// atomics and wakes only the next hardware vsync (`frame_source::schedule_frame()`),
@@ -121,6 +123,32 @@ mod android_entry {
         jni::request_trim_memory(level);
     }
 
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeSetForeground(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        foreground: u8,
+    ) {
+        let fg = foreground != 0;
+        FOREGROUND.store(fg, Ordering::SeqCst);
+        if ENGINE_CONFIGURED.load(Ordering::Acquire) {
+            log::info!("mailstream-android: engine set_foreground({fg})");
+            mailstream::Mailstream::new().set_foreground(fg);
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeNetworkChanged(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+    ) {
+        if !ENGINE_CONFIGURED.load(Ordering::Acquire) || !FOREGROUND.load(Ordering::Acquire) {
+            return;
+        }
+        log::info!("mailstream-android: default network changed — notifying engine");
+        mailstream::Mailstream::new().notify_network_change();
+    }
+
     fn android_font_scale() -> f32 {
         let scale = f32::from_bits(FONT_SCALE.load(Ordering::Relaxed));
         if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
@@ -188,16 +216,18 @@ mod android_entry {
         unsafe { (fns.v1_1.NewStringUTF)(env, cstr.as_ptr()) }
     }
 
-    fn configure_android_engine(support_dir: PathBuf, cache_dir: PathBuf) {
+    fn configure_android_engine(support_dir: PathBuf, cache_dir: PathBuf, initial_foreground: bool) {
         let mut config = Config::for_this_app().in_directory(support_dir);
         config.cache_directory = cache_dir;
         config.control_socket = false;
+        config.initial_foreground = initial_foreground;
         config.oauth.open_url = std::sync::Arc::new(|url| {
             if let Err(err) = gpui_mobile::packages::url_launcher::launch_url(url) {
                 log::warn!("mailstream-android: open_url failed: {err}");
             }
         });
         let _ = mailstream::configure_engine(config);
+        ENGINE_CONFIGURED.store(true, Ordering::Release);
     }
 
     fn init_android_logger_once() {
@@ -258,19 +288,10 @@ mod android_entry {
         }
         let support_path = PathBuf::from(support);
         let cache_path = if cache.is_empty() { support_path.join("cache") } else { PathBuf::from(cache) };
-        configure_android_engine(support_path, cache_path);
+        configure_android_engine(support_path, cache_path, FOREGROUND.load(Ordering::Acquire));
         let engine = mailstream::Mailstream::new();
         log::info!("mailstream-android: registering FCM token for device={device_id}");
         engine.set_fcm_device(device_id, token);
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn Java_dev_gpui_mobile_MailstreamFcm_nativeNetworkChanged(
-        _env: *mut ::jni::sys::JNIEnv,
-        _class: ::jni::sys::jclass,
-    ) {
-        let engine = mailstream::Mailstream::new();
-        engine.notify_network_change();
     }
 
     #[unsafe(no_mangle)]
@@ -294,7 +315,7 @@ mod android_entry {
         }
         let support_path = PathBuf::from(support);
         let cache_path = if cache.is_empty() { support_path.join("cache") } else { PathBuf::from(cache) };
-        configure_android_engine(support_path, cache_path);
+        configure_android_engine(support_path, cache_path, FOREGROUND.load(Ordering::Acquire));
         let engine = mailstream::Mailstream::new();
         let items = engine.background_push_wake_blocking(
             if source.is_empty() { "mail".into() } else { source },
@@ -325,7 +346,7 @@ mod android_entry {
         }
         let support_path = PathBuf::from(support);
         let cache_path = if cache.is_empty() { support_path.join("cache") } else { PathBuf::from(cache) };
-        configure_android_engine(support_path, cache_path);
+        configure_android_engine(support_path, cache_path, FOREGROUND.load(Ordering::Acquire));
         let engine = mailstream::Mailstream::new();
         if let Err(err) = engine.run_notification_action_blocking(&tag, &action_id) {
             log::warn!("mailstream-android: notification action {action_id} failed for {tag}: {err}");
@@ -344,6 +365,8 @@ mod android_entry {
         mailstream_gpui::design::compact::set_font_scale_provider(android_font_scale);
         mailstream_gpui::design::compact::set_long_press_haptic_provider(android_long_press_haptic);
         mailstream_gpui::init(cx);
+        // Sync any foreground/background transition that arrived while `android_main` initialized.
+        mailstream::Mailstream::new().set_foreground(FOREGROUND.load(Ordering::Acquire));
         mailstream::Mailstream::new().on_fcm_config(|fcm| {
             if let Err(err) = jni::init_fcm_options_via_jni(
                 &fcm.app_id,
@@ -419,7 +442,7 @@ mod android_entry {
         let cache_dir = jni::query_cache_dir_via_jni()
             .unwrap_or_else(|| support_dir.join("cache"));
         jni::set_pipeline_cache_dir(cache_dir.join("wgpu-pipeline-cache"));
-        configure_android_engine(support_dir, cache_dir);
+        configure_android_engine(support_dir, cache_dir, FOREGROUND.load(Ordering::Acquire));
 
         Application::with_platform(shared.into_rc())
             .with_assets(mailstream_gpui::Assets)
@@ -435,7 +458,8 @@ mod android_entry {
     pub fn start_hosted(support_dir: PathBuf) {
         let cache_dir = support_dir.join("cache");
         jni::set_pipeline_cache_dir(cache_dir.join("wgpu-pipeline-cache"));
-        configure_android_engine(support_dir, cache_dir);
+        FOREGROUND.store(true, Ordering::SeqCst);
+        configure_android_engine(support_dir, cache_dir, true);
         host::start_with_assets(mailstream_gpui::Assets, |cx| {
             launch_mailstream_ui(cx);
         });

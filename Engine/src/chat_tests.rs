@@ -447,3 +447,58 @@ fn summarize_fetches_read_state_messages_and_members_concurrently() {
     drop(engine);
     cleanup(&config);
 }
+
+#[test]
+fn background_pauses_open_space_fast_poll_and_resume_catches_up() {
+    let offline = Arc::new(AtomicBool::new(false));
+    let switch = offline.clone();
+    let server = FakeServer::start(move |request| chat_reply(request, &switch));
+    let config = config_for(&server);
+    std::fs::write(config.support_directory.join("settings.json"), "{\n  \"chat.pollSeconds\" : 5\n}\n").unwrap();
+    let engine = Engine::start(config.clone());
+
+    wait_until("initial chat spaces", || names(&spaces(&engine)).len() == 3);
+    let open = json!({ "account": ME, "space": "spaces/A" });
+    call(&engine, "chat.open", open.clone()).unwrap();
+    wait_until("open space loaded", || call(&engine, "chat.messages", open.clone()).unwrap()["loaded"] == json!(true));
+
+    // Enter background: both space-list poll (1s) and open-space fast poll (3s) stop completely.
+    engine.set_foreground(false);
+    std::thread::sleep(Duration::from_millis(200));
+    let spaces_bg = requests(&server, "GET", "/chat/v1/spaces").len();
+    let msgs_bg = requests(&server, "GET", "/chat/v1/spaces/A/messages").len();
+
+    // Network change while backgrounded must also remain silent.
+    engine.notify_network_change();
+    std::thread::sleep(Duration::from_millis(3600));
+    assert_eq!(
+        requests(&server, "GET", "/chat/v1/spaces").len(),
+        spaces_bg,
+        "space-list poll must stay paused in background"
+    );
+    assert_eq!(
+        requests(&server, "GET", "/chat/v1/spaces/A/messages").len(),
+        msgs_bg,
+        "open-space fast poll must stay paused in background"
+    );
+
+    // Return to foreground: immediate catch-up for both space list and open space.
+    engine.set_foreground(true);
+    wait_until("foreground resume refreshes chat spaces", || {
+        requests(&server, "GET", "/chat/v1/spaces").len() > spaces_bg
+    });
+    wait_until("foreground resume refreshes open space", || {
+        requests(&server, "GET", "/chat/v1/spaces/A/messages").len() > msgs_bg
+    });
+
+    // Network switch while foregrounded triggers immediate Chat refresh.
+    std::thread::sleep(Duration::from_millis(150));
+    let msgs_before_net = requests(&server, "GET", "/chat/v1/spaces/A/messages").len();
+    engine.notify_network_change();
+    wait_until("network change refreshes open space in foreground", || {
+        requests(&server, "GET", "/chat/v1/spaces/A/messages").len() > msgs_before_net
+    });
+
+    drop(engine);
+    cleanup(&config);
+}

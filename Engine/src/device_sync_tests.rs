@@ -728,3 +728,48 @@ fn offline_edit_ordering_respects_newest_change_across_peers() {
     drop(engine_a);
     drop(engine_b);
 }
+
+/// MS-454: staying in the background suspends the iroh endpoint without pausing the group on disk,
+/// and returning to the foreground reopens it and resumes syncing with peers.
+#[test]
+fn background_suspends_iroh_endpoint_and_foreground_reopens_and_syncs() {
+    let lookup = MemoryLookup::new();
+    let cfg_a = sync_config(&lookup);
+    let cfg_b = sync_config(&lookup);
+
+    let engine_a = Engine::start(cfg_a.clone());
+    engine_a.set_device_sync_suspend_delay(Duration::from_millis(150));
+    let engine_b = Engine::start(cfg_b.clone());
+
+    call(&engine_a, "sync.enable", json!({})).unwrap();
+    let ticket = call(&engine_a, "sync.pair_ticket", json!({}))
+        .unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&engine_b, "sync.join", json!({ "ticket": ticket })).unwrap();
+    call(&engine_a, "config.set", json!({ "key": "autoRead.days", "value": "5" })).unwrap();
+    until("initial sync baseline", || setting_value(&engine_b, "autoRead.days") == json!(5));
+    assert!(engine_a.is_device_sync_endpoint_open());
+
+    // Device A enters background: after the grace period its iroh endpoint closes cleanly,
+    // while sync.json stays unpaused.
+    engine_a.set_foreground(false);
+    until("A suspends iroh endpoint in background", || !engine_a.is_device_sync_endpoint_open());
+    let stored = crate::peer_sync::PeerSync::stored(&cfg_a.support_directory).unwrap();
+    assert!(!stored.paused, "background suspension must not mark the group paused on disk");
+    assert!(stored.namespace.is_some());
+
+    // Device B edits a setting while A is suspended in background.
+    call(&engine_b, "config.set", json!({ "key": "autoRead.days", "value": "19" })).unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(!engine_a.is_device_sync_endpoint_open(), "A must remain suspended while backgrounded");
+
+    // Device A returns to foreground: iroh endpoint reopens and syncs B's update.
+    engine_a.set_foreground(true);
+    until("A reopens iroh endpoint on foreground", || engine_a.is_device_sync_endpoint_open());
+    until("A receives B's setting after foreground resume", || setting_value(&engine_a, "autoRead.days") == json!(19));
+
+    drop(engine_a);
+    drop(engine_b);
+}

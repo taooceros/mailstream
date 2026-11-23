@@ -282,6 +282,11 @@ impl Mail {
         self.cache.flush().await;
     }
 
+    /// Flushes queued writes and runs a passive WAL checkpoint on `mail.db` (MS-454).
+    pub async fn checkpoint(&self) {
+        self.cache.checkpoint().await;
+    }
+
     /// Subscribes to newly arrived unread inbox mail events (`mailstream mail watch`, MS-452).
     pub fn subscribe_new_mail(&self) -> tokio::sync::broadcast::Receiver<answers::NewMail> {
         self.new_mail.subscribe()

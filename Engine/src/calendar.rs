@@ -122,10 +122,18 @@ pub struct CalendarStore {
     state: Mutex<State>,
     /// Wakes the timer: accounts changed.
     wake: tokio::sync::Notify,
+    foreground: tokio::sync::watch::Receiver<bool>,
 }
 
 impl CalendarStore {
-    pub fn new(mail: Arc<Mail>, google: String, graph: String, accounts: Arc<Accounts>, events: Arc<Events>) -> Self {
+    pub fn new(
+        mail: Arc<Mail>,
+        google: String,
+        graph: String,
+        accounts: Arc<Accounts>,
+        events: Arc<Events>,
+        foreground: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
         Self {
             cache: mail.cache(),
             mail,
@@ -135,6 +143,7 @@ impl CalendarStore {
             graph,
             state: Mutex::new(State::default()),
             wake: tokio::sync::Notify::new(),
+            foreground,
         }
     }
 
@@ -157,12 +166,21 @@ impl CalendarStore {
     pub async fn start(self: Arc<Self>) {
         self.sync_accounts().await;
         let store = self.clone();
+        let mut fg = self.foreground.clone();
         tokio::spawn(async move {
             loop {
+                if !crate::polling::wait_foreground(&mut fg).await {
+                    return;
+                }
                 store.fetch_due(|_| false);
                 tokio::select! {
                     () = tokio::time::sleep(CHECK) => {}
                     () = store.wake.notified() => {}
+                    res = fg.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         });

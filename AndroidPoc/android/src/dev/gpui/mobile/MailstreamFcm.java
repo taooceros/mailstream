@@ -2,8 +2,6 @@ package dev.gpui.mobile;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.net.ConnectivityManager;
-import android.net.Network;
 import android.util.Log;
 
 import com.google.firebase.FirebaseApp;
@@ -11,11 +9,11 @@ import com.google.firebase.FirebaseOptions;
 import com.google.firebase.messaging.FirebaseMessaging;
 
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Manages Android FCM initialization (baked google-services.json or runtime Device Sync options),
- * token fetching, and ConnectivityManager network-change notifications to Rust Engine (MS-443).
+ * Manages Android FCM initialization (baked google-services.json or runtime Device Sync options)
+ * and token fetching (MS-443). Foreground network monitoring lives in {@link GpuiInputActivity}
+ * so backgrounded processes never wake on network transitions (MS-454).
  */
 public final class MailstreamFcm {
     private static final String TAG = "MailstreamFcm";
@@ -26,13 +24,9 @@ public final class MailstreamFcm {
     private static final String KEY_PROJECT_ID = "fcm_project_id";
     private static final String KEY_SENDER_ID = "fcm_sender_id";
 
-    private static final AtomicBoolean NETWORK_CALLBACK_REGISTERED = new AtomicBoolean(false);
-    private static volatile boolean seenInitialNetwork = false;
-
     private MailstreamFcm() {}
 
     private static native void nativeOnFcmToken(String supportDir, String cacheDir, String deviceId, String token);
-    private static native void nativeNetworkChanged();
 
     public static String deviceId(final Context context) {
         SharedPreferences prefs = context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -44,14 +38,12 @@ public final class MailstreamFcm {
         return id;
     }
 
-    /** Called from Activity.onCreate to start FCM token sync and network monitoring. */
+    /** Called from Activity.onCreate to start FCM token sync. */
     public static void start(final Context context) {
         if (context == null) {
             return;
         }
-        Context appCtx = context.getApplicationContext();
-        registerNetworkCallback(appCtx);
-        fetchAndReportToken(appCtx);
+        fetchAndReportToken(context.getApplicationContext());
     }
 
     /**
@@ -173,33 +165,6 @@ public final class MailstreamFcm {
         }
     }
 
-    public static void registerNetworkCallback(final Context context) {
-        if (context == null || !NETWORK_CALLBACK_REGISTERED.compareAndSet(false, true)) {
-            return;
-        }
-        try {
-            ConnectivityManager cm = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm == null) {
-                return;
-            }
-            cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
-                @Override
-                public void onAvailable(Network network) {
-                    if (!seenInitialNetwork) {
-                        seenInitialNetwork = true;
-                        return;
-                    }
-                    try {
-                        nativeNetworkChanged();
-                    } catch (UnsatisfiedLinkError ignored) {
-                    }
-                }
-            });
-        } catch (Throwable t) {
-            NETWORK_CALLBACK_REGISTERED.set(false);
-            Log.w(TAG, "Failed to register ConnectivityManager callback", t);
-        }
-    }
 
     private static boolean isEmpty(final String s) {
         return s == null || s.trim().isEmpty();

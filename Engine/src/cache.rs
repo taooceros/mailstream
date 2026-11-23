@@ -91,6 +91,7 @@ enum Write {
     Tags(Vec<(String, Vec<u8>)>),
     ClearTags,
     Flush(oneshot::Sender<()>),
+    Checkpoint(oneshot::Sender<()>),
 }
 
 /// The opened database, or why it could not open (it is then left alone, as the Swift engine
@@ -205,9 +206,26 @@ impl MailCache {
     async fn writer(database: Arc<Database>, mut queue: mpsc::UnboundedReceiver<Write>) {
         let mut connection: Option<turso::Connection> = None;
         while let Some(write) = queue.recv().await {
-            if let Write::Flush(done) = write {
-                let _ = done.send(());
-                continue;
+            match write {
+                Write::Flush(done) => {
+                    let _ = done.send(());
+                    continue;
+                }
+                Write::Checkpoint(done) => {
+                    if let Some(db) = connection.as_ref() {
+                        match db.query("PRAGMA wal_checkpoint(PASSIVE)", ()).await {
+                            Ok(mut rows) => {
+                                while let Ok(Some(_)) = rows.next().await {}
+                            }
+                            Err(error) => {
+                                eprintln!("Mailstream database checkpoint: {error}");
+                            }
+                        }
+                    }
+                    let _ = done.send(());
+                    continue;
+                }
+                _ => {}
             }
             // Tag writes tell every Mailstream process to read the tags again, landed or not,
             // as the Swift engine's `MailCache.saveTags` does.
@@ -239,7 +257,7 @@ impl MailCache {
                 Write::Listing { key, listing } => Self::replace_listing(db, key, listing).await,
                 Write::Tags(tags) => Self::set_tags(db, tags).await,
                 Write::ClearTags => db.execute("DELETE FROM tags", ()).await.map(drop),
-                Write::Flush(_) => unreachable!("answered above"),
+                Write::Flush(_) | Write::Checkpoint(_) => unreachable!("answered above"),
             };
             if let Err(error) = result {
                 eprintln!("Mailstream database: {error}");
@@ -305,6 +323,15 @@ impl MailCache {
     pub async fn flush(&self) {
         let (done, landed) = oneshot::channel();
         if self.writes.send(Write::Flush(done)).is_ok() {
+            let _ = landed.await;
+        }
+    }
+
+    /// Lands every queued write and runs a passive WAL checkpoint so recent writes are flushed
+    /// into `mail.db` before the OS can suspend or kill a backgrounded process (MS-454).
+    pub async fn checkpoint(&self) {
+        let (done, landed) = oneshot::channel();
+        if self.writes.send(Write::Checkpoint(done)).is_ok() {
             let _ = landed.await;
         }
     }
@@ -679,6 +706,21 @@ pub(crate) mod tests {
         cache.flush().await;
         let listing = cache.load_listing(&key).await.unwrap();
         assert!(listing.envelopes.is_empty() && listing.next.is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_flushes_queued_writes_and_runs_wal_checkpoint() {
+        let directory = std::env::temp_dir().join(format!("mailstream-cache-ckpt-{}-{}", std::process::id(), crate::testkit::unique()));
+        let db_path = directory.join("mail.db");
+        let cache = MailCache::new(db_path.clone(), directory.join("files"));
+        let key = MailboxKey::new("me@x.com", "INBOX");
+        cache.save_listing(CachedListing { envelopes: vec![Arc::new(envelope("c1", 42.0))], next: None }, &key);
+        cache.checkpoint().await;
+        let loaded = cache.load_listing(&key).await.expect("listing persisted after checkpoint");
+        assert_eq!(loaded.envelopes.len(), 1);
+        assert_eq!(loaded.envelopes[0].id, "c1");
+        assert!(db_path.exists());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

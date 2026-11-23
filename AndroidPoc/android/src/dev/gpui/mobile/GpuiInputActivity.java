@@ -7,6 +7,10 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
@@ -54,6 +58,7 @@ public class GpuiInputActivity extends NativeActivity {
     private static final int IME_SET_SELECTION = 11;
     private static final int IME_SET_COMPOSING_REGION = 12;
     private static final int REQ_POST_NOTIFICATIONS = 1001;
+    private static final long NETWORK_NOTIFY_DEBOUNCE_MS = 500L;
     private static final String PREFS_PERMS = "mailstream_perm_prefs";
     private static final String KEY_ASKED_NOTIF = "asked_post_notifications";
     private volatile long imeSession = 0;
@@ -68,6 +73,16 @@ public class GpuiInputActivity extends NativeActivity {
     private boolean imeAnimating = false;
     private int lastNavBarBottomPx = 0;
     private int imeTargetBottomPx = 0;
+    private volatile boolean activityForeground = false;
+    private final Object networkLock = new Object();
+    private ConnectivityManager.NetworkCallback networkCallback = null;
+    private boolean seenInitialNetwork = false;
+    private boolean networkLostSinceLast = false;
+    private long activeNetworkHandle = -1L;
+    private int activeTransportMask = 0;
+    private boolean activeValidated = false;
+    private long lastNetworkNotifyElapsedMs = 0L;
+
     static {
         System.loadLibrary("mailstream_android_poc");
     }
@@ -82,6 +97,8 @@ public class GpuiInputActivity extends NativeActivity {
     private static native void nativeBackCancelled();
     private static native void nativeTrimMemory(int level);
     private static native void nativeNotificationResponse(String tag, String actionId);
+    private static native void nativeSetForeground(boolean foreground);
+    private static native void nativeNetworkChanged();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -148,6 +165,169 @@ public class GpuiInputActivity extends NativeActivity {
         maybeRequestNotificationPermission();
         MailstreamFcm.start(this);
         deliverNotificationIntent(getIntent());
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        activityForeground = true;
+        try {
+            nativeSetForeground(true);
+        } catch (UnsatisfiedLinkError ignored) {
+        }
+        registerNetworkCallback();
+    }
+
+    @Override
+    protected void onStop() {
+        activityForeground = false;
+        unregisterNetworkCallback();
+        try {
+            nativeSetForeground(false);
+        } catch (UnsatisfiedLinkError ignored) {
+        }
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        activityForeground = false;
+        unregisterNetworkCallback();
+        super.onDestroy();
+    }
+
+    private void registerNetworkCallback() {
+        synchronized (networkLock) {
+            if (networkCallback != null) {
+                return;
+            }
+            final ConnectivityManager cm =
+                (ConnectivityManager) getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return;
+            }
+            seenInitialNetwork = false;
+            networkLostSinceLast = false;
+            activeNetworkHandle = -1L;
+            activeTransportMask = 0;
+            activeValidated = false;
+            ConnectivityManager.NetworkCallback cb = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    if (network == null) {
+                        return;
+                    }
+                    NetworkCapabilities caps = null;
+                    try {
+                        caps = cm.getNetworkCapabilities(network);
+                    } catch (Throwable ignored) {
+                    }
+                    handleNetworkUpdate(network.getNetworkHandle(), caps, true);
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                    if (network == null || caps == null) {
+                        return;
+                    }
+                    handleNetworkUpdate(network.getNetworkHandle(), caps, false);
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    synchronized (networkLock) {
+                        if (network == null || activeNetworkHandle == -1L
+                                || network.getNetworkHandle() == activeNetworkHandle) {
+                            networkLostSinceLast = true;
+                            activeNetworkHandle = -1L;
+                            activeTransportMask = 0;
+                            activeValidated = false;
+                        }
+                    }
+                }
+            };
+            try {
+                cm.registerDefaultNetworkCallback(cb);
+                networkCallback = cb;
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to register ConnectivityManager callback", t);
+            }
+        }
+    }
+
+    private void unregisterNetworkCallback() {
+        synchronized (networkLock) {
+            ConnectivityManager.NetworkCallback cb = networkCallback;
+            networkCallback = null;
+            if (cb == null) {
+                return;
+            }
+            try {
+                ConnectivityManager cm =
+                    (ConnectivityManager) getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    cm.unregisterNetworkCallback(cb);
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to unregister ConnectivityManager callback", t);
+            }
+        }
+    }
+
+    private void handleNetworkUpdate(long handle, NetworkCapabilities caps, boolean fromAvailable) {
+        int transportMask = computeTransportMask(caps);
+        boolean validated = caps != null
+            && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        boolean shouldNotify = false;
+        synchronized (networkLock) {
+            if (!seenInitialNetwork) {
+                seenInitialNetwork = true;
+                networkLostSinceLast = false;
+                activeNetworkHandle = handle;
+                if (caps != null) {
+                    activeTransportMask = transportMask;
+                    activeValidated = validated;
+                }
+                return;
+            }
+            boolean handleChanged = activeNetworkHandle != -1L && handle != activeNetworkHandle;
+            boolean recoveredAfterLoss = networkLostSinceLast;
+            boolean transportChanged = caps != null && activeTransportMask != 0 && transportMask != activeTransportMask;
+            boolean becameValidated = caps != null && !activeValidated && validated;
+            if (handleChanged || recoveredAfterLoss || transportChanged || becameValidated) {
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastNetworkNotifyElapsedMs >= NETWORK_NOTIFY_DEBOUNCE_MS) {
+                    lastNetworkNotifyElapsedMs = now;
+                    shouldNotify = activityForeground;
+                }
+            }
+            if (fromAvailable || handle != activeNetworkHandle) {
+                activeNetworkHandle = handle;
+            }
+            networkLostSinceLast = false;
+            if (caps != null) {
+                activeTransportMask = transportMask;
+                activeValidated = validated;
+            }
+        }
+        if (shouldNotify) {
+            try {
+                nativeNetworkChanged();
+            } catch (UnsatisfiedLinkError ignored) {
+            }
+        }
+    }
+
+    private static int computeTransportMask(NetworkCapabilities caps) {
+        if (caps == null) {
+            return 0;
+        }
+        int mask = 0;
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) mask |= 1;
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) mask |= 2;
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) mask |= 4;
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) mask |= 8;
+        return mask;
     }
 
     @Override

@@ -278,6 +278,8 @@ enum Ended {
     Failed,
     /// A wake or a network change asked for a fresh socket now.
     Reconnect,
+    /// The app moved to the background; pause the socket until foreground returns (MS-454).
+    Background,
 }
 
 pub struct Push {
@@ -304,6 +306,7 @@ pub struct Push {
     requested: AtomicU64,
     /// The last request the latest finished pass covered.
     passes: tokio::sync::Mutex<u64>,
+    foreground: watch::Receiver<bool>,
 }
 
 impl Push {
@@ -313,6 +316,7 @@ impl Push {
         endpoints: &crate::backend::Endpoints,
         accounts: Arc<Accounts>,
         mail: Arc<Mail>,
+        foreground: watch::Receiver<bool>,
     ) -> Self {
         let file = directory.join("push.json");
         let registrations = read(&file);
@@ -336,6 +340,7 @@ impl Push {
             fcm_device: Mutex::new(fcm_device),
             requested: AtomicU64::new(0),
             passes: tokio::sync::Mutex::new(0),
+            foreground,
         }
     }
 
@@ -570,32 +575,76 @@ impl Push {
         }
         tokio::spawn(self.clone().run_socket());
         let push = self.clone();
+        let mut fg = self.foreground.clone();
         tokio::spawn(async move {
+            let mut was_background = !*fg.borrow_and_update();
             loop {
-                tokio::time::sleep(push.timing.renewal).await;
-                push.check();
+                if was_background {
+                    if !crate::polling::wait_foreground(&mut fg).await {
+                        return;
+                    }
+                    was_background = false;
+                    push.check();
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(push.timing.renewal) => push.check(),
+                    res = fg.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                        if !*fg.borrow_and_update() {
+                            was_background = true;
+                        }
+                    }
+                }
             }
         });
         let push = self.clone();
+        let mut fg = self.foreground.clone();
         tokio::spawn(async move {
             loop {
-                crate::signal::next_wake(push.timing.wake_check).await;
-                push.reconnect_now();
-                push.check();
+                if !crate::polling::wait_foreground(&mut fg).await {
+                    return;
+                }
+                tokio::select! {
+                    () = crate::signal::next_wake(push.timing.wake_check) => {
+                        if *fg.borrow() {
+                            push.reconnect_now();
+                            push.check();
+                        }
+                    }
+                    res = fg.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
+                }
             }
         });
         let push = self.clone();
         tokio::spawn(async move {
             let Some(mut changes) = ProcessSignal::NETWORK_CHANGE.posts() else { return };
             // A socket that is up stays; one that is down (the network was gone) retries now
-            // rather than at the end of its backoff.
+            // rather than at the end of its backoff. Active platform transitions (e.g. Android
+            // Wi-Fi <-> 5G) go through `Push::network_changed`, which forces a rebuild.
             while changes.next().await {
-                if !push.is_connected() {
+                if *push.foreground.borrow() && !push.is_connected() {
                     push.reconnect_now();
                 }
             }
         });
-        self.check();
+        if *self.foreground.borrow() {
+            self.check();
+        }
+    }
+
+    /// Active platform network switch or recovery (e.g. Android Wi-Fi <-> 5G): tears down a
+    /// potentially half-open socket and reconnects immediately while in the foreground (MS-454).
+    pub fn network_changed(self: &Arc<Self>) {
+        if !self.started.load(Ordering::SeqCst) || !*self.foreground.borrow() {
+            return;
+        }
+        self.reconnect_now();
     }
 
     /// Runs a registration pass soon: after account changes, a wake, the hourly renewal.
@@ -643,7 +692,9 @@ impl Push {
     }
 
     fn reconnect_now(&self) {
-        self.reconnect.notify_one();
+        if *self.foreground.borrow() {
+            self.reconnect.notify_one();
+        }
     }
 
     fn set_connected(&self, connected: bool) {
@@ -659,18 +710,30 @@ impl Push {
     /// Keeps a socket open: after a failure it reconnects after 1 s, doubling to at most 60 s,
     /// with jitter so many clients do not reconnect in step.
     async fn run_socket(self: Arc<Self>) {
+        let mut fg = self.foreground.clone();
         let mut failures = 0u32;
         loop {
-            let ended = self.session(&mut failures).await;
+            if !crate::polling::wait_foreground(&mut fg).await {
+                return;
+            }
+            let ended = self.session(&mut failures, &mut fg).await;
             self.set_connected(false);
             match ended {
-                Ended::Reconnect => failures = 0,
+                Ended::Reconnect | Ended::Background => failures = 0,
                 Ended::Failed => {
                     let delay = backoff(&self.timing, failures, jitter());
                     failures += 1;
                     tokio::select! {
                         () = tokio::time::sleep(delay) => {}
                         () = self.reconnect.notified() => failures = 0,
+                        res = fg.changed() => {
+                            if res.is_err() {
+                                return;
+                            }
+                            if !*fg.borrow_and_update() {
+                                failures = 0;
+                            }
+                        }
                     }
                 }
             }
@@ -680,7 +743,10 @@ impl Push {
     /// One socket from connecting to its end. Pings every `ping`; a socket that says nothing
     /// within `silence` of a ping is dead. The first ping goes out at once, so its pong is what
     /// marks the socket connected.
-    async fn session(self: &Arc<Self>, failures: &mut u32) -> Ended {
+    async fn session(self: &Arc<Self>, failures: &mut u32, fg: &mut watch::Receiver<bool>) -> Ended {
+        if !*fg.borrow_and_update() {
+            return Ended::Background;
+        }
         let config = self.config();
         let (Some(url), Some(token)) = (config.socket_url(), PushConfig::configured(&config.token).map(String::from)) else {
             return std::future::pending().await;
@@ -694,6 +760,12 @@ impl Push {
                 _ => return Ended::Failed,
             },
             () = self.reconnect.notified() => return Ended::Reconnect,
+            res = fg.changed() => {
+                if res.is_err() || !*fg.borrow_and_update() {
+                    return Ended::Background;
+                }
+                return Ended::Reconnect;
+            }
         };
         let (mut write, mut read) = stream.split();
         let timing = &self.timing;
@@ -737,8 +809,14 @@ impl Push {
                     }
                 }
                 () = self.reconnect.notified() => {
-                    let _ = write.send(Message::Close(None)).await;
+                    let _ = tokio::time::timeout(Duration::from_millis(250), write.send(Message::Close(None))).await;
                     return Ended::Reconnect;
+                }
+                res = fg.changed() => {
+                    if res.is_err() || !*fg.borrow_and_update() {
+                        let _ = tokio::time::timeout(Duration::from_millis(250), write.send(Message::Close(None))).await;
+                        return Ended::Background;
+                    }
                 }
             }
         }

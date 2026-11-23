@@ -36,6 +36,10 @@ const WAKE_CHECK: Duration = Duration::from_secs(10);
 const JOIN_AT: u64 = 1;
 /// How often closed sync looks whether another process put this device in a group.
 const IDLE_CHECK: Duration = Duration::from_secs(30);
+/// How long an idle backgrounded app waits before closing its iroh endpoint so quick app
+/// switches and OAuth browser handoffs stay warm while long background sessions use zero QUIC
+/// traffic (MS-454).
+pub(crate) const BACKGROUND_SUSPEND_DELAY: Duration = Duration::from_secs(15);
 
 /// Scalar whitelisted settings synced under `v1/setting/<key>`.
 /// `remoteContent.trustedSenders` is synced per address under `v1/trusted/<email>`.
@@ -229,6 +233,10 @@ pub struct DeviceSync {
     mail: Option<Arc<PeerMail>>,
     /// The cloud drop's key as the last reconcile left it, with the group it belongs to (MS-396).
     drop_key: Mutex<Option<(String, DropKey)>>,
+    foreground: watch::Receiver<bool>,
+    /// Keeps `foreground` open when no external lifecycle owner exists (e.g. `sync_node`).
+    _foreground_keepalive: Option<watch::Sender<bool>>,
+    background_suspend_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl DeviceSync {
@@ -240,6 +248,52 @@ impl DeviceSync {
         settings: Arc<Settings>,
         events: Arc<Events>,
         mail: Option<Arc<PeerMail>>,
+    ) -> Arc<Self> {
+        let (tx, rx) = watch::channel(true);
+        Self::start_inner(
+            support_directory,
+            network,
+            settings,
+            events,
+            mail,
+            rx,
+            Some(tx),
+            BACKGROUND_SUSPEND_DELAY,
+        )
+    }
+
+    /// Starts `DeviceSync` following host foreground/background transitions (MS-454).
+    pub(crate) fn start_with_foreground(
+        support_directory: PathBuf,
+        network: Network,
+        settings: Arc<Settings>,
+        events: Arc<Events>,
+        mail: Option<Arc<PeerMail>>,
+        foreground: watch::Receiver<bool>,
+        background_suspend_delay: Duration,
+    ) -> Arc<Self> {
+        Self::start_inner(
+            support_directory,
+            network,
+            settings,
+            events,
+            mail,
+            foreground,
+            None,
+            background_suspend_delay,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_inner(
+        support_directory: PathBuf,
+        network: Network,
+        settings: Arc<Settings>,
+        events: Arc<Events>,
+        mail: Option<Arc<PeerMail>>,
+        foreground: watch::Receiver<bool>,
+        keepalive: Option<watch::Sender<bool>>,
+        background_suspend_delay: Duration,
     ) -> Arc<Self> {
         let (wake_tx, wake_rx) = mpsc::unbounded_channel();
         let this = Arc::new(Self {
@@ -258,11 +312,44 @@ impl DeviceSync {
             accounts: OnceLock::new(),
             mail,
             drop_key: Mutex::new(None),
+            foreground,
+            _foreground_keepalive: keepalive,
+            background_suspend_delay_ms: std::sync::atomic::AtomicU64::new(background_suspend_delay.as_millis() as u64),
         });
         let bridge = tokio::spawn(this.clone().run_loop(wake_rx));
         let cloud = tokio::spawn(this.clone().cloud_loop());
         *this.tasks.lock().expect("device sync task lock") = vec![bridge, cloud];
         this
+    }
+
+    /// Realigns iroh sockets and wakes cloud drop after a platform network transition while in
+    /// the foreground (MS-454).
+    pub fn network_changed(self: &Arc<Self>) {
+        if !*self.foreground.borrow() {
+            return;
+        }
+        let sync = self.clone();
+        tokio::spawn(async move {
+            if let Some(peer) = sync.sync.read().await.as_ref() {
+                peer.realign().await;
+            }
+            sync.cloud_wake.notify_one();
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn is_endpoint_open(&self) -> bool {
+        self.sync.read().await.is_some()
+    }
+
+    fn background_suspend_delay(&self) -> Duration {
+        Duration::from_millis(self.background_suspend_delay_ms.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_background_suspend_delay(&self, delay: Duration) {
+        self.background_suspend_delay_ms
+            .store(delay.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Wakes the bridge after `settings.json` changed.
@@ -346,18 +433,38 @@ impl DeviceSync {
     }
 
     async fn run_loop(self: Arc<Self>, mut wake_rx: mpsc::UnboundedReceiver<()>) {
+        let mut fg = self.foreground.clone();
         let mut changes: Option<watch::Receiver<u64>> = None;
+        let mut suspend_at: Option<tokio::time::Instant> = None;
         loop {
             if changes.is_some() && self.sync.read().await.is_none() {
                 changes = None;
+                suspend_at = None;
             }
             if changes.is_none() {
+                if !*fg.borrow_and_update() && self.sync.read().await.is_none() {
+                    tokio::select! {
+                        res = fg.changed() => {
+                            if res.is_err() {
+                                return;
+                            }
+                        }
+                        msg = wake_rx.recv() => {
+                            if msg.is_none() {
+                                return;
+                            }
+                            while wake_rx.try_recv().is_ok() {}
+                        }
+                    }
+                    continue;
+                }
                 // Stays closed while this device syncs no group; the command that opens sync
                 // wakes this, and so does `IDLE_CHECK` once another process joined a group.
                 let delay = if self.sync.read().await.is_some() || self.syncing_on_disk() {
                     match self.ensure_open().await {
                         Ok(rx) => {
                             changes = rx;
+                            suspend_at = (!*fg.borrow()).then(|| tokio::time::Instant::now() + self.background_suspend_delay());
                             let _ = self.reconcile_and_report().await;
                             self.events.emit("deviceSync");
                             self.cloud_wake.notify_one();
@@ -377,14 +484,23 @@ impl DeviceSync {
                         }
                         while wake_rx.try_recv().is_ok() {}
                     }
+                    res = fg.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
                 }
                 continue;
+            }
+            if !*fg.borrow() && suspend_at.is_none() {
+                suspend_at = Some(tokio::time::Instant::now() + self.background_suspend_delay());
             }
             let rx = changes.as_mut().expect("opened above");
             tokio::select! {
                 res = rx.changed() => {
                     if res.is_err() {
                         changes = None;
+                        suspend_at = None;
                         continue;
                     }
                     self.meta.lock().expect("meta lock").last_sync_ms = Some(now_ms());
@@ -402,30 +518,82 @@ impl DeviceSync {
                     }
                     self.cloud_wake.notify_one();
                 }
+                () = async {
+                    match suspend_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if !*fg.borrow() {
+                        if self.open_invites().await == 0 {
+                            self.suspend_for_background().await;
+                            changes = None;
+                            suspend_at = None;
+                        } else {
+                            suspend_at = Some(tokio::time::Instant::now() + self.background_suspend_delay());
+                        }
+                    } else {
+                        suspend_at = None;
+                    }
+                }
+                res = fg.changed() => {
+                    if res.is_err() {
+                        return;
+                    }
+                    if *fg.borrow_and_update() {
+                        suspend_at = None;
+                        if let Some(peer) = self.sync.read().await.as_ref() {
+                            peer.realign().await;
+                        }
+                        self.cloud_wake.notify_one();
+                    } else {
+                        suspend_at = Some(tokio::time::Instant::now() + self.background_suspend_delay());
+                    }
+                }
             }
         }
     }
 
     /// Exchanges with the cloud drop when asked (after opening and after every local or synced
     /// change), every [`cloud_drop::POLL`] ([`cloud_drop::RETRY`] after a failure), and after a
-    /// network change or a wake.
+    /// network change or a wake. Pauses while in the background (MS-454).
     async fn cloud_loop(self: Arc<Self>) {
+        let mut fg = self.foreground.clone();
+        let mut was_background = !*fg.borrow_and_update();
         let mut network = ProcessSignal::NETWORK_CHANGE.posts();
         let mut delay = cloud_drop::POLL;
         loop {
-            let network_closed = tokio::select! {
-                _ = self.cloud_wake.notified() => false,
-                _ = tokio::time::sleep(delay) => false,
-                _ = next_wake(WAKE_CHECK) => false,
+            if was_background {
+                if !crate::polling::wait_foreground(&mut fg).await {
+                    return;
+                }
+                was_background = false;
+                delay = if self.cloud_exchange().await { cloud_drop::POLL } else { cloud_drop::RETRY };
+                continue;
+            }
+            let (network_closed, backgrounded) = tokio::select! {
+                _ = self.cloud_wake.notified() => (false, false),
+                _ = tokio::time::sleep(delay) => (false, false),
+                _ = next_wake(WAKE_CHECK) => (false, false),
                 posted = async {
                     match network.as_mut() {
                         Some(posts) => posts.next().await,
                         None => std::future::pending().await,
                     }
-                } => !posted,
+                } => (!posted, false),
+                res = fg.changed() => {
+                    if res.is_err() {
+                        return;
+                    }
+                    (false, !*fg.borrow_and_update())
+                }
             };
             if network_closed {
                 network = None;
+            }
+            if backgrounded {
+                was_background = true;
+                continue;
             }
             delay = if self.cloud_exchange().await { cloud_drop::POLL } else { cloud_drop::RETRY };
         }
@@ -490,7 +658,7 @@ impl DeviceSync {
             return Ok(Some(existing.changes()));
         }
         let services: Vec<Arc<dyn Service>> = self.mail.iter().map(|mail| mail.clone() as Arc<dyn Service>).collect();
-        match PeerSync::open_with(&self.support_directory, self.network.clone(), services).await {
+        match PeerSync::open_with_foreground(&self.support_directory, self.network.clone(), services, Some(self.foreground.clone())).await {
             Ok(opened) => {
                 let rx = opened.changes();
                 *self.sync.write().await = Some(opened);
@@ -526,6 +694,23 @@ impl DeviceSync {
         drop(slot);
         sync.shutdown().await;
         let _ = self.wake_tx.send(());
+    }
+
+    /// Closes the iroh endpoint while the app stays in the background without marking the sync
+    /// group paused on disk, so foreground return reopens it cleanly (MS-454).
+    async fn suspend_for_background(&self) {
+        let _gate = self.open_gate.lock().await;
+        if *self.foreground.borrow() {
+            return;
+        }
+        let mut slot = self.sync.write().await;
+        let Some(sync) = slot.as_ref() else { return };
+        if sync.open_invites() > 0 {
+            return;
+        }
+        let sync = slot.take().expect("checked above");
+        drop(slot);
+        sync.shutdown().await;
     }
 
     async fn reconcile_and_report(&self) -> bool {

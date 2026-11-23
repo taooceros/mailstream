@@ -864,3 +864,80 @@ fn cold_start_background_push_wake_detects_new_mail_and_deduplicates() {
     drop(engine2);
     cleanup(&cfg);
 }
+
+#[test]
+fn foreground_background_pauses_push_socket_and_reconnects_on_resume() {
+    let server = provider_server();
+    let relay = FakeRelay::start();
+    let config = prepare(&server, &relay, &[("me@outlook.com", "microsoft")]);
+    let engine = Engine::start(config.clone());
+    let push = engine.core.push.clone();
+
+    wait_until("initial push connect", || push.is_connected());
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 1);
+    let inbox = || requests(&server, "GET", "/v1.0/me/mailFolders/F-inbox/messages").len();
+    wait_until("initial inbox fetch", || inbox() >= 1);
+
+    // Entering background closes the WebSocket and ignores network transitions.
+    engine.set_foreground(false);
+    assert!(!engine.is_foreground());
+    wait_until("push disconnects in background", || !push.is_connected());
+    engine.notify_network_change();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!push.is_connected(), "background network change must not reconnect push");
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 1);
+
+    // Returning to foreground immediately reconnects Push and catches up mail.
+    let inbox_before = inbox();
+    engine.set_foreground(true);
+    assert!(engine.is_foreground());
+    wait_until("push reconnects on foreground", || push.is_connected());
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 2);
+    wait_until("foreground resume catches up mail", || inbox() > inbox_before);
+
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn network_change_while_foreground_forces_push_socket_rebuild() {
+    let server = provider_server();
+    let relay = FakeRelay::start();
+    let config = prepare(&server, &relay, &[("me@outlook.com", "microsoft")]);
+    let engine = Engine::start(config.clone());
+    let push = engine.core.push.clone();
+
+    wait_until("initial push connect", || push.is_connected());
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 1);
+
+    // Simulate Wi-Fi <-> 5G switch while the old socket still reports connected:
+    // notify_network_change must immediately rebuild the socket instead of waiting for silence timeout.
+    engine.notify_network_change();
+    wait_until("push rebuilds connection on network switch", || {
+        relay.connections.load(Ordering::SeqCst) >= 2 && push.is_connected()
+    });
+
+    drop(engine);
+    cleanup(&config);
+}
+
+#[test]
+fn initial_foreground_false_keeps_push_idle_until_foreground() {
+    let server = provider_server();
+    let relay = FakeRelay::start();
+    let mut config = prepare(&server, &relay, &[("me@outlook.com", "microsoft")]);
+    config.initial_foreground = false;
+    let engine = Engine::start(config.clone());
+    let push = engine.core.push.clone();
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!push.is_connected());
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 0);
+
+    engine.set_foreground(true);
+    wait_until("push connects once foregrounded", || push.is_connected());
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 1);
+
+    drop(engine);
+    cleanup(&config);
+}

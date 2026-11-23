@@ -544,6 +544,16 @@ impl PeerSync {
 
     /// [`PeerSync::open_on`], serving `services` to the group's admitted devices too.
     pub(crate) async fn open_with(support_directory: &Path, network: Network, services: Vec<Arc<dyn Service>>) -> Result<Self> {
+        Self::open_with_foreground(support_directory, network, services, None).await
+    }
+
+    /// [`PeerSync::open_with`], pausing network/wake watchers while `foreground` is `false` (MS-454).
+    pub(crate) async fn open_with_foreground(
+        support_directory: &Path,
+        network: Network,
+        services: Vec<Arc<dyn Service>>,
+        foreground: Option<watch::Receiver<bool>>,
+    ) -> Result<Self> {
         let directory = support_directory.join(FOLDER);
         std::fs::create_dir_all(directory.join("docs")).map_err(failed)?;
         std::fs::create_dir_all(directory.join("blobs")).map_err(failed)?;
@@ -626,7 +636,7 @@ impl PeerSync {
                 this: this.clone(),
             }
         });
-        let sync = Self { watchers: watch_network(&inner), inner };
+        let sync = Self { watchers: watch_network(&inner, foreground), inner };
         #[cfg(test)]
         if let Network::Loopback(lookup) | Network::BeforeAdmission(lookup) = network {
             lookup.add_endpoint_info(sync.loopback_addr());
@@ -1400,21 +1410,47 @@ fn follow<E: Send + 'static>(
 }
 
 /// Realigns after each network change and wake while `inner` lives.
-fn watch_network(inner: &Arc<Inner>) -> Vec<JoinHandle<()>> {
+fn watch_network(inner: &Arc<Inner>, foreground: Option<watch::Receiver<bool>>) -> Vec<JoinHandle<()>> {
     let weak: Weak<Inner> = Arc::downgrade(inner);
+    let fg_changes = foreground.clone();
     let changes = tokio::spawn(async move {
         let Some(mut posts) = ProcessSignal::NETWORK_CHANGE.posts() else { return };
         while posts.next().await {
+            if fg_changes.as_ref().is_some_and(|fg| !*fg.borrow()) {
+                continue;
+            }
             let Some(inner) = weak.upgrade() else { return };
             inner.realign().await;
         }
     });
     let weak = Arc::downgrade(inner);
+    let mut fg_wakes = foreground;
     let wakes = tokio::spawn(async move {
         loop {
-            next_wake(WAKE_CHECK).await;
-            let Some(inner) = weak.upgrade() else { return };
-            inner.realign().await;
+            if let Some(fg) = fg_wakes.as_mut()
+                && !crate::polling::wait_foreground(fg).await
+            {
+                return;
+            }
+            tokio::select! {
+                () = next_wake(WAKE_CHECK) => {
+                    if fg_wakes.as_ref().is_some_and(|fg| !*fg.borrow()) {
+                        continue;
+                    }
+                    let Some(inner) = weak.upgrade() else { return };
+                    inner.realign().await;
+                }
+                res = async {
+                    match fg_wakes.as_mut() {
+                        Some(fg) => fg.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if res.is_err() {
+                        return;
+                    }
+                }
+            }
         }
     });
     vec![changes, wakes]

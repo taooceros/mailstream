@@ -153,6 +153,8 @@ pub struct Chat {
     new_chat: tokio::sync::broadcast::Sender<answers::NewChat>,
     /// Signaled once cached spaces have been restored from `mail.db`.
     cache_loaded: tokio::sync::watch::Sender<bool>,
+    /// Whether the host app is in the foreground (MS-454).
+    foreground: tokio::sync::watch::Receiver<bool>,
 }
 fn is_chat(record: &AccountRecord) -> bool {
     record.has(Service::Chat)
@@ -186,6 +188,7 @@ impl Chat {
         settings: Arc<Settings>,
         events: Arc<Events>,
         avatars: Arc<Avatars>,
+        foreground: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
         let (new_chat, _) = tokio::sync::broadcast::channel(128);
         let (cache_loaded, _) = tokio::sync::watch::channel(false);
@@ -203,6 +206,7 @@ impl Chat {
             avatars,
             new_chat,
             cache_loaded,
+            foreground,
         }
     }
 
@@ -288,42 +292,84 @@ impl Chat {
         self.restore_from_cache().await;
         let _ = self.cache_loaded.send(true);
         self.sync_accounts().await;
-        self.poll(false);
+        if *self.foreground.borrow() {
+            self.poll(false);
+        }
         let chat = self.clone();
+        let mut fg = self.foreground.clone();
         tokio::spawn(async move {
-            crate::polling::periodic(|| chat.poll_interval(), &chat.interval_changed, || chat.poll(true)).await;
+            crate::polling::periodic_foreground(
+                &mut fg,
+                || chat.poll_interval(),
+                &chat.interval_changed,
+                || chat.poll(true),
+                || chat.refresh_after_resume(),
+            )
+            .await;
         });
         let chat = self.clone();
+        let mut fg = self.foreground.clone();
         tokio::spawn(async move {
             loop {
+                if !crate::polling::wait_foreground(&mut fg).await {
+                    return;
+                }
                 let open = chat.state().open.clone();
                 let Some(key) = open else {
-                    chat.open_changed.notified().await;
+                    tokio::select! {
+                        () = chat.open_changed.notified() => {}
+                        res = fg.changed() => {
+                            if res.is_err() {
+                                return;
+                            }
+                        }
+                    }
                     continue;
                 };
                 let wait = OPEN_POLL_INTERVAL.min(chat.poll_interval());
                 tokio::select! {
                     () = tokio::time::sleep(wait) => {
-                        if chat.state().open.as_ref() == Some(&key) {
+                        if *fg.borrow() && chat.state().open.as_ref() == Some(&key) {
                             chat.fetch_latest(key, true);
                         }
                     }
                     () = chat.open_changed.notified() => {}
+                    res = fg.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
         });
         let chat = self.clone();
+        let mut fg = self.foreground.clone();
         tokio::spawn(async move {
             loop {
-                next_wake(WAKE_CHECK).await;
-                chat.refresh_after_resume();
+                if !crate::polling::wait_foreground(&mut fg).await {
+                    return;
+                }
+                tokio::select! {
+                    () = next_wake(WAKE_CHECK) => {
+                        if *fg.borrow() {
+                            chat.refresh_after_resume();
+                        }
+                    }
+                    res = fg.changed() => {
+                        if res.is_err() {
+                            return;
+                        }
+                    }
+                }
             }
         });
         let chat = self.clone();
         tokio::spawn(async move {
             let Some(mut changes) = ProcessSignal::NETWORK_CHANGE.posts() else { return };
             while changes.next().await {
-                chat.refresh_after_resume();
+                if *chat.foreground.borrow() {
+                    chat.refresh_after_resume();
+                }
             }
         });
     }
@@ -335,8 +381,16 @@ impl Chat {
 
     fn refresh_after_resume(self: &Arc<Self>) {
         self.poll(true);
-        if let Some(key) = self.state().open.clone() {
+        let open = self.state().open.clone();
+        if let Some(key) = open {
             self.fetch_latest(key, true);
+        }
+    }
+
+    /// Platform network switched or recovered while in the foreground: catch up immediately.
+    pub fn network_changed(self: &Arc<Self>) {
+        if *self.foreground.borrow() {
+            self.refresh_after_resume();
         }
     }
 
