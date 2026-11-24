@@ -257,9 +257,16 @@ pub fn capsule(p: &Palette) -> Div {
         .shadow(p.capsule_shadow.clone())
 }
 
-/// Compact (phone / Android) toolbar capsule sized to hold [`compact_icon_button`]s comfortably.
+/// Compact (phone / Android) toolbar capsule for static solid-background headers (no backdrop blur,
+/// avoiding wasted full-screen TBDR render-pass splits over flat `p.tray`/`p.background`, MS-470).
 pub fn compact_capsule(p: &Palette) -> Div {
-    capsule(p).h(px(design::compact::CAPSULE_HEIGHT)).backdrop_blur(px(12.))
+    capsule(p).h(px(design::compact::CAPSULE_HEIGHT))
+}
+
+/// Compact (phone / Android) toolbar capsule floating directly over scrolling content, with local
+/// Dual-Kawase frosted backdrop blur.
+pub fn compact_floating_capsule(p: &Palette) -> Div {
+    compact_capsule(p).backdrop_blur(px(12.))
 }
 
 /// The capsule floating over a row (its hover actions, `RaisedCapsule`): lit from above, a hairline

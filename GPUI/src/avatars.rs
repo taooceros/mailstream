@@ -58,11 +58,12 @@ pub fn avatar(email: &str, mark: &mailstream::Avatar, size: f32, p: &'static Pal
         return monogram(mark, size, p).into_any_element();
     };
     let mark = mark.clone();
+    // Keep `.overflow_hidden()` without `.rounded_full()` on the wrapper so avatars use a free
+    // rectangular content mask instead of spawning a per-row `rounded_clip` nested sub-scene;
+    // `img(...).rounded_full().object_fit(ObjectFit::Cover)` and `monogram` already paint circles (MS-470).
     div()
         .flex_shrink_0()
         .size(px(size))
-        .rounded_full()
-        // The app's pictures are square; anything else is cut to the circle's square, not spilled.
         .overflow_hidden()
         .child(
             img(path)

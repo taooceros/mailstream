@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.net.ConnectivityManager;
+import android.hardware.display.DisplayManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.SystemClock;
@@ -20,6 +21,7 @@ import android.graphics.Color;
 import android.graphics.Insets;
 import android.os.Build;
 import android.util.Log;
+import android.view.Display;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -82,6 +84,8 @@ public class GpuiInputActivity extends NativeActivity {
     private int activeTransportMask = 0;
     private boolean activeValidated = false;
     private long lastNetworkNotifyElapsedMs = 0L;
+    private DisplayManager.DisplayListener displayListener = null;
+    private float lastPushedRefreshRateHz = 0f;
 
     static {
         System.loadLibrary("mailstream_android_poc");
@@ -90,6 +94,7 @@ public class GpuiInputActivity extends NativeActivity {
     private static native void nativeIme(long session, int kind, String text, int start, int end);
     private static native void nativeInsets(int top, int bottom, int left, int right, float density);
     private static native void nativeDisplayMetrics(float density, float fontScale);
+    private static native void nativeRefreshRate(float refreshRateHz);
     private static native void nativeBack();
     private static native void nativeImeInsets(int imeBottomPx, int targetBottomPx, boolean animating, float density);
     private static native void nativeBackStarted(float progress, int edge);
@@ -176,12 +181,14 @@ public class GpuiInputActivity extends NativeActivity {
         } catch (UnsatisfiedLinkError ignored) {
         }
         registerNetworkCallback();
+        registerDisplayListener();
     }
 
     @Override
     protected void onStop() {
         activityForeground = false;
         unregisterNetworkCallback();
+        unregisterDisplayListener();
         try {
             nativeSetForeground(false);
         } catch (UnsatisfiedLinkError ignored) {
@@ -193,6 +200,7 @@ public class GpuiInputActivity extends NativeActivity {
     protected void onDestroy() {
         activityForeground = false;
         unregisterNetworkCallback();
+        unregisterDisplayListener();
         super.onDestroy();
     }
 
@@ -565,6 +573,82 @@ public class GpuiInputActivity extends NativeActivity {
         try {
             nativeDisplayMetrics(density, fontScale);
         } catch (UnsatisfiedLinkError ignored) {
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private Display activeDisplay() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                Display d = getDisplay();
+                if (d != null) return d;
+            } catch (Throwable ignored) {
+            }
+        }
+        WindowManager wm = getWindowManager();
+        return wm != null ? wm.getDefaultDisplay() : null;
+    }
+
+    private void pushRefreshRate() {
+        Display d = activeDisplay();
+        if (d == null) return;
+        float hz = d.getRefreshRate();
+        if (!Float.isFinite(hz) || hz < 10f || hz > 480f) return;
+        if (Math.abs(hz - lastPushedRefreshRateHz) < 0.5f) return;
+        lastPushedRefreshRateHz = hz;
+        try {
+            nativeRefreshRate(hz);
+        } catch (UnsatisfiedLinkError ignored) {
+        }
+    }
+
+    private void registerDisplayListener() {
+        if (displayListener != null) {
+            pushRefreshRate();
+            return;
+        }
+        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        if (dm == null) {
+            pushRefreshRate();
+            return;
+        }
+        displayListener = new DisplayManager.DisplayListener() {
+            @Override
+            public void onDisplayAdded(int displayId) {
+            }
+
+            @Override
+            public void onDisplayRemoved(int displayId) {
+            }
+
+            @Override
+            public void onDisplayChanged(int displayId) {
+                Display d = activeDisplay();
+                if (d != null && d.getDisplayId() == displayId) {
+                    pushRefreshRate();
+                }
+            }
+        };
+        try {
+            dm.registerDisplayListener(displayListener, null);
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to register DisplayListener", t);
+            displayListener = null;
+        }
+        pushRefreshRate();
+    }
+
+    private void unregisterDisplayListener() {
+        DisplayManager.DisplayListener listener = displayListener;
+        displayListener = null;
+        if (listener == null) return;
+        try {
+            DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+            if (dm != null) {
+                dm.unregisterDisplayListener(listener);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to unregister DisplayListener", t);
         }
     }
 

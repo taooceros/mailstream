@@ -2069,9 +2069,13 @@ impl Window {
                 }
 
                 let should_draw = invalidator.is_dirty() || force_render;
+                // Mailstream patch (MS-470): on Android, `LtpoVoteController` already sustains
+                // 120 Hz via `ANativeWindow_setFrameRate(120.0)` for 300 ms, so re-presenting an
+                // unchanged scene during `high_rate_input` only burns GPU + swapchain budget.
+                let sustain_present = !cfg!(target_os = "android") && high_rate_input;
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
-                    || high_rate_input;
+                    || sustain_present;
                 if should_draw {
                     // Mailstream patch (MS-293): drawing asks again if the animation goes on.
                     display_rate_frame.set(false);

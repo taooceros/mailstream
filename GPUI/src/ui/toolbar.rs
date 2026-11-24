@@ -308,7 +308,7 @@ impl MailApp {
             .gap(px(space::S8))
             .on_mouse_down(MouseButton::Left, Self::press_layer_listener(layer, cx))
             .child(
-                compact_capsule(p).child(
+                crate::controls::compact_floating_capsule(p).child(
                     compact_icon_button("close", Icon::Back, "Back (Esc)", true, p.glyph)
                         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.back(&Back, window, cx))),
                 ),
@@ -317,7 +317,7 @@ impl MailApp {
                 d.child(div().min_w_0().truncate().text_size(px(ts.body)).font_weight(FontWeight::SEMIBOLD).child(title))
             }))
             .child(
-                compact_capsule(p)
+                crate::controls::compact_floating_capsule(p)
                     .when(conversation.waiting, |d| {
                         d.child(
                             compact_icon_button("resolve", Icon::Resolve, "Resolve (D)", true, p.waiting).on_click(cx.listener(

@@ -4,6 +4,7 @@
 //! Every colour pipeline evaluates its stack of padding edges. A disabled
 //! binding keeps ordinary frames on the same pipelines without mask passes.
 
+use std::cell::RefCell;
 use gpui::{AtlasTextureId, LayerFrame, Scene};
 /// Three RGBA32Float texels per padding edge: bounds, horizontal radii and
 /// vertical radii. Texture transport also works on WebGL without storage buffers.
@@ -35,6 +36,15 @@ impl Clip {
                 r.bottom_left.0,
             ],
             vertical: [v.r, v.g, v.b, v.a],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_raw(bounds: [f32; 4], horizontal: [f32; 4], vertical: [f32; 4]) -> Self {
+        Self {
+            bounds,
+            horizontal,
+            vertical,
         }
     }
 }
@@ -146,6 +156,232 @@ impl Bindings {
             ),
             alignment,
         )
+    }
+}
+
+/// Consecutive frames without rounded clips after which cached GPU resources
+/// are released (~1.5 s at 120 Hz).
+const ROUNDED_CLIP_IDLE_RELEASE_FRAMES: u64 = 180;
+
+struct ClipSlot {
+    texture: wgpu::Texture,
+    width: u32,
+    height: u32,
+    flags_buffer: wgpu::Buffer,
+    flags_capacity_bytes: u64,
+    bind_group: wgpu::BindGroup,
+    last_clip_bytes: Vec<u8>,
+    last_flag_words: Vec<u32>,
+}
+
+impl ClipSlot {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+        flags_capacity_bytes: u64,
+    ) -> Self {
+        let tex = texture(device, wgpu::TextureFormat::Rgba32Float, width, height);
+        let view = tex.create_view(&Default::default());
+        let flags_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rounded_clip_flags"),
+            size: flags_capacity_bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rounded_clip_bind_group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &flags_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(16),
+                    }),
+                },
+            ],
+        });
+        Self {
+            texture: tex,
+            width,
+            height,
+            flags_buffer,
+            flags_capacity_bytes,
+            bind_group,
+            last_clip_bytes: Vec::new(),
+            last_flag_words: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RoundedClipCacheInner {
+    slots: Vec<ClipSlot>,
+    used_this_frame: usize,
+    frame: u64,
+    last_used_frame: Option<u64>,
+    #[cfg(test)]
+    allocations: usize,
+    #[cfg(test)]
+    uploads: usize,
+}
+
+/// Reuses rounded-clip mask textures, flag uniform buffers, and bind groups
+/// across frames instead of allocating/destroying a Vulkan image and buffer on
+/// every frame (MS-470). Separate slots per `draw_scene` call within a frame
+/// prevent `queue.write_*` hazards between tile rasterizations and the main pass.
+#[derive(Default)]
+pub(crate) struct RoundedClipCache(RefCell<RoundedClipCacheInner>);
+
+impl RoundedClipCache {
+    pub(crate) fn begin_frame(&mut self) {
+        let inner = self.0.get_mut();
+        inner.frame += 1;
+        if inner.used_this_frame > 0 {
+            inner.last_used_frame = Some(inner.frame);
+            // Keep at most the active slot count + 1 to avoid unbounded growth.
+            let keep = inner.used_this_frame.max(1);
+            if inner.slots.len() > keep + 1 {
+                inner.slots.truncate(keep + 1);
+            }
+        } else if let Some(last_used) = inner.last_used_frame
+            && inner.frame.saturating_sub(last_used) >= ROUNDED_CLIP_IDLE_RELEASE_FRAMES
+        {
+            inner.slots.clear();
+            inner.last_used_frame = None;
+        }
+        inner.used_this_frame = 0;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        let inner = self.0.get_mut();
+        inner.slots.clear();
+        inner.used_this_frame = 0;
+        inner.last_used_frame = None;
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        sets: &[Vec<Clip>],
+    ) -> (wgpu::BindGroup, u32) {
+        let alignment = device.limits().min_uniform_buffer_offset_alignment.max(16);
+        let stride_words = (alignment / 4) as usize;
+        let total_clips: usize = sets.iter().map(Vec::len).sum();
+        let mut all = Vec::with_capacity(total_clips);
+        let mut flags = vec![0u32; stride_words * (sets.len() + 1)];
+        for (ix, clips) in sets.iter().enumerate() {
+            let start = all.len() as u32;
+            all.extend_from_slice(clips);
+            let row_offset = (ix + 1) * stride_words;
+            flags[row_offset] = clips.len() as u32;
+            flags[row_offset + 1] = start;
+        }
+
+        let max_dim = device.limits().max_texture_dimension_2d.max(1);
+        let texels = (all.len() as u32 * 3).max(1);
+        let req_flags_bytes = std::mem::size_of_val(flags.as_slice()) as u64;
+        let clip_raw = bytemuck::cast_slice::<Clip, u8>(&all);
+
+        let mut inner = self.0.borrow_mut();
+        let slot_index = inner.used_this_frame;
+        inner.used_this_frame += 1;
+
+        let needs_alloc = inner.slots.get(slot_index).is_none_or(|slot| {
+            let cap_texels = u64::from(slot.width) * u64::from(slot.height);
+            cap_texels < u64::from(texels) || slot.flags_capacity_bytes < req_flags_bytes
+        });
+        if needs_alloc {
+            let width = texels.next_multiple_of(16).min(max_dim).max(1);
+            let height = texels.div_ceil(width).max(1);
+            let flags_capacity_bytes = req_flags_bytes.next_multiple_of(4096).max(4096);
+            let new_slot = ClipSlot::new(device, layout, width, height, flags_capacity_bytes);
+            #[cfg(test)]
+            {
+                inner.allocations += 1;
+            }
+            if slot_index < inner.slots.len() {
+                inner.slots[slot_index] = new_slot;
+            } else {
+                inner.slots.push(new_slot);
+            }
+        }
+
+        #[cfg(test)]
+        let mut uploads = 0usize;
+        let bind_group = {
+            let slot = &mut inner.slots[slot_index];
+            if slot.last_clip_bytes.as_slice() != clip_raw {
+                let rows = texels.div_ceil(slot.width).max(1);
+                let upload_len = (slot.width * rows * 16) as usize;
+                let mut data = Vec::with_capacity(upload_len);
+                data.extend_from_slice(clip_raw);
+                data.resize(upload_len, 0);
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &slot.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(slot.width * 16),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: slot.width,
+                        height: rows,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                slot.last_clip_bytes.clear();
+                slot.last_clip_bytes.extend_from_slice(clip_raw);
+                #[cfg(test)]
+                {
+                    uploads += 1;
+                }
+            }
+
+            if slot.last_flag_words != flags {
+                queue.write_buffer(&slot.flags_buffer, 0, bytemuck::cast_slice(&flags));
+                slot.last_flag_words = flags;
+                #[cfg(test)]
+                {
+                    uploads += 1;
+                }
+            }
+
+            slot.bind_group.clone()
+        };
+        #[cfg(test)]
+        {
+            inner.uploads += uploads;
+        }
+        (bind_group, alignment)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> (usize, usize, usize) {
+        let inner = self.0.borrow();
+        (inner.slots.len(), inner.allocations, inner.uploads)
+    }
+}
+
+#[allow(dead_code)]
+impl Bindings {
+    fn _keep_unused_clip_sets(&self) {
+        let _ = Self::clip_sets;
     }
 }
 

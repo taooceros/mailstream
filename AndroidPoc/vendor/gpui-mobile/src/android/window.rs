@@ -795,6 +795,13 @@ impl AndroidWindow {
         // Put the renderer back.
         let mut state = self.state.lock();
         state.renderer = Some(renderer);
+        drop(state);
+
+        if !drew && self.is_active() {
+            // Surface returned Suboptimal/Outdated/Timeout and skipped presentation;
+            // re-arm the next vsync so the latest scene is never left undrawn (MS-470).
+            super::frame_source::schedule_frame();
+        }
     }
 
     /// Clears per-frame ADPF timing accumulators before ticking a frame.

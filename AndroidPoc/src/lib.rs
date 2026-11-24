@@ -115,6 +115,15 @@ mod android_entry {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeRefreshRate(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        refresh_rate_hz: f32,
+    ) {
+        jni::update_refresh_rate_hz(refresh_rate_hz);
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeTrimMemory(
         _env: *mut std::ffi::c_void,
         _class: *mut std::ffi::c_void,

@@ -384,3 +384,96 @@ fn backdrop_blur_blurs_background_and_respects_two_region_cap() {
     }
     assert_eq!(renderer.core.fast_frame.backdrop_blur.allocated_slot_count(), 0);
 }
+
+#[test]
+fn backdrop_blur_coalesces_non_overlapping_sibling_capsules() {
+    let glass = gpui::linear_gradient(
+        180.,
+        gpui::linear_color_stop(color(0xffffff60), 0.),
+        gpui::linear_color_stop(color(0xffffff50), 1.),
+    )
+    .with_backdrop_blur(12.0);
+    let mk = |x: f32, y: f32, w: f32, h: f32, bg: gpui::Background| Quad {
+        bounds: bounds(x, y, w, h),
+        content_mask: everywhere(),
+        background: bg,
+        ..Default::default()
+    };
+    // Two non-overlapping floating capsules separated by a non-overlapping quad -> coalesces.
+    let quads = vec![
+        mk(10., 10., 40., 40., glass),
+        mk(100., 100., 40., 40., color(RED).into()),
+        mk(200., 10., 80., 40., glass),
+    ];
+    let selected = crate::fast::backdrop_blur::select_regions(
+        400,
+        300,
+        std::iter::once((0, quads.as_slice(), 0..quads.len())),
+    );
+    let [Some(first), Some(second)] = selected.for_step(0) else {
+        panic!("expected two selected blur regions");
+    };
+    assert!(super::can_coalesce_step_blurs(&quads, first, second));
+
+    // Intervening quad overlapping the first capsule's padded blur region -> must NOT coalesce.
+    let overlapping_mid = vec![
+        mk(10., 10., 40., 40., glass),
+        mk(20., 20., 30., 30., color(RED).into()),
+        mk(200., 10., 80., 40., glass),
+    ];
+    assert!(!super::can_coalesce_step_blurs(&overlapping_mid, first, second));
+
+    // Two capsules close enough that their padded blur regions intersect -> must NOT coalesce.
+    let nearby = vec![
+        mk(10., 10., 40., 40., glass),
+        mk(55., 10., 40., 40., glass),
+    ];
+    let selected_near = crate::fast::backdrop_blur::select_regions(
+        400,
+        300,
+        std::iter::once((0, nearby.as_slice(), 0..nearby.len())),
+    );
+    let [Some(a), Some(b)] = selected_near.for_step(0) else {
+        panic!("expected two selected blur regions");
+    };
+    assert!(!super::can_coalesce_step_blurs(&nearby, a, b));
+}
+
+#[test]
+fn rounded_clip_cache_reuses_gpu_resources_and_skips_unchanged_uploads() {
+    let Some((context, _)) = crate::WgpuContext::new_headless().ok() else {
+        return;
+    };
+    let bindings = crate::fast::rounded_clip::Bindings::new(&context.device);
+    let mut cache = crate::fast::rounded_clip::RoundedClipCache::default();
+    let clip = crate::fast::rounded_clip::Clip::from_raw(
+        [0.0, 0.0, 100.0, 100.0],
+        [12.0; 4],
+        [12.0; 4],
+    );
+    let sets = vec![vec![clip]];
+
+    // Frame 1: allocates 1 slot and uploads both texture + flags.
+    cache.begin_frame();
+    let _ = cache.prepare(&context.device, &context.queue, &bindings.layout, &sets);
+    assert_eq!(cache.stats(), (1, 1, 2));
+
+    // Frame 2 with identical clips: zero allocations, zero uploads.
+    cache.begin_frame();
+    let _ = cache.prepare(&context.device, &context.queue, &bindings.layout, &sets);
+    assert_eq!(cache.stats(), (1, 1, 2));
+
+    // Frame 3 with moved clip (scrolling): zero allocations, only clip texture re-uploaded.
+    let moved = vec![vec![crate::fast::rounded_clip::Clip::from_raw(
+        [0.0, 16.0, 100.0, 116.0],
+        [12.0; 4],
+        [12.0; 4],
+    )]];
+    cache.begin_frame();
+    let _ = cache.prepare(&context.device, &context.queue, &bindings.layout, &moved);
+    assert_eq!(cache.stats(), (1, 1, 3));
+
+    // Clear releases cached slots immediately.
+    cache.clear();
+    assert_eq!(cache.stats().0, 0);
+}

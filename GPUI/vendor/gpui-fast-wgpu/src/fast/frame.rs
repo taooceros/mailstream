@@ -65,6 +65,7 @@ pub(crate) struct FrameState {
     pub(crate) globals: UploadedGlobals,
     pub(crate) layers: TileCache,
     pub(crate) backdrop_blur: crate::fast::backdrop_blur::BackdropBlurState,
+    pub(crate) rounded_clips: crate::fast::rounded_clip::RoundedClipCache,
     vertices: Vec<PathRasterizationVertex>,
     sprites: Vec<PathSprite>,
     path_batches: Vec<PathBatch>,
@@ -329,6 +330,7 @@ where
     H: FrameHost,
 {
     state.bind_groups.begin_frame();
+    state.rounded_clips.begin_frame();
 
     // The layer tiles to rasterize before the frame draws them.
     let planned = state
@@ -499,6 +501,7 @@ fn record_with(
     clear: wgpu::Color,
 ) -> Result<wgpu::SubmissionIndex> {
     state.bind_groups.begin_frame();
+    state.rounded_clips.begin_frame();
 
     // The layer tiles to rasterize before the frame draws them.
     let planned = state
@@ -1042,9 +1045,10 @@ pub(crate) fn draw_scene(
         &mut clip_sets,
     );
     let clip_data = (!clip_sets.is_empty()).then(|| {
-        target.bind_group_layouts.fast_rounded_clip.clip_sets(
+        state.rounded_clips.prepare(
             target.device,
             target.queue,
+            &target.bind_group_layouts.fast_rounded_clip.layout,
             &clip_sets,
         )
     });
@@ -1113,8 +1117,14 @@ pub(crate) fn draw_scene(
                     (draw.frame_texture, backdrop_blur.as_deref_mut())
                 {
                     let mut cursor = range.start;
-                    for blur in step_blurs.into_iter().flatten() {
-                        if blur.quad_index > cursor {
+                    if let [Some(first), Some(second)] = step_blurs
+                        && can_coalesce_step_blurs(&scene.quads, first, second)
+                    {
+                        // Both floating blur capsules sit in the same quad batch and do not
+                        // overlap (nor does any quad between them overlap the first capsule),
+                        // so draw intervening quads first and perform a single TBDR main-pass
+                        // split instead of two full-screen store+load cycles (MS-470).
+                        if first.quad_index > cursor {
                             draw_batch(
                                 &mut pass,
                                 &mut bound,
@@ -1122,12 +1132,24 @@ pub(crate) fn draw_scene(
                                 &pipelines.quads,
                                 &upload.quads,
                                 None,
-                                cursor..blur.quad_index,
+                                cursor..first.quad_index,
                             );
                         }
-                        let quad = &scene.quads[blur.quad_index];
+                        if second.quad_index > first.quad_index + 1 {
+                            draw_batch(
+                                &mut pass,
+                                &mut bound,
+                                draw.globals,
+                                &pipelines.quads,
+                                &upload.quads,
+                                None,
+                                (first.quad_index + 1)..second.quad_index,
+                            );
+                        }
+                        let q0 = &scene.quads[first.quad_index];
+                        let q1 = &scene.quads[second.quad_index];
                         drop(pass);
-                        let blurred = blur_state.prepare_and_blur(
+                        let blurred0 = blur_state.prepare_and_blur(
                             target.device,
                             target.queue,
                             &pipelines.backdrop_blur,
@@ -1135,21 +1157,45 @@ pub(crate) fn draw_scene(
                             frame_texture,
                             target.format,
                             target.premultiplied_alpha,
-                            quad,
-                            blur.slot,
+                            q0,
+                            first.slot,
+                        );
+                        let blurred1 = blur_state.prepare_and_blur(
+                            target.device,
+                            target.queue,
+                            &pipelines.backdrop_blur,
+                            encoder,
+                            frame_texture,
+                            target.format,
+                            target.premultiplied_alpha,
+                            q1,
+                            second.slot,
                         );
                         pass = begin_main_pass(encoder, draw.view, "main_pass_continued", None);
                         bound.forget();
                         pass.set_bind_group(3, clip_binding, &[clip_offset]);
-                        if blurred {
-                            blur_state.draw_composite(
-                                &mut pass,
-                                &pipelines.backdrop_blur,
-                                blur.slot,
-                            );
-                            bound.forget();
-                            pass.set_bind_group(3, clip_binding, &[clip_offset]);
-                            if !crate::fast::backdrop_blur::quad_has_no_border(quad) {
+                        for (blur, quad, blurred) in [(first, q0, blurred0), (second, q1, blurred1)]
+                        {
+                            if blurred {
+                                blur_state.draw_composite(
+                                    &mut pass,
+                                    &pipelines.backdrop_blur,
+                                    blur.slot,
+                                );
+                                bound.forget();
+                                pass.set_bind_group(3, clip_binding, &[clip_offset]);
+                                if !crate::fast::backdrop_blur::quad_has_no_border(quad) {
+                                    draw_batch(
+                                        &mut pass,
+                                        &mut bound,
+                                        draw.globals,
+                                        &pipelines.quads,
+                                        &upload.quads,
+                                        None,
+                                        blur.quad_index..(blur.quad_index + 1),
+                                    );
+                                }
+                            } else {
                                 draw_batch(
                                     &mut pass,
                                     &mut bound,
@@ -1160,18 +1206,69 @@ pub(crate) fn draw_scene(
                                     blur.quad_index..(blur.quad_index + 1),
                                 );
                             }
-                        } else {
-                            draw_batch(
-                                &mut pass,
-                                &mut bound,
-                                draw.globals,
-                                &pipelines.quads,
-                                &upload.quads,
-                                None,
-                                blur.quad_index..(blur.quad_index + 1),
-                            );
                         }
-                        cursor = blur.quad_index + 1;
+                        cursor = second.quad_index + 1;
+                    } else {
+                        for blur in step_blurs.into_iter().flatten() {
+                            if blur.quad_index > cursor {
+                                draw_batch(
+                                    &mut pass,
+                                    &mut bound,
+                                    draw.globals,
+                                    &pipelines.quads,
+                                    &upload.quads,
+                                    None,
+                                    cursor..blur.quad_index,
+                                );
+                            }
+                            let quad = &scene.quads[blur.quad_index];
+                            drop(pass);
+                            let blurred = blur_state.prepare_and_blur(
+                                target.device,
+                                target.queue,
+                                &pipelines.backdrop_blur,
+                                encoder,
+                                frame_texture,
+                                target.format,
+                                target.premultiplied_alpha,
+                                quad,
+                                blur.slot,
+                            );
+                            pass = begin_main_pass(encoder, draw.view, "main_pass_continued", None);
+                            bound.forget();
+                            pass.set_bind_group(3, clip_binding, &[clip_offset]);
+                            if blurred {
+                                blur_state.draw_composite(
+                                    &mut pass,
+                                    &pipelines.backdrop_blur,
+                                    blur.slot,
+                                );
+                                bound.forget();
+                                pass.set_bind_group(3, clip_binding, &[clip_offset]);
+                                if !crate::fast::backdrop_blur::quad_has_no_border(quad) {
+                                    draw_batch(
+                                        &mut pass,
+                                        &mut bound,
+                                        draw.globals,
+                                        &pipelines.quads,
+                                        &upload.quads,
+                                        None,
+                                        blur.quad_index..(blur.quad_index + 1),
+                                    );
+                                }
+                            } else {
+                                draw_batch(
+                                    &mut pass,
+                                    &mut bound,
+                                    draw.globals,
+                                    &pipelines.quads,
+                                    &upload.quads,
+                                    None,
+                                    blur.quad_index..(blur.quad_index + 1),
+                                );
+                            }
+                            cursor = blur.quad_index + 1;
+                        }
                     }
                     if cursor < range.end {
                         draw_batch(
@@ -1351,6 +1448,37 @@ fn polychrome_bind_group(
 }
 
 /// Begins a pass that draws into `view`, cleared to `clear` if one is given.
+/// Returns true when two backdrop-blur quads in the same `Quads` batch can
+/// share a single main-pass split (one `drop(pass)` -> copy+blur both ->
+/// one `LoadOp::Load` resume). This holds when their padded blur sample
+/// regions do not overlap each other and no quad drawn between them overlaps
+/// the first capsule's padded region.
+fn can_coalesce_step_blurs(
+    quads: &[gpui::Quad],
+    first: crate::fast::backdrop_blur::SelectedRegion,
+    second: crate::fast::backdrop_blur::SelectedRegion,
+) -> bool {
+    if first.quad_index >= second.quad_index || second.quad_index >= quads.len() {
+        return false;
+    }
+    let padded = |quad: &gpui::Quad| -> Bounds<ScaledPixels> {
+        let pad = quad.background.backdrop_blur_radius().ceil().clamp(8.0, 24.0);
+        quad.bounds.intersect(&quad.content_mask.bounds).dilate(ScaledPixels(pad))
+    };
+    let first_padded = padded(&quads[first.quad_index]);
+    let second_padded = padded(&quads[second.quad_index]);
+    if first_padded.intersects(&second_padded) {
+        return false;
+    }
+    for quad in &quads[(first.quad_index + 1)..second.quad_index] {
+        let q_bounds = quad.bounds.intersect(&quad.content_mask.bounds);
+        if q_bounds.intersects(&first_padded) {
+            return false;
+        }
+    }
+    true
+}
+
 fn begin_main_pass<'a>(
     encoder: &'a mut wgpu::CommandEncoder,
     view: &'a wgpu::TextureView,

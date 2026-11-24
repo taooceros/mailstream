@@ -383,7 +383,7 @@ unsafe extern "C" fn on_vsync_callback(
     data: *const AChoreographerFrameCallbackData,
     _user_data: *mut c_void,
 ) {
-    let refresh_ns = refresh_interval_ns();
+    let mut refresh_ns = refresh_interval_ns();
     let timeline = if !data.is_null() {
         if let Some(api) = VSYNC_API.as_ref() {
             let frame_time_ns = unsafe { (api.get_frame_time_nanos)(data) };
@@ -394,6 +394,23 @@ unsafe extern "C" fn on_vsync_callback(
                 let expected_present_ns =
                     unsafe { (api.get_expected_presentation_time_nanos)(data, idx) };
                 let deadline_ns = unsafe { (api.get_deadline_nanos)(data, idx) };
+                if len >= 2 {
+                    let next_idx = if idx + 1 < len { idx + 1 } else { idx - 1 };
+                    let other_present_ns =
+                        unsafe { (api.get_expected_presentation_time_nanos)(data, next_idx) };
+                    let spacing = expected_present_ns.abs_diff(other_present_ns) as i64;
+                    if let Some(inferred) =
+                        crate::frame_timing::infer_refresh_interval_ns(refresh_ns, spacing)
+                    {
+                        REFRESH_INTERVAL_NS.store(inferred as u64, Ordering::Relaxed);
+                        refresh_ns = inferred;
+                        log::info!(
+                            "frame_source: inferred live vsync interval {:.2} ms ({:.1} Hz)",
+                            inferred as f64 / 1_000_000.0,
+                            1_000_000_000.0 / inferred as f64,
+                        );
+                    }
+                }
                 VsyncTimeline::new(frame_time_ns, expected_present_ns, deadline_ns, refresh_ns)
             } else {
                 VsyncTimeline::from_legacy_frame_time(frame_time_ns, refresh_ns)
@@ -480,6 +497,14 @@ pub(crate) fn has_demand() -> bool {
         return true;
     }
     with_pacer(|pacer| pacer.has_demand()).unwrap_or(false)
+}
+
+/// Whether a vsync frame is already due right now (without consuming it).
+pub(crate) fn has_due_frame() -> bool {
+    if FRAME_DUE.load(Ordering::Acquire) {
+        return true;
+    }
+    with_pacer(|pacer| pacer.is_due(Instant::now())).unwrap_or(false)
 }
 
 /// How long the loop may block on its looper: `Some(Duration::ZERO)` with a frame due, up to

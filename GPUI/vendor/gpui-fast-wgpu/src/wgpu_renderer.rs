@@ -531,7 +531,11 @@ impl WgpuRenderer {
             {
                 return parsed;
             }
-            1
+            // Triple buffering (`min_image_count = 3` in Vulkan) absorbs 120 Hz GPU/HWC
+            // variance without stalling `vkAcquireNextImageKHR` under `PresentMode::Fifo`;
+            // `AChoreographer` (`FramePacer`) still paces submission to 1 frame per vsync
+            // so steady-state latency stays minimal (MS-470).
+            2
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -1121,6 +1125,7 @@ impl WgpuRenderer {
         };
         crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
         core.fast_frame.backdrop_blur.clear();
+        core.fast_frame.rounded_clips.clear();
         let resources = &mut core.resources;
 
         // Wait for any in-flight GPU work to complete before destroying textures
@@ -1266,6 +1271,7 @@ impl WgpuRenderer {
                 self.atlas.clear();
                 crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
                 core.fast_frame.backdrop_blur.clear();
+                core.fast_frame.rounded_clips.clear();
                 self.needs_redraw = true;
                 self.failed_frame_count = 0;
                 return false;
@@ -2387,6 +2393,7 @@ impl WgpuRenderer {
             core.resources.invalidate_intermediate_textures();
             crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
             core.fast_frame.backdrop_blur.clear();
+            core.fast_frame.rounded_clips.clear();
         }
     }
 
@@ -2400,6 +2407,7 @@ impl WgpuRenderer {
             core.resources.invalidate_intermediate_textures();
             crate::fast::layers::TileCache::clear(&mut core.fast_frame.layers);
             core.fast_frame.backdrop_blur.clear();
+            core.fast_frame.rounded_clips.clear();
         }
         if clear_atlas {
             self.atlas.clear();

@@ -538,6 +538,34 @@ impl AndroidPlatform {
         }
     }
 
+    /// Updates the active display refresh rate in place when Android's
+    /// `DisplayManager.DisplayListener` reports a refresh-rate transition
+    /// (e.g. LTPO 60 ↔ 90 ↔ 120 Hz on Xiaomi HyperOS, MS-470).
+    ///
+    /// Safe to call from the Java UI thread: updates the atomic frame interval
+    /// and the display record without invoking GPUI callbacks off-thread.
+    pub fn update_refresh_rate_hz(&self, hz: f32) {
+        if !hz.is_finite() || !(10.0..=480.0).contains(&hz) {
+            return;
+        }
+        let interval = std::time::Duration::from_secs_f64(1.0 / hz as f64);
+        super::frame_source::set_refresh_interval(interval);
+        let changed = {
+            let mut state = self.state.lock();
+            state
+                .displays
+                .primary_mut()
+                .is_some_and(|display| display.set_refresh_rate_hz(hz))
+        };
+        if changed {
+            log::info!(
+                "AndroidDisplay live refresh rate: {:.2} Hz ({:.2} ms)",
+                hz,
+                1000.0 / hz,
+            );
+        }
+    }
+
     // ── clipboard ─────────────────────────────────────────────────────────────
 
     /// Write `text` to the clipboard.
@@ -834,20 +862,35 @@ impl AndroidPlatform {
     /// Should be called from the native-activity main loop on every iteration
     /// to process delayed background tasks.
     pub fn tick(&self) {
-        self.state.lock().dispatcher.tick();
+        let dispatcher = Arc::clone(&self.state.lock().dispatcher);
+        dispatcher.tick();
     }
 
     /// When the next delayed background task is due; the main loop sleeps
     /// no longer than that.
     pub fn next_delayed_due(&self) -> Option<std::time::Instant> {
-        self.state.lock().dispatcher.next_delayed_due()
+        let dispatcher = Arc::clone(&self.state.lock().dispatcher);
+        dispatcher.next_delayed_due()
     }
 
-    /// Drain all pending main-thread tasks synchronously.
-    ///
-    /// Useful in headless tests where there is no real ALooper.
+    /// Whether at least one main-thread task is waiting in the queue.
+    pub fn has_pending_main_tasks(&self) -> bool {
+        let dispatcher = Arc::clone(&self.state.lock().dispatcher);
+        dispatcher.has_pending_main_tasks()
+    }
+
+    /// Drain all pending main-thread tasks synchronously (without holding the
+    /// platform state mutex across task execution).
     pub fn flush_main_thread_tasks(&self) {
-        self.state.lock().dispatcher.flush_main_thread_tasks();
+        let dispatcher = Arc::clone(&self.state.lock().dispatcher);
+        dispatcher.flush_main_thread_tasks();
+    }
+
+    /// Drain pending main-thread tasks up to `budget` before a due vsync frame
+    /// so task bursts cannot blow the frame deadline.
+    pub fn flush_main_thread_tasks_budgeted(&self, budget: std::time::Duration) -> bool {
+        let dispatcher = Arc::clone(&self.state.lock().dispatcher);
+        dispatcher.flush_main_thread_tasks_budgeted(budget)
     }
 }
 

@@ -120,6 +120,19 @@ impl AndroidDisplay {
         self
     }
 
+    /// Updates the display's refresh interval in place when the live refresh rate changes.
+    pub fn set_refresh_rate_hz(&mut self, hz: f32) -> bool {
+        if !hz.is_finite() || !(10.0..=480.0).contains(&hz) {
+            return false;
+        }
+        let next = std::time::Duration::from_secs_f64(1.0 / hz as f64);
+        let changed = self
+            .refresh_interval
+            .is_none_or(|prev| prev.abs_diff(next) >= std::time::Duration::from_micros(250));
+        self.refresh_interval = Some(next);
+        changed
+    }
+
     /// Refresh interval of this display, if known.
     pub fn refresh_interval_duration(&self) -> Option<std::time::Duration> {
         self.refresh_interval
@@ -323,6 +336,11 @@ impl DisplayList {
     /// Returns the primary (first) display.
     pub fn primary(&self) -> Option<&AndroidDisplay> {
         self.displays.first()
+    }
+
+    /// Returns a mutable reference to the primary (first) display.
+    pub fn primary_mut(&mut self) -> Option<&mut AndroidDisplay> {
+        self.displays.first_mut()
     }
 
     /// Returns all displays.

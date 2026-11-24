@@ -113,6 +113,23 @@ impl VsyncTimeline {
     }
 }
 
+/// Infers an updated display refresh interval from consecutive API 33+
+/// `AChoreographer` timeline presentation timestamps when the spacing sits in
+/// the plausible 50–285 Hz range and differs from `current_ns` by at least
+/// 0.5 ms (avoiding ADPF thrash from sub-millisecond jitter, MS-470).
+pub(crate) fn infer_refresh_interval_ns(current_ns: i64, timeline_spacing_ns: i64) -> Option<i64> {
+    const MIN_SPACING_NS: i64 = 3_500_000; // ~285 Hz
+    const MAX_SPACING_NS: i64 = 20_000_000; // 50 Hz
+    const HYSTERESIS_NS: i64 = 500_000; // 0.5 ms
+    if !(MIN_SPACING_NS..=MAX_SPACING_NS).contains(&timeline_spacing_ns) {
+        return None;
+    }
+    if current_ns.abs_diff(timeline_spacing_ns) < HYSTERESIS_NS as u64 {
+        return None;
+    }
+    Some(timeline_spacing_ns)
+}
+
 /// Cached `(Instant, CLOCK_MONOTONIC ns)` anchor so consecutive hardware touch
 /// and `AChoreographer` timestamps (including future `expectedPresentationTimeNanos`)
 /// map onto the exact same epoch without per-sample syscall jitter or false
@@ -439,5 +456,28 @@ mod tests {
         // Pause immediately releases vote to 0.0 Hz.
         assert_eq!(ltpo.on_pause(), Some(LTPO_IDLE_HZ));
         assert_eq!(ltpo.next_idle_deadline(), None);
+    }
+
+    #[test]
+    fn infer_refresh_interval_tracks_ltpo_transitions_with_hysteresis() {
+        // 60 Hz -> 120 Hz transition updates immediately.
+        assert_eq!(
+            infer_refresh_interval_ns(REFRESH_60HZ, REFRESH_120HZ),
+            Some(REFRESH_120HZ)
+        );
+        // 120 Hz -> 90 Hz transition updates immediately.
+        let refresh_90hz = 11_111_111;
+        assert_eq!(
+            infer_refresh_interval_ns(REFRESH_120HZ, refresh_90hz),
+            Some(refresh_90hz)
+        );
+        // Sub-0.5 ms vsync jitter does not thrash ADPF target updates.
+        assert_eq!(
+            infer_refresh_interval_ns(REFRESH_120HZ, REFRESH_120HZ + 200_000),
+            None
+        );
+        // Out-of-range spacings are rejected.
+        assert_eq!(infer_refresh_interval_ns(REFRESH_60HZ, 1_000_000), None);
+        assert_eq!(infer_refresh_interval_ns(REFRESH_60HZ, 50_000_000), None);
     }
 }

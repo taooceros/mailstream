@@ -412,6 +412,9 @@ struct BlurSlot {
     down_bg: wgpu::BindGroup,
     up_bg: wgpu::BindGroup,
     comp_bg: wgpu::BindGroup,
+    last_down: Option<[u8; size_of::<KawaseParams>()]>,
+    last_up: Option<[u8; size_of::<KawaseParams>()]>,
+    last_comp: Option<[u8; size_of::<CompositeParams>()]>,
 }
 
 impl BlurSlot {
@@ -565,6 +568,9 @@ impl BlurSlot {
             down_bg,
             up_bg,
             comp_bg,
+            last_down: None,
+            last_up: None,
+            last_comp: None,
         }
     }
 }
@@ -652,7 +658,7 @@ impl BackdropBlurState {
                 device, pipelines, format, src_w, src_h, q_w, q_h,
             ));
         }
-        let Some(slot) = self.slots[slot_index].as_ref() else {
+        let Some(slot) = self.slots[slot_index].as_mut() else {
             return false;
         };
 
@@ -701,7 +707,11 @@ impl BackdropBlurState {
                 (src_uv_max_y - src_half_y).max(src_half_y),
             ],
         };
-        queue.write_buffer(&slot.down_uniform, 0, bytemuck::bytes_of(&down_params));
+        let down_bytes: [u8; size_of::<KawaseParams>()] = bytemuck::cast(down_params);
+        if slot.last_down.as_ref() != Some(&down_bytes) {
+            queue.write_buffer(&slot.down_uniform, 0, &down_bytes);
+            slot.last_down = Some(down_bytes);
+        }
 
         let q_uv_max_x = q_w as f32 / slot.q_w as f32;
         let q_uv_max_y = q_h as f32 / slot.q_h as f32;
@@ -722,7 +732,11 @@ impl BackdropBlurState {
                 (q_uv_max_y - q_half_y).max(q_half_y),
             ],
         };
-        queue.write_buffer(&slot.up_uniform, 0, bytemuck::bytes_of(&up_params));
+        let up_bytes: [u8; size_of::<KawaseParams>()] = bytemuck::cast(up_params);
+        if slot.last_up.as_ref() != Some(&up_bytes) {
+            queue.write_buffer(&slot.up_uniform, 0, &up_bytes);
+            slot.last_up = Some(up_bytes);
+        }
 
         let (is_grad, color_space, angle_deg, c0_hsla, stop0, c1_hsla, stop1) =
             quad.background.backdrop_tint_params();
@@ -769,7 +783,11 @@ impl BackdropBlurState {
             tint_color1: [c1.r, c1.g, c1.b, c1.a],
             tint_stops: [stop0, stop1, FROSTED_TINT_ALPHA_SCALE, 0.0],
         };
-        queue.write_buffer(&slot.comp_uniform, 0, bytemuck::bytes_of(&comp_params));
+        let comp_bytes: [u8; size_of::<CompositeParams>()] = bytemuck::cast(comp_params);
+        if slot.last_comp.as_ref() != Some(&comp_bytes) {
+            queue.write_buffer(&slot.comp_uniform, 0, &comp_bytes);
+            slot.last_comp = Some(comp_bytes);
+        }
 
         // Pass 1: 5-tap Dual-Kawase downsample into quarter-resolution target A.
         {

@@ -289,25 +289,37 @@ fn render_thread(launch: Launch) {
         }
 
         platform.tick();
-        platform.flush_main_thread_tasks();
+        let window = platform.primary_window();
+        let can_draw = window.as_ref().is_some_and(|win| win.is_active());
+        let deferred = if can_draw && super::frame_source::has_due_frame() {
+            platform.flush_main_thread_tasks_budgeted(Duration::from_millis(2))
+        } else {
+            platform.flush_main_thread_tasks();
+            false
+        };
         if crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
             // Software-keyboard text bypasses GPUI's invalidator; the frame
             // callback turns it into a forced render.
             super::frame_source::schedule_frame();
         }
-        let window = platform.primary_window();
-        let can_draw = window.as_ref().is_some_and(|win| win.is_active());
         if can_draw {
             if let Some(win) = &window {
                 driver.render_due_frame(win, |_| {}, |_| {});
             }
         }
+        if deferred {
+            platform.flush_main_thread_tasks_budgeted(Duration::from_millis(2));
+        }
 
         // Sleep on the looper until a command, a dispatcher task, the vsync
         // callback for a wanted frame, or the LTPO idle deadline arrives.
-        let timeout_ms = driver
-            .poll_timeout(window.as_deref(), platform.next_delayed_due(), can_draw)
-            .map_or(-1, |dur| dur.as_millis().min(i32::MAX as u128) as i32);
+        let timeout_ms = if platform.has_pending_main_tasks() {
+            0
+        } else {
+            driver
+                .poll_timeout(window.as_deref(), platform.next_delayed_due(), can_draw)
+                .map_or(-1, |dur| dur.as_millis().min(i32::MAX as u128) as i32)
+        };
         unsafe {
             ndk_sys::ALooper_pollOnce(
                 timeout_ms,

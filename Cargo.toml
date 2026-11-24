@@ -28,6 +28,9 @@ resolver = "3"
 # (main frame & scroll tiles), unified `DEFAULT_TILE_BUDGET_BYTES` (36 MiB mobile / 64 MiB desktop),
 # fixed sRGB/Oklab gradient color space conversions in `shaders.wgsl`, and capped local quarter-res
 # 2-pass Dual-Kawase backdrop blur + 1/255 blue-noise dithering (`fast/backdrop_blur.rs`).
+# With MS-470: Android triple-buffered swapchain (`desired_maximum_frame_latency = 2`),
+# reusable `RoundedClipCache` eliminating per-frame `VkImage`/`VkBuffer` churn,
+# cached `BackdropBlurState` uniforms, and coalesced non-overlapping blur pass splits.
 # `GPUI/vendor/gpui-fast` is GPUI Fast's core 0.1.14 with two additions to `src/window.rs` (MS-293,
 # marked "Mailstream patch"): `Window::frame_signal_at`, when the platform asked for the frame being
 # drawn, which the animations' clock (`GPUI/src/swipe.rs`) steps by, and
@@ -55,6 +58,8 @@ resolver = "3"
 # With MS-448: `DEFAULT_TILE_BUDGET_BYTES` (36 MiB mobile / 64 MiB desktop) exported from
 # `fast/layers/policy.rs`, and `Styled::backdrop_blur` / `Background::with_backdrop_blur` encoded
 # in `Background`'s trailing 4-byte padding slot without changing `#[repr(C)]` `Quad` layout.
+# With MS-470: Android skips redundant `high_rate_input` unchanged re-presents in `window.rs`
+# (handled by `LtpoVoteController`).
 # `GPUI/vendor/gpui-fast-macos` is GPUI Fast's Mac platform 0.1.14 spreading each mouse-wheel step
 # over a short ease-out instead of applying it in one frame (MS-225, `src/wheel_motion.rs` and its
 # use in `window.rs`, marked "Mailstream patch"); touchpads and Magic Mice keep AppKit's own deltas
@@ -184,4 +189,34 @@ opt-level = 3
 [profile.android-release.package.kurbo]
 opt-level = 3
 [profile.android-release.package.tiny-skia]
+opt-level = 3
+[profile.android-release.package.wgpu]
+opt-level = 3
+[profile.android-release.package.wgpu-core]
+opt-level = 3
+[profile.android-release.package.wgpu-hal]
+opt-level = 3
+[profile.android-release.package.wgpu-types]
+opt-level = 3
+[profile.android-release.package.ash]
+opt-level = 3
+[profile.android-release.package.naga]
+opt-level = 3
+[profile.android-release.package.gpui-kit]
+opt-level = 3
+[profile.android-release.package.etagere]
+opt-level = 3
+[profile.android-release.package.parking_lot]
+opt-level = 3
+[profile.android-release.package.parking_lot_core]
+opt-level = 3
+[profile.android-release.package.smallvec]
+opt-level = 3
+[profile.android-release.package.hashbrown]
+opt-level = 3
+[profile.android-release.package.rustc-hash]
+opt-level = 3
+[profile.android-release.package.usvg]
+opt-level = 3
+[profile.android-release.package.resvg]
 opt-level = 3

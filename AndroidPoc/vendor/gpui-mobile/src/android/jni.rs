@@ -918,13 +918,20 @@ pub fn run_event_loop(app: &AndroidApp) {
         // the delayed dispatcher tasks `platform.tick()` has to release and
         // the clock fallback without a choreographer.
         let active_window = PLATFORM.get().and_then(|platform| platform.primary_window());
-        let timeout = driver.poll_timeout(
-            active_window.as_deref(),
-            PLATFORM
-                .get()
-                .and_then(|platform| platform.next_delayed_due()),
-            INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active,
-        );
+        let has_pending_tasks = PLATFORM
+            .get()
+            .is_some_and(|platform| platform.has_pending_main_tasks());
+        let timeout = if has_pending_tasks {
+            Some(Duration::ZERO)
+        } else {
+            driver.poll_timeout(
+                active_window.as_deref(),
+                PLATFORM
+                    .get()
+                    .and_then(|platform| platform.next_delayed_due()),
+                INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active,
+            )
+        };
         app.poll_events(timeout, |event| match event {
             PollEvent::Main(main_event) => {
                 handle_main_event(app, main_event);
@@ -1023,6 +1030,9 @@ pub fn run_event_loop(app: &AndroidApp) {
                                 log::error!("failed to open window: {e:#}");
                             }
                         }
+                    }
+                    if let Some(hz) = query_refresh_rate_via_jni() {
+                        platform.update_refresh_rate_hz(hz);
                     }
                 }
             }
@@ -1166,10 +1176,19 @@ pub fn run_event_loop(app: &AndroidApp) {
             }
         }
 
-        // ── Render ──
+        // ── Render & main-thread tasks ──
         if let Some(platform) = PLATFORM.get() {
-            if INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active {
-                platform.flush_main_thread_tasks();
+            let can_draw = INIT_WINDOW_DONE.load(Ordering::Relaxed) && app_is_active;
+            if can_draw {
+                // If a vsync frame is already due, cap pre-frame task draining to
+                // 2 ms so a burst of engine/avatar/tile callbacks cannot blow an
+                // 8.33 ms frame deadline; deferred tasks run right after present.
+                let deferred = if super::frame_source::has_due_frame() {
+                    platform.flush_main_thread_tasks_budgeted(Duration::from_millis(2))
+                } else {
+                    platform.flush_main_thread_tasks();
+                    false
+                };
                 // Software-keyboard text bypasses GPUI's invalidator; the
                 // frame callback turns it into a forced render.
                 if crate::TEXT_INPUT_DIRTY.load(Ordering::Acquire) {
@@ -1188,6 +1207,11 @@ pub fn run_event_loop(app: &AndroidApp) {
                         },
                     );
                 }
+                if deferred {
+                    platform.flush_main_thread_tasks_budgeted(Duration::from_millis(2));
+                }
+            } else {
+                platform.flush_main_thread_tasks();
             }
         }
     }
@@ -1916,6 +1940,19 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeBackCancel
 /// `request_config_refresh()` or dropping Scroll Layers.
 pub fn schedule_ime_frame() {
     super::text_input::mark_ime_insets_dirty();
+}
+
+/// Updates the active display refresh rate (Hz) from Android's
+/// `DisplayManager.DisplayListener` (safe to call from the Java UI thread, MS-470).
+pub fn update_refresh_rate_hz(hz: f32) {
+    if !hz.is_finite() || !(10.0..=480.0).contains(&hz) {
+        return;
+    }
+    let interval = Duration::from_secs_f64(1.0 / hz as f64);
+    super::frame_source::set_refresh_interval(interval);
+    if let Some(platform) = PLATFORM.get() {
+        platform.update_refresh_rate_hz(hz);
+    }
 }
 
 /// Registers or unregisters `GpuiInputActivity`'s system back callback so the root inbox yields

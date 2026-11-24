@@ -138,6 +138,11 @@ impl FramePacer {
         self.posted.get() || self.due.get() || self.fallback_due_at.get().is_some()
     }
 
+    /// Whether a frame is already due right now (vsync fired or fallback elapsed).
+    pub(crate) fn is_due(&self, now: Instant) -> bool {
+        self.due.get() || self.fallback_due_at.get().is_some_and(|due_at| due_at <= now)
+    }
+
     /// Forgets a posted callback (the vsync source may have been paused
     /// while the app was in the background) and posts afresh so demand that
     /// piled up meanwhile is served. A stale callback that fires later marks
