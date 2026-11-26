@@ -571,10 +571,17 @@ fn removing_a_device_withdraws_its_sign_ins_and_stops_its_sync() {
     let engine_b = Engine::start(cfg_b.clone());
     let engine_c = Engine::start(cfg_c.clone());
     call(&engine_a, "sync.enable", json!({})).unwrap();
-    for engine in [&engine_b, &engine_c] {
+    for (engine, cfg) in [(&engine_b, &cfg_b), (&engine_c, &cfg_c)] {
         let ticket = call(&engine_a, "sync.pair_ticket", json!({})).unwrap()["ticket"].as_str().unwrap().to_string();
         call(engine, "sync.join", json!({ "ticket": ticket })).unwrap();
         until("the device to get A's account", || account_ids(engine) == ["me@gmail.com"]);
+        until("the device to get A's sealed token", || {
+            crate::keychain::Keychain::new(cfg.keychain_service.clone(), cfg.keychain_directory.clone())
+                .load()
+                .unwrap()
+                .refresh_tokens
+                .contains_key("me@gmail.com")
+        });
     }
     let id = |engine: &Engine| call(engine, "sync.status", json!({})).unwrap()["endpointId"].as_str().unwrap().to_string();
     let (id_b, id_c) = (id(&engine_b), id(&engine_c));

@@ -1,7 +1,7 @@
 # Mailstream GPUI front end
 
-A [GPUI](https://gpui.rs) (Zed's GPU UI framework) window for Mailstream, on macOS and Linux
-(Wayland or X11). GPUI comes through [gpui-kit](https://gpui-kit.com) 0.9 with its `gpui-fast`
+A [GPUI](https://gpui.rs) (Zed's GPU UI framework) window for Mailstream, on macOS, Linux
+(Wayland or X11), and Windows (DirectX 11 / DirectWrite). GPUI comes through [gpui-kit](https://gpui-kit.com) 0.9 with its `gpui-fast`
 feature (MS-226): GPUI Fast, longbridge's retained-mode GPUI that follows Zed's. `Cargo.toml` names
 the kit `gpui`, so the code says `gpui::…`; `secondary!("k")` (in `main.rs`) spells a binding's
 ⌘/Ctrl, as GPUI Fast's `KeyBinding::new` no longer reads `secondary-`. The
@@ -17,6 +17,7 @@ GPUI/run.sh                 # from the repo root: cargo build, sign (macOS), lau
 CONFIG=release GPUI/run.sh  # engine and window optimized: use this to judge smoothness
 (cd GPUI && cargo test)
 devenv shell -- GPUI/run.sh  # Linux (NixOS): the shell has the libraries GPUI links and loads
+cargo build --release -p mailstream-gpui  # Windows (x64, MSVC toolchain)
 ```
 
 The engine works on its own threads; only its change events reach the window's main thread.
@@ -142,6 +143,22 @@ Linux differs from the Mac in:
   is unchanged. Moving to a newer GPUI Fast means vendoring its Linux crate again with the patch.
 - Engine events reach the window through `Mailstream::subscribe_any_thread`: `subscribe` posts
   to GLib's main loop there, which GPUI doesn't run.
+
+Windows differs from the Mac in:
+- HTML bodies: Blitz only (no WebView switch), same as Linux.
+- Shortcuts: ⌘ is Ctrl (`secondary!` bindings), except the Mac's text navigation.
+- The window: native Win32 title bar with minimize/maximize/close buttons and DWM dark mode
+  (`appears_transparent: false` in `window_options`), opaque background, DirectWrite UI font
+  (`.SystemUIFont` → Segoe UI) and Consolas monospace font.
+- Sign-ins and data: stored in the same locations as the Rust engine on Windows
+  (`%APPDATA%\Mailstream` for `mail.db`/settings/accounts, `%LOCALAPPDATA%\Mailstream` for
+  DPAPI-sealed `<service>.signins`, `%LOCALAPPDATA%\dev.mailstream.Mailstream` for caches).
+- Chat videos open in the system player (inline video playback is macOS/Linux only).
+- `vendor/gpui-fast-windows` is GPUI Fast's Windows platform 0.1.14 with Mailstream patches for
+  HTML clipboard (`HTML Format` / CF_HTML, MS-407), DXGI WARP fallback (`src/directx_devices.rs`),
+  and `DirectXHeadlessRenderer` (`src/directx_renderer.rs`, MS-471) so `python scripts/shots.py`
+  renders headless light and dark screenshots on Windows without a hardware GPU (including on
+  GitHub Actions `windows-latest`).
 
 On the Mac `Mailstream GPUI.app` updates itself as Mailstream Flutter does (MS-219; the
 Application updates section of `Flutter/README.md` has the details both share). `scripts/gpui-bundle.sh`

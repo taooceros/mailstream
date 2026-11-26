@@ -14,9 +14,9 @@ permissions:
   contents: read
 
 jobs:
-  windows:
+  engine:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -32,8 +32,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cargo-workspace-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'GPUI/Cargo.toml') }}
-          restore-keys: windows-cargo-workspace-
+          key: windows-engine-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+          restore-keys: windows-engine-
 
       - name: Toolchain
         run: rustup default stable && cargo --version
@@ -50,16 +50,77 @@ jobs:
         if: ${{ !cancelled() }}
         run: target/release/examples/smoke.exe
 
+  gpui-release:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-gpui-release-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'GPUI/Cargo.toml') }}
+          restore-keys: windows-gpui-release-
+
+      - name: Toolchain
+        run: rustup default stable && cargo --version
+
       - name: GPUI unit tests
-        if: ${{ !cancelled() }}
         run: cargo test -p mailstream-gpui
 
       - name: GPUI release build
         if: ${{ !cancelled() }}
         run: cargo build --release -p mailstream-gpui
 
-      - name: GPUI headless screenshots (light & dark)
+      - name: Package Windows GPUI binary
         if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          if (Test-Path target\release\mailstream-gpui.exe) {
+            Compress-Archive -Path target\release\mailstream-gpui.exe -DestinationPath Mailstream-GPUI-Windows.zip -Force
+          }
+
+      - name: Upload Windows binary artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Mailstream-GPUI-Windows-${{ github.sha }}
+          path: Mailstream-GPUI-Windows.zip
+          retention-days: 14
+          if-no-files-found: warn
+
+  gpui-shots:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-gpui-shots-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'GPUI/Cargo.toml') }}
+          restore-keys: windows-gpui-shots-
+
+      - name: Toolchain
+        run: rustup default stable && cargo --version
+
+      - name: GPUI headless screenshots (light & dark)
         run: |
           mkdir -p windows-shots
           cat <<'EOF' > windows-shots/script.txt
@@ -72,21 +133,11 @@ jobs:
           EOF
           python scripts/shots.py windows-shots/script.txt --out windows-shots
 
-      - name: Package Windows GPUI binary
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          if (Test-Path target\release\mailstream-gpui.exe) {
-            Compress-Archive -Path target\release\mailstream-gpui.exe -DestinationPath Mailstream-GPUI-Windows.zip -Force
-          }
-
-      - name: Upload Windows artifacts
+      - name: Upload Windows screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: Mailstream-GPUI-Windows-${{ github.sha }}
-          path: |
-            Mailstream-GPUI-Windows.zip
-            windows-shots/*.png
+          name: Mailstream-GPUI-Windows-shots-${{ github.sha }}
+          path: windows-shots/*.png
           retention-days: 14
           if-no-files-found: warn

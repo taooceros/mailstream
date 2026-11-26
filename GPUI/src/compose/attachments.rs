@@ -219,10 +219,23 @@ mod tests {
 
     #[test]
     fn file_managers_copies_are_files_and_other_text_is_text() {
-        let nautilus = "x-special/nautilus-clipboard\ncopy\nfile:///tmp/a%20b.pdf\nfile:///tmp/c.png\n";
-        assert_eq!(copied_files(nautilus), Some(vec![PathBuf::from("/tmp/a b.pdf"), PathBuf::from("/tmp/c.png")]));
-        assert_eq!(copied_files("file:///home/me/notes.txt"), Some(vec![PathBuf::from("/home/me/notes.txt")]));
-        assert_eq!(copied_files("see file:///tmp/x"), None);
+        #[cfg(windows)]
+        {
+            let nautilus = "x-special/nautilus-clipboard\ncopy\nfile:///C:/tmp/a%20b.pdf\nfile:///C:/tmp/c.png\n";
+            assert_eq!(
+                copied_files(nautilus),
+                Some(vec![PathBuf::from(r"C:\tmp\a b.pdf"), PathBuf::from(r"C:\tmp\c.png")])
+            );
+            assert_eq!(copied_files("file:///C:/Users/me/notes.txt"), Some(vec![PathBuf::from(r"C:\Users\me\notes.txt")]));
+            assert_eq!(copied_files("see file:///C:/tmp/x"), None);
+        }
+        #[cfg(not(windows))]
+        {
+            let nautilus = "x-special/nautilus-clipboard\ncopy\nfile:///tmp/a%20b.pdf\nfile:///tmp/c.png\n";
+            assert_eq!(copied_files(nautilus), Some(vec![PathBuf::from("/tmp/a b.pdf"), PathBuf::from("/tmp/c.png")]));
+            assert_eq!(copied_files("file:///home/me/notes.txt"), Some(vec![PathBuf::from("/home/me/notes.txt")]));
+            assert_eq!(copied_files("see file:///tmp/x"), None);
+        }
         assert_eq!(copied_files("https://example.com/a.pdf"), None);
         assert_eq!(copied_files("/tmp/a.pdf"), None);
         assert_eq!(copied_files(""), None);
