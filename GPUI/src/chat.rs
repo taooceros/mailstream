@@ -4271,6 +4271,9 @@ mod tests {
                 feed(cx, event(TouchPhase::Moved, dx / 8., dy / 8.));
             }
             pane.read_with(cx, |chat, _| mid_check(chat));
+            // Pause past `swipe::STILL` (100 ms) before lifting so thread preemption during the
+            // loop never turns a short distance drag into a high-velocity flick.
+            std::thread::sleep(Duration::from_millis(120));
             feed(cx, event(TouchPhase::Ended, 0., 0.));
             let _ = cx.refresh();
             std::thread::sleep(Duration::from_millis(10));

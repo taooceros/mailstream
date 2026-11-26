@@ -125,7 +125,8 @@ jobs:
           mkdir -p windows-shots
           cat <<'EOF' > windows-shots/script.txt
           shot inbox
-          click 350 200
+          click 450 405
+          wait 1500
           shot reader
           key secondary-,
           window other
