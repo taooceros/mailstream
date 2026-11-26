@@ -156,7 +156,8 @@ pub fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
             title: Some("Mailstream".into()),
-            appears_transparent: true,
+            // On Windows, `appears_transparent: true` hides the native title bar and caption buttons.
+            appears_transparent: !cfg!(target_os = "windows"),
             traffic_light_position: Some(point(px(16.), px(19.))),
         }),
         window_min_size: Some(size(px(760.), px(420.))),

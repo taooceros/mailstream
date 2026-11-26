@@ -102,6 +102,10 @@ resolver = "3"
 # `RunMode::ComputeSize`, which overwrote children's `unrounded_layout` and `final_layout_entry`
 # with narrow probe dimensions (e.g. 0px) while the container's own `final_layout_entry` cache
 # answered the final `PerformLayout` pass, leaving retained GPUI text truncated to "…" at 0px.
+# `GPUI/vendor/gpui-fast-windows` is GPUI Fast's Windows platform 0.1.14 with two Mailstream
+# patches: MS-407 HTML clipboard (`HTML Format` / `ClipboardString.html` in `src/clipboard.rs`),
+# and MS-471 DXGI WARP fallback (`src/directx_devices.rs`) + offscreen `DirectXHeadlessRenderer`
+# (`src/directx_renderer.rs`, `src/direct_write.rs`) for headless `--shots` screenshots on Windows.
 
 [patch.crates-io]
 stylo_derive = { path = "GPUI/vendor/stylo_derive" }
@@ -109,6 +113,7 @@ gpui-fast = { path = "GPUI/vendor/gpui-fast" }
 gpui-fast-linux = { path = "GPUI/vendor/gpui-fast-linux" }
 h2 = { path = "Engine/vendor/h2" }
 gpui-fast-macos = { path = "GPUI/vendor/gpui-fast-macos" }
+gpui-fast-windows = { path = "GPUI/vendor/gpui-fast-windows" }
 gpui-fast-wgpu = { path = "GPUI/vendor/gpui-fast-wgpu" }
 async-imap = { path = "Engine/vendor/async-imap" }
 iroh-blobs = { path = "Engine/vendor/iroh-blobs" }

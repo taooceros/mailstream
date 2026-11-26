@@ -53,14 +53,12 @@ objc2-core-media = { version = "0.3", default-features = false, features = ["std
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVPlayerItemOutput", "objc2-core-media", "objc2-core-video", "block2"] }
 
-[target.'cfg(all(not(target_os = "macos"), not(target_os = "android")))'.dependencies]
-# Blitz's font lookup (fontique) and GPUI's font-kit share fontconfig-sys; with `dlopen` its
-# functions become a loaded table, which both then read.
-fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
-
 # Whether the desktop blurs behind the window (`blur.rs`, MS-249): the Wayland crates GPUI Fast's
 # Linux platform builds already, with its features.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Blitz's font lookup (fontique) and GPUI's font-kit share fontconfig-sys; with `dlopen` its
+# functions become a loaded table, which both then read.
+fontique = { version = "0.12", default-features = false, features = ["fontconfig-dlopen"] }
 wayland-client = "0.31.11"
 wayland-protocols = { version = "0.32.9", features = ["client", "staging", "unstable"] }
 # Chat's videos (MS-221, `src/video.rs`): GstPlay plays them, its frames come out of an app sink
@@ -74,3 +72,8 @@ gstreamer-play = "0.24"
 gpui_wgpu = { package = "gpui-fast-wgpu", version = "^0.1.14" }
 cosmic-text = "0.19"
 unicode-script = "0.5"
+
+# Windows: `shots` uses `DirectWriteTextSystem` and `DirectXHeadlessRenderer` directly from the
+# vendored `gpui-fast-windows` crate already in the Windows dependency graph.
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows = { package = "gpui-fast-windows", version = "^0.1.14" }

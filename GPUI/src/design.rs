@@ -410,14 +410,13 @@ pub fn tint(color: Hsla, alpha: f32) -> Hsla {
     Hsla { a: color.a * alpha, ..color }
 }
 
-/// The system's UI font: the Mac's own, and on Linux the desktop's sans-serif family as fontconfig
-/// names it (Flutter's `MailFonts`); GPUI's stand-in there is IBM Plex Sans, rarely installed.
+/// The system's UI font: the Mac's and Windows's own (DirectWrite resolves `.SystemUIFont` to
+/// Segoe UI), and on Linux the desktop's sans-serif family as fontconfig names it (Flutter's
+/// `MailFonts`); GPUI's stand-in there is IBM Plex Sans, rarely installed.
 pub fn ui_font() -> &'static str {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "android", target_os = "windows"))]
     return ".SystemUIFont";
-    #[cfg(target_os = "android")]
-    return ".SystemUIFont";
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "windows")))]
     {
         static FAMILY: LazyLock<String> = LazyLock::new(|| {
             let mut fonts =
@@ -429,14 +428,16 @@ pub fn ui_font() -> &'static str {
     }
 }
 
-/// The system's monospace font, for code in chat messages: Menlo on the Mac, the desktop's
-/// monospace family on Linux.
+/// The system's monospace font, for code in chat messages: Menlo on the Mac, Consolas on Windows,
+/// the desktop's monospace family on Linux.
 pub fn mono_font() -> &'static str {
     #[cfg(target_os = "macos")]
     return "Menlo";
+    #[cfg(target_os = "windows")]
+    return "Consolas";
     #[cfg(target_os = "android")]
     return "monospace";
-    #[cfg(not(any(target_os = "macos", target_os = "android")))]
+    #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "windows")))]
     {
         static FAMILY: LazyLock<String> = LazyLock::new(|| {
             let mut fonts =

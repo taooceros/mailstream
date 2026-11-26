@@ -77,17 +77,26 @@ pub fn config(oauth: OAuthConfig) -> TestConfig {
 /// `touch`), each found on the tests' own PATH in a folder without an `omp`, so a child sees
 /// none of the user's: NixOS has no such tools in `/usr/bin` or `/bin`.
 pub fn tools_path() -> String {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut directories: Vec<std::path::PathBuf> = Vec::new();
-    for tool in ["grep", "head", "sleep", "touch"] {
-        let directory = std::env::split_paths(&path)
-            .find(|directory| directory.join(tool).is_file() && !directory.join("omp").exists())
-            .unwrap_or_else(|| panic!("no {tool} on PATH outside a folder holding omp"));
-        if !directories.contains(&directory) {
-            directories.push(directory);
-        }
+    // Fake omp shell-script tests are Unix-only (`omp::tests`); on Windows an empty PATH keeps
+    // tests from ever discovering a user-installed `omp`.
+    #[cfg(windows)]
+    {
+        String::new()
     }
-    std::env::join_paths(directories).unwrap().into_string().unwrap()
+    #[cfg(not(windows))]
+    {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut directories: Vec<std::path::PathBuf> = Vec::new();
+        for tool in ["grep", "head", "sleep", "touch"] {
+            let directory = std::env::split_paths(&path)
+                .find(|directory| directory.join(tool).is_file() && !directory.join("omp").exists())
+                .unwrap_or_else(|| panic!("no {tool} on PATH outside a folder holding omp"));
+            if !directories.contains(&directory) {
+                directories.push(directory);
+            }
+        }
+        std::env::join_paths(directories).unwrap().into_string().unwrap()
+    }
 }
 
 /// `config` with every provider and the token endpoint (`/token`) on `server`.

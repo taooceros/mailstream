@@ -3828,8 +3828,6 @@ dependencies = [
 [[package]]
 name = "gpui-fast-windows"
 version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89bfdc3a922a29f83611fc7f01642533d35260a7f86aa9befb14f2b6dcca093"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -6450,6 +6448,7 @@ dependencies = [
  "fontique",
  "futures",
  "gpui-fast-wgpu",
+ "gpui-fast-windows",
  "gpui-kit",
  "gstreamer",
  "gstreamer-app",

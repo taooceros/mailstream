@@ -51,6 +51,9 @@ pub const SERVICE: &str = "dev.mailstream.Mailstream.shots";
 static PROVIDER: OnceLock<FakeServer> = OnceLock::new();
 /// The engine's data folder, whose accounts.json says what each account was granted so far.
 static SUPPORT: OnceLock<PathBuf> = OnceLock::new();
+/// The engine's cache folder when overridden directly (needed on Windows where `dirs::cache_dir`
+/// queries Win32 known folders instead of environment variables).
+static CACHE: OnceLock<PathBuf> = OnceLock::new();
 /// The last sign-in [`consent`] allowed: the account (`login_hint`, else a new one) and the
 /// scopes asked for.
 static CONSENTED: Mutex<Option<(String, String)>> = Mutex::new(None);
@@ -86,6 +89,12 @@ pub(crate) static DEVICE_KEY: LazyLock<Mutex<Option<[u8; 32]>>> = LazyLock::new(
 /// Starts the provider and signs in every account of the accounts.json in `support` (the
 /// engine's data folder). Call before the engine starts; a second call changes nothing.
 pub fn start(support: &Path) {
+    start_in(support, None);
+}
+
+/// Starts the provider with explicit support and optional cache folders (used on Windows where
+/// `dirs::data_dir`/`dirs::cache_dir` ignore environment variables).
+pub fn start_in(support: &Path, cache: Option<&Path>) {
     if PROVIDER.get().is_some() {
         return;
     }
@@ -97,12 +106,22 @@ pub fn start(support: &Path) {
     *SIGN_INS.lock().expect("sign-ins lock") = signed_in;
     *DEVICE_KEY.lock().expect("device-key lock") = None;
     SUPPORT.set(support.to_path_buf()).ok();
+    if let Some(cache) = cache {
+        CACHE.set(cache.to_path_buf()).ok();
+    }
     PROVIDER.set(FakeServer::start(answer)).ok();
 }
 
 /// `config` on the provider once [`start`] ran; as it is before.
 pub(crate) fn config(mut config: Config) -> Config {
     let Some(server) = PROVIDER.get() else { return config };
+    if let Some(support) = SUPPORT.get() {
+        config.support_directory = support.clone();
+        config.keychain_directory = support.clone();
+    }
+    if let Some(cache) = CACHE.get() {
+        config.cache_directory = cache.clone();
+    }
     config.keychain_service = SERVICE.into();
     config.oauth.token_endpoint = Some(format!("{}/token", server.base));
     config.endpoints = fake_server::endpoints(&server.base);

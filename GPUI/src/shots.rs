@@ -168,22 +168,37 @@ impl Shots {
         std::fs::create_dir_all(&self.out).unwrap_or_else(|error| fail(&format!("{}: {error}", self.out.display())));
         APPEARANCE.set(if self.dark { WindowAppearance::Dark } else { WindowAppearance::Light }).ok();
         let home = data_folder();
-        let support = mailstream_engine::support_directory();
+        #[cfg(target_os = "windows")]
+        let (support, cache) = (home.join("support"), home.join("cache"));
+        #[cfg(not(target_os = "windows"))]
+        let (support, cache) = (mailstream_engine::support_directory(), mailstream_engine::cache_directory());
         let grants = commands.iter().rev().find_map(|(_, command)| match command {
             Command::Accounts(grants) => Some(*grants),
             _ => None,
         });
-        seed::write(&support, &mailstream_engine::cache_directory(), grants.unwrap_or(seed::Grants::All));
+        seed::write(&support, &cache, grants.unwrap_or(seed::Grants::All));
         // Before the engine starts: its accounts sign in to a stand-in provider, so changes
         // (marking read, archive, star, send) succeed.
-        mailstream_engine::shots::start(&support);
+        mailstream_engine::shots::start_in(&support, Some(&cache));
 
-        let platform = gpui::platform::current_platform(true);
-        let mut cx = HeadlessAppContext::with_platform(
-            platform.text_system(),
-            Arc::new(crate::icons::Assets),
-            gpui::platform::current_headless_renderer,
-        );
+        #[cfg(target_os = "windows")]
+        let mut cx = {
+            let text_system: Arc<dyn gpui::PlatformTextSystem> =
+                Arc::new(gpui_windows::DirectWriteTextSystem::new().unwrap_or_else(|error| fail(&format!("DirectWrite: {error}"))));
+            HeadlessAppContext::with_platform(text_system, Arc::new(crate::icons::Assets), || {
+                gpui_windows::DirectXHeadlessRenderer::new()
+                    .map(|renderer| Some(Box::new(renderer) as Box<dyn gpui::PlatformHeadlessRenderer>))
+            })
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut cx = {
+            let platform = gpui::platform::current_platform(true);
+            HeadlessAppContext::with_platform(
+                platform.text_system(),
+                Arc::new(crate::icons::Assets),
+                gpui::platform::current_headless_renderer,
+            )
+        };
         // The engine answers on its own threads, in real time.
         cx.allow_parking();
         let (width, height) = self.size;
@@ -249,7 +264,7 @@ fn data_folder() -> PathBuf {
     let home = parent.join(format!("mailstream-shots-{}", std::process::id()));
     std::fs::remove_dir_all(&home).ok();
     std::fs::create_dir_all(&home).unwrap_or_else(|error| fail(&format!("{}: {error}", home.display())));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         // fontconfig finds the person's own fonts and its cache in the same folders; keep them.
         let real = |variable: &str, fallback: &str| {
@@ -267,6 +282,7 @@ fn data_folder() -> PathBuf {
         link(&real("XDG_CACHE_HOME", ".cache").join("fontconfig"), &home.join("cache/fontconfig"));
     }
     // SAFETY: no other thread runs yet; the engine and GPUI start after this.
+    #[cfg(unix)]
     unsafe {
         #[cfg(target_os = "macos")]
         std::env::set_var("HOME", &home);
@@ -352,7 +368,13 @@ impl Command {
             "key" if !words.is_empty() => {
                 let keys: Vec<String> = words.iter().map(|key| platform_keys(key)).collect();
                 for key in &keys {
-                    let os = if cfg!(target_os = "macos") { OperatingSystem::Mac } else { OperatingSystem::Linux };
+                    let os = if cfg!(target_os = "macos") {
+                        OperatingSystem::Mac
+                    } else if cfg!(target_os = "windows") {
+                        OperatingSystem::Windows
+                    } else {
+                        OperatingSystem::Linux
+                    };
                     Keystroke::parse_with_os(key, os).map_err(|error| format!("key {key}: {error}"))?;
                 }
                 Command::Keys(keys)

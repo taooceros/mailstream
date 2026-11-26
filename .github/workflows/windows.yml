@@ -1,10 +1,8 @@
 name: Windows
 
-# The Rust engine on Windows x64: the engine's tests and an end-to-end smoke test of the UniFFI
-# crate's DLL (mailstream.dll). No accounts, secrets or private mail. Windows work is paused with
-# Flutter, its only front end (MS-300): this runs only by hand, and no longer builds or launches
-# the Flutter app (the steps that did are in this file's history). The engine's tests fail on
-# Windows (MS-295).
+# Mailstream on Windows x64: the Rust engine's tests, UniFFI DLL smoke test, and the GPUI front end
+# (build, unit tests, and headless light/dark screenshots over synthetic mail via DirectX/WARP).
+# No accounts, secrets or private mail.
 on:
   workflow_dispatch:
 
@@ -34,14 +32,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cargo-workspace-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml') }}
+          key: windows-cargo-workspace-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'Engine/Cargo.toml', 'FFI/Cargo.toml', 'FFI/bindgen/Cargo.toml', 'GPUI/Cargo.toml') }}
           restore-keys: windows-cargo-workspace-
 
       - name: Toolchain
         run: rustup default stable && cargo --version
 
       - name: Engine tests
-        run: cd Engine && cargo test
+        run: cargo test -p mailstream-engine
 
       # Also after failed tests, so one run shows every step that fails.
       - name: UniFFI crate (mailstream.dll) and the smoke test
@@ -51,3 +49,44 @@ jobs:
       - name: Smoke test
         if: ${{ !cancelled() }}
         run: target/release/examples/smoke.exe
+
+      - name: GPUI unit tests
+        if: ${{ !cancelled() }}
+        run: cargo test -p mailstream-gpui
+
+      - name: GPUI release build
+        if: ${{ !cancelled() }}
+        run: cargo build --release -p mailstream-gpui
+
+      - name: GPUI headless screenshots (light & dark)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p windows-shots
+          cat <<'EOF' > windows-shots/script.txt
+          shot inbox
+          click 350 200
+          shot reader
+          key secondary-,
+          window other
+          shot settings
+          EOF
+          python scripts/shots.py windows-shots/script.txt --out windows-shots
+
+      - name: Package Windows GPUI binary
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          if (Test-Path target\release\mailstream-gpui.exe) {
+            Compress-Archive -Path target\release\mailstream-gpui.exe -DestinationPath Mailstream-GPUI-Windows.zip -Force
+          }
+
+      - name: Upload Windows artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Mailstream-GPUI-Windows-${{ github.sha }}
+          path: |
+            Mailstream-GPUI-Windows.zip
+            windows-shots/*.png
+          retention-days: 14
+          if-no-files-found: warn

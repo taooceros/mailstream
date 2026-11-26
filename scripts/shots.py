@@ -87,8 +87,9 @@ from repo import clone_tree  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 LINUX = platform.system() == "Linux"
+WINDOWS = platform.system() == "Windows"
 # The shots build, copied aside so a later default build in the same target can't stand in for it.
-BINARY = "target/release/mailstream-gpui-shots"
+BINARY = "target/release/mailstream-gpui-shots.exe" if WINDOWS else "target/release/mailstream-gpui-shots"
 
 
 def fail(message):
@@ -181,21 +182,44 @@ def main():
     out = Path(args.out).resolve() if args.out else Path(tempfile.gettempdir()) / "mailstream-shots" / script.stem
     out.mkdir(parents=True, exist_ok=True)
 
-    commands = []
-    if not args.no_build:
-        target_outside()
-        # Under the machine's compile limit (scripts/capped: Linux's capped slice, MS-268; the
-        # Mac's compile budget, MS-260).
-        commands.append("(cd GPUI && ../scripts/capped cargo build --release --features shots)")
-        commands.append(f"cp target/release/mailstream-gpui {BINARY}")
-    elif not (ROOT / BINARY).exists():
-        fail(f"no {BINARY} yet: run it once without --no-build")
-    appearances = [args.only] if args.only else ["light", "dark"]
-    for appearance in appearances:
-        flags = f"--size {args.size}" + (" --dark" if appearance == "dark" else "") + (" --keep" if args.keep else "")
-        # Without a display to reach, nothing can open on the person's screen.
-        commands.append(f"env -u WAYLAND_DISPLAY -u DISPLAY {BINARY} --shots '{script}' --out '{out}' {flags}")
-    printed = run(commands)
+    if WINDOWS:
+        if not args.no_build:
+            result = subprocess.run(["cargo", "build", "--release", "--features", "shots"], cwd=ROOT / "GPUI")
+            if result.returncode:
+                fail(f"cargo build exited {result.returncode}")
+            import shutil
+            shutil.copy2(ROOT / "target/release/mailstream-gpui.exe", ROOT / BINARY)
+        elif not (ROOT / BINARY).exists():
+            fail(f"no {BINARY} yet: run it once without --no-build")
+        appearances = [args.only] if args.only else ["light", "dark"]
+        printed_lines = []
+        for appearance in appearances:
+            argv = [str(ROOT / BINARY), "--shots", str(script), "--out", str(out), "--size", args.size]
+            if appearance == "dark":
+                argv.append("--dark")
+            if args.keep:
+                argv.append("--keep")
+            result = subprocess.run(argv, cwd=ROOT, stdout=subprocess.PIPE, text=True)
+            if result.returncode:
+                fail(f"exited {result.returncode}")
+            printed_lines.extend(result.stdout.splitlines())
+        printed = "\n".join(printed_lines)
+    else:
+        commands = []
+        if not args.no_build:
+            target_outside()
+            # Under the machine's compile limit (scripts/capped: Linux's capped slice, MS-268; the
+            # Mac's compile budget, MS-260).
+            commands.append("(cd GPUI && ../scripts/capped cargo build --release --features shots)")
+            commands.append(f"cp target/release/mailstream-gpui {BINARY}")
+        elif not (ROOT / BINARY).exists():
+            fail(f"no {BINARY} yet: run it once without --no-build")
+        appearances = [args.only] if args.only else ["light", "dark"]
+        for appearance in appearances:
+            flags = f"--size {args.size}" + (" --dark" if appearance == "dark" else "") + (" --keep" if args.keep else "")
+            # Without a display to reach, nothing can open on the person's screen.
+            commands.append(f"env -u WAYLAND_DISPLAY -u DISPLAY {BINARY} --shots '{script}' --out '{out}' {flags}")
+        printed = run(commands)
     files = [Path(line) for line in printed.splitlines() if line.endswith(".png")]
     for file in files:
         print(file)
